@@ -60,3 +60,78 @@ test_infra_scan_uses_only_the_committed_trivy_config() {
     grep -qF -- '--ignorefile ""' scripts/infra &&
     grep -qF -- "--config=\"${d}{config}\"" scripts/infra
 }
+
+# A throwaway repository (checks list tracked files) with one stack.
+module_repo() {
+  r="$(mktemp -d)"
+  git -C "${r}" init --quiet
+  mkdir -p "${r}/infra/stacks/a" "${r}/infra/modules/ok" "${r}/mods/x"
+  printf 'variable "v" {\n  type = string\n}\n' >"${r}/infra/modules/ok/main.tf"
+  printf 'variable "v" {\n  type = string\n}\n' >"${r}/mods/x/main.tf"
+  printf '%s' "${r}"
+}
+
+# stack_with <repo> <module block body line>: write the stack and track everything.
+stack_with() {
+  printf 'module "m" {\n  %s\n  v = "x"\n}\n' "$2" >"$1/infra/stacks/a/main.tf"
+  git -C "$1" add -A
+}
+
+check_in() {
+  check="$(pwd)/scripts/checks/infra-no-suppressions"
+  rc=0
+  (cd "$1" && "${check}" >/dev/null 2>&1) || rc=$?
+  printf '%s' "${rc}"
+}
+
+test_infra_no_suppressions_allows_module_inside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 0 ]
+}
+
+test_infra_no_suppressions_rejects_module_outside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../../mods/x"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_remote_and_computed_module_sources() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "git::https://example.invalid/x.git"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  stack_with "${r}" 'source = "terraform-aws-modules/s3-bucket/aws"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  stack_with "${r}" 'source = local.where'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_scans_terraform_outside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in mods/x/main.tf mods/x/extra.tftpl mods/x/vals.tfvars mods/x/other.tofu; do
+    printf '# trivy%signore%sAVD-AWS-0107\n' "${colon}" "${colon}" >>"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    [ "${rc}" = 1 ] || {
+      printf 'not caught: %s\n' "${f}"
+      return 1
+    }
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm "${r}/${f}"
+  done
+}
+
+test_infra_no_suppressions_rejects_json_configuration() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  printf '{"module": {"m": {"source": "../../../mods/x"}}}\n' >"${r}/infra/stacks/a/extra.tf.json"
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}

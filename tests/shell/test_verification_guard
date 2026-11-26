@@ -115,3 +115,21 @@ test_guard_flags_infra_inline_suppressions() {
     [ "${rc}" = 3 ] || return 1
   done
 }
+
+test_guard_flags_every_mise_config_location() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  for f in .mise.toml mise.toml .mise/config.toml mise/config.toml .config/mise.toml \
+    .config/mise/config.toml mise.local.toml mise.ci.toml .mise.local.toml .mise.dev.toml \
+    .tool-versions sub/.config/mise.toml; do
+    r="$(guard_repo)"
+    dir="$(dirname "${r}/${f}")"
+    mkdir -p "${dir}"
+    printf '[env]\nTRIVY_SKIP_FILES = "**"\n' >"${r}/${f}"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    if [ "${rc}" != 3 ]; then
+      printf 'not flagged: %s\n' "${f}"
+      return 1
+    fi
+  done
+}

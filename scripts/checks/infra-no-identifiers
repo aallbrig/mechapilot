@@ -5,9 +5,10 @@
 #
 # Flags: 12-digit account IDs, ARNs that carry an account, Route 53 hosted-zone
 # IDs, CloudFront distribution / origin-access IDs, access key IDs and email
-# addresses. In provider lock files (.terraform.lock.hcl) only, the "h1:..." /
-# "zh:..." hashes are removed before matching, so their digits are never
-# mistaken for account IDs; everywhere else such strings are scanned as-is.
+# addresses. In provider lock files (.terraform.lock.hcl) only, strings with the
+# exact shape of a provider hash ("zh:" + 64 hex, "h1:" + 43 base64 + "=") are
+# removed before matching, so hash bytes are never mistaken for IDs. Anything
+# else, including a short "zh:<digits>" in a lock file, is scanned as-is.
 # Reports file, line and kind only: the matched text is never printed, so a
 # finding does not leak into public CI logs.
 set -eu
@@ -41,7 +42,9 @@ status=0
 while IFS= read -r f; do
   [ -f "${f}" ] || continue
   case "${f##*/}" in
-    .terraform.lock.hcl) sed -E 's/"(h1|zh):[A-Za-z0-9+\/=]+"/""/g' "${f}" >"${scrubbed}" ;;
+    .terraform.lock.hcl)
+      sed -E -e 's/"zh:[0-9a-f]{64}"/""/g' -e 's/"h1:[A-Za-z0-9+\/]{43}="/""/g' "${f}" >"${scrubbed}"
+      ;;
     *) cp "${f}" "${scrubbed}" ;;
   esac
   while IFS="${tab}" read -r kind regex; do

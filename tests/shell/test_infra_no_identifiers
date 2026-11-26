@@ -58,9 +58,17 @@ EOF
   scripts/checks/infra-no-identifiers "${f}"
 }
 
+# Hash-shaped strings whose bytes look like a hosted-zone ID ("/Z.../" inside base64).
 lock_hashes() {
-  printf '    "zh:%s",\n' "$(printf '%s' 123456789012)"
-  printf '    "h1:Z%s/abc+def=",\n' "$(printf '%s' 0123456789ABCDEFGHIJ)"
+  zone="Z$(printf '%s' 0123456789ABCDEFGHIJ)"
+  printf '    "h1:abc/%s/abcdefghijklmnopq=",\n' "${zone}"
+  printf '    "zh:%s",\n' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+}
+
+test_infra_no_identifiers_rejects_short_hash_lookalikes_in_lock_files() {
+  d="$(mktemp -d)"
+  printf '    "zh:%s",\n' "$(printf '%s' 123456789012)" >"${d}/.terraform.lock.hcl"
+  ! scripts/checks/infra-no-identifiers "${d}/.terraform.lock.hcl"
 }
 
 test_infra_no_identifiers_ignores_lock_file_hashes() {
@@ -74,7 +82,7 @@ test_infra_no_identifiers_scans_hash_strings_outside_lock_files() {
   lock_hashes >"${d}/main.tf"
   out="$(scripts/checks/infra-no-identifiers "${d}/main.tf" 2>&1 || true)"
   case "${out}" in
-    *account-id*hosted-zone-id*) return 0 ;;
+    *hosted-zone-id*) return 0 ;;
     *) return 1 ;;
   esac
 }

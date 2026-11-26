@@ -25,7 +25,9 @@ tasks:
     cmds:
       - |
         missing=0
-        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator tofu tflint tflint-ruleset-aws trivy; do
+        tools="task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator"
+        tools="$tools tofu tflint tflint-ruleset-aws trivy"
+        for t in $tools; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
         if [ -z "${CI:-}" ] && [ "$(git config core.hooksPath)" != ".githooks" ]; then

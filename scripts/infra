@@ -17,6 +17,17 @@ export LC_ALL
 root="infra"
 cmd="${1:?usage: scripts/infra validate|lint|scan|plan|apply [stack]}"
 
+# The tools take settings from the environment (TRIVY_SKIP_FILES,
+# TRIVY_MISCONFIG_SCANNERS, TFLINT_*, TF_CLI_ARGS_*, ...), which a mise [env]
+# block or CI could set silently. Clear them all: only the committed configs
+# and the flags below decide what is checked.
+for v in $(env | sed -n -e 's/^\(TRIVY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TFLINT_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TF_CLI_ARGS[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "${v}"
+done
+for v in TF_CLI_CONFIG_FILE TF_PLUGIN_CACHE_DIR TF_DATA_DIR TF_WORKSPACE; do
+  unset "${v}"
+done
+
 # Every directory under infra/ that holds .tf files, sorted, one per line.
 tf_dirs() {
   find "${root}" -name .terraform -prune -o -type f -name '*.tf' -print |
