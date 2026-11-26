@@ -327,6 +327,7 @@ test_supervisor_honours_stop_file() {
   d="$(mktemp -d)"
   stubs "${d}"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
   supervisor "${d}" stop >/dev/null || return 1
   [ -e "${d}/state/stop" ] || return 1
   out="$(AGENT_LOOP_MAX_TICKS=3 supervisor "${d}" run)" || return 1
@@ -466,6 +467,7 @@ test_supervisor_survives_a_failing_tick() {
   mkdir -p "${d}/worktree" "${d}/state"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
   : >"${d}/tmux-broken"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
   out="$(AGENT_LOOP_MAX_TICKS=2 supervisor "${d}" run 2>&1)" || {
     printf '%s\n' "${out}"
     return 1
