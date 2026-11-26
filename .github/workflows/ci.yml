@@ -38,14 +38,6 @@ jobs:
       - name: task ci
         run: task ci
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-results
-          path: build/test-results/
-          if-no-files-found: error
-
       - name: Verification guard (informational; the merge gate recomputes it)
         if: github.event_name == 'pull_request'
         run: |
@@ -63,8 +55,16 @@ jobs:
           issues="$(gh pr view "${PR_NUMBER}" --json closingIssuesReferences --jq '.closingIssuesReferences[].number')"
           if [ -z "${issues}" ]; then
             case "${PR_AUTHOR}" in
-              dependabot*) echo "Dependabot PR: no linked issue required."; exit 0 ;;
+              "dependabot[bot]") echo "Dependabot PR: no linked issue required."; exit 0 ;;
               *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
             esac
           fi
-          for n in ${issues}; do scripts/verify-acceptance "${n}"; done
+          for n in ${issues}; do ACCEPTANCE_RECORD=build/test-results/acceptance.tsv scripts/verify-acceptance "${n}"; done
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: build/test-results/
+          if-no-files-found: error

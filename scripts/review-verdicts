@@ -1,0 +1,31 @@
+#!/bin/sh
+# Count adversarial review verdicts on a PR (see AGENTS.md "Delivery").
+#
+# Usage: scripts/review-verdicts <pr.json> <head-sha> <owner-login>
+#   <pr.json>: output of `gh pr view --json comments`
+# Prints "<passes> <blocks>".
+#
+# Verdict lines, from comments authored by <owner-login> only, in comment order:
+#   review-verdict: pass|block sha=<sha> reviewer=<tag>
+# Each reviewer's latest verdict counts. A block stands (whatever its sha) until
+# that reviewer passes the current head; a pass counts only for <head-sha>.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+json="${1:?usage: review-verdicts <pr.json> <head-sha> <owner-login>}"
+head_sha="${2:?head sha required}"
+owner="${3:?owner login required}"
+
+latest="$(mktemp)"
+trap 'rm -f "${latest}"' EXIT
+
+jq -r --arg owner "${owner}" '
+  [.comments[] | select(.author.login == $owner) | .body | gsub("\r"; "")
+   | capture("(?mi)^[[:space:]]*review-verdict:[[:space:]]*(?<v>pass|block)[[:space:]]+sha=(?<s>[0-9a-f]+)[[:space:]]+reviewer=(?<r>[A-Za-z0-9-]+)[[:space:]]*$"; "g")
+   | {v: (.v | ascii_downcase), s, r: (.r | ascii_downcase)}]
+  | group_by(.r) | map(last) | .[] | [.r, .v, .s] | @tsv' "${json}" >"${latest}"
+
+passes="$(awk -F '\t' -v sha="${head_sha}" '$2 == "pass" && $3 == sha' "${latest}" | wc -l | tr -d ' ')"
+blocks="$(awk -F '\t' '$2 == "block"' "${latest}" | wc -l | tr -d ' ')"
+printf '%s %s\n' "${passes}" "${blocks}"

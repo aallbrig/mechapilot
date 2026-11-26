@@ -31,21 +31,21 @@ test_fails_when_junit_test_missing() {
 
 test_passes_when_junit_test_passed() {
   d="$(mktemp -d)"
-  printf '<testsuite><testcase classname="c" name="test_large_files_allows_small_file"/></testsuite>\n' >"${d}/a.xml"
+  printf '<testsuite><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"/></testsuite>\n' >"${d}/shell.xml"
   f="$(write_body "## Acceptance criteria" "- [x] small ${bt}test:test_large_files_allows_small_file${bt}")"
   VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
 }
 
 test_fails_when_junit_test_failed() {
   d="$(mktemp -d)"
-  printf '<testsuite><testcase classname="c" name="spawns_wave"><failure/></testcase></testsuite>\n' >"${d}/a.xml"
-  f="$(write_body "## Acceptance criteria" "- [x] waves ${bt}test:spawns_wave${bt}")"
+  printf '<testsuite><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"><failure/></testcase></testsuite>\n' >"${d}/shell.xml"
+  f="$(write_body "## Acceptance criteria" "- [x] small ${bt}test:test_large_files_allows_small_file${bt}")"
   ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
 }
 
 junit_with() {
   d="$(mktemp -d)"
-  printf '%s\n' "$@" >"${d}/a.xml"
+  printf '%s\n' "$@" >"${d}/shell.xml"
   printf '%s' "${d}"
 }
 
@@ -68,7 +68,7 @@ test_rejects_forged_result_for_undefined_test() {
 }
 
 test_rejects_duplicate_test_results() {
-  d="$(junit_with '<testsuite><testcase classname="a" name="test_large_files_allows_small_file"/><testcase classname="b" name="test_large_files_allows_small_file"><failure/></testcase></testsuite>')"
+  d="$(junit_with '<testsuite><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"/><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"/></testsuite>')"
   f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
   ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
 }
@@ -100,4 +100,37 @@ test_counts_star_and_numbered_items() {
 test_rejects_multiple_check_references() {
   f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:does-not-exist${bt} ${bt}check:safe-filenames${bt}")"
   ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
+}
+
+test_rejects_results_outside_runner_files() {
+  d="$(mktemp -d)"
+  printf '<testsuite><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"/></testsuite>\n' >"${d}/forged.xml"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_test_defined_outside_runner_discovery() {
+  d="$(junit_with '<testsuite><testcase classname="tests/fixtures/defs" name="test_large_files_allows_small_file"/></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_classname_file_that_does_not_define_test() {
+  d="$(junit_with '<testsuite><testcase classname="tests/shell/test_verify_acceptance" name="test_large_files_allows_small_file"/></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_evidence_mode_judges_recorded_results_without_running() {
+  e="$(mktemp)"
+  printf 'task\tlint:yaml\tpass\ncheck\tlarge-files\tfail\n' >"${e}"
+  f="$(write_body "## Acceptance criteria" "- [ ] y ${bt}task:lint:yaml${bt}")"
+  ACCEPTANCE_EVIDENCE="${e}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "$(mktemp -d)"
+  f="$(write_body "## Acceptance criteria" "- [ ] z ${bt}check:large-files${bt}")"
+  ! ACCEPTANCE_EVIDENCE="${e}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "$(mktemp -d)"
+}
+
+test_evidence_mode_fails_on_missing_evidence() {
+  f="$(write_body "## Acceptance criteria" "- [ ] y ${bt}task:lint:yaml${bt}")"
+  ! ACCEPTANCE_EVIDENCE="$(mktemp)" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "$(mktemp -d)"
 }

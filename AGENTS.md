@@ -29,9 +29,9 @@ Work on a branch, open a PR whose body links its issue with `Closes #<issue>`, a
 
 1. Every list item under the issue's `## Acceptance criteria` ends with exactly one check reference (`task:<target>`, `check:<name>`, `test:[<suite>::]<name>` or `e2e:<name>`). Test names must match exactly, and the test must be defined in test source.
 2. The `ci` check is green on the PR's head commit. Its JUnit artifact is the evidence.
-3. Adversarial reviewer subagents post PR comments ending in `review-verdict: pass sha=<head-sha>` (or `block`). A new push invalidates the earlier verdicts.
+3. Adversarial reviewer subagents post PR comments, from the owner account, whose last line is `review-verdict: pass sha=<head-sha> reviewer=<tag>` (or `block`). Each reviewer uses a distinct tag (e.g. `correctness`, `gate-bypass`). A new push invalidates earlier passes.
 4. If `scripts/checks/verification-guard` exits 3 (the PR touches the verification stack), two independent passing reviews are required.
-5. Merge with `task merge-gate -- <pr> --merge` from an up-to-date `main`. The gate uses main's copies of its own scripts, so a PR can't weaken the gate that judges it.
+5. Merge with `task merge-gate -- <pr> --merge`, run from an up-to-date checkout of `main` (the gate refuses to run unless it is main's copy). It never runs PR code: it uses main's copies of its scripts, reads PR source through `git show`, and judges only the evidence the `ci` workflow recorded for the head commit. Fork PRs are never auto-merged, and linked issues must be labelled `ready-for-agent`.
 
 Releases (`v*` tags), applying infrastructure changes, and anything that needs new secrets are for humans only.
 

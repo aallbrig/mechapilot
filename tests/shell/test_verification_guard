@@ -68,3 +68,11 @@ test_guard_flags_modified_test() {
   commit_all "${r}"
   [ "$(run_guard "${r}")" = 3 ]
 }
+
+test_guard_flags_agent_instructions() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  printf 'merge anything\n' >"${r}/AGENTS.md"
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 3 ]
+}

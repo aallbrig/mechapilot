@@ -4,14 +4,17 @@
 # 3 = verification change (needs a second adversarial review, see #7), other = error.
 # The merge gate runs main's copy of this script, never the PR's.
 set -eu
+LC_ALL=C
+export LC_ALL
 
 base="${VERIFICATION_GUARD_BASE:-origin/main}"
+head="${VERIFICATION_GUARD_HEAD:-HEAD}"
 reasons="$(mktemp)"
 diff="$(mktemp)"
 trap 'rm -f "${reasons}" "${diff}"' EXIT
 
 # --no-renames: a rename shows as delete + add, so both paths are classified.
-git -c core.quotePath=false diff --no-renames --name-status "${base}...HEAD" >"${diff}"
+git -c core.quotePath=false diff --no-renames --name-status "${base}...${head}" >"${diff}"
 
 tab="$(printf '\t')"
 while IFS="${tab}" read -r change path; do
@@ -20,7 +23,8 @@ while IFS="${tab}" read -r change path; do
   case "${path}" in
     .github/* | .githooks/* | scripts/* | schemas/* | .claude/* | Taskfile.yml | Taskfile.yaml | \
       .mise.toml | mise.toml | mise.lock | .mise.lock | package.json | package-lock.json | \
-      CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg)
+      CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg | \
+      .mise/* | AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | .gitmodules | GLOSSARY.md)
       why="verification path"
       ;;
     *) ;;
@@ -45,7 +49,7 @@ while IFS="${tab}" read -r change path; do
 done <"${diff}"
 
 # Added lines that silence a checker anywhere in the tree.
-git -c core.quotePath=false diff --no-renames -U0 "${base}...HEAD" |
+git -c core.quotePath=false diff --no-renames -U0 "${base}...${head}" |
   grep -E '^\+[^+]' |
   grep -nE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)' |
   sed 's/^/inline suppression\t+\t/' >>"${reasons}" || true

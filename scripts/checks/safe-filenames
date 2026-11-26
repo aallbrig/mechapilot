@@ -2,6 +2,8 @@
 # Fail on filenames that break tooling: outside the legacy unity/ tree, every path
 # may only use [A-Za-z0-9._/@+-]. Args: none (all tracked), --staged, or paths.
 set -eu
+LC_ALL=C
+export LC_ALL
 # shellcheck source=../lib-paths
 . "$(dirname "$0")/../lib-paths"
 

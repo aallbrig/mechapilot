@@ -1,14 +1,17 @@
 #!/bin/sh
-# The Provably Complete merge gate (#7). Run from an up-to-date checkout of main:
-# it uses main's copies of the gate scripts, never the PR's.
+# The Provably Complete merge gate (#7).
 #
 # Usage: scripts/merge-gate <pr-number> [--merge]
-# Exit 0 when the PR may merge (and merges it with --merge), non-zero otherwise.
+#
+# Trust model: this script never executes code from the PR. It uses main's
+# copies of the gate scripts, reads PR source only through `git show`, and
+# judges only evidence that the `ci` workflow (GitHub Actions) recorded for
+# the PR's exact head commit. Verdicts count only from the repository owner's
+# account, once per distinct reviewer tag.
 set -eu
 
 pr="${1:?usage: merge-gate <pr-number> [--merge]}"
 do_merge="${2:-}"
-repo_root="$(git rev-parse --show-toplevel)"
 gate="$(mktemp -d)"
 trap 'rm -rf "${gate}"' EXIT
 
@@ -17,71 +20,81 @@ fail() {
   exit 1
 }
 
-git fetch --quiet origin main "pull/${pr}/head:refs/merge-gate/${pr}"
-for s in scripts/verify-acceptance scripts/checks/verification-guard scripts/lib-paths; do
-  mkdir -p "${gate}/$(dirname "${s}")"
-  git show "origin/main:${s}" >"${gate}/${s}" 2>/dev/null || fail "main has no ${s}"
-  chmod +x "${gate}/${s}"
+ref="refs/merge-gate/${pr}"
+git fetch --quiet --force origin main "+pull/${pr}/head:${ref}"
+for s in scripts/verify-acceptance scripts/checks/verification-guard scripts/review-verdicts; do
+  mkdir -p "${gate}/main/$(dirname "${s}")"
+  git show "origin/main:${s}" >"${gate}/main/${s}" 2>/dev/null || fail "main has no ${s}"
+  chmod +x "${gate}/main/${s}"
 done
 
-gh pr view "${pr}" --json headRefOid,state,isDraft,mergeable,closingIssuesReferences,author >"${gate}/pr.json"
+owner="$(gh repo view --json owner --jq .owner.login)"
+# This must be main's own copy of the gate, run from main.
+git show origin/main:scripts/merge-gate >"${gate}/self" 2>/dev/null || fail "main has no scripts/merge-gate"
+cmp -s "${gate}/self" "$0" || fail "run main's copy of scripts/merge-gate (this file differs from origin/main)"
+
+gh pr view "${pr}" --json headRefOid,state,isDraft,closingIssuesReferences,author,comments,isCrossRepository >"${gate}/pr.json"
 head_sha="$(jq -r .headRefOid "${gate}/pr.json")"
+fetched_sha="$(git rev-parse "${ref}")"
+[ "${head_sha}" = "${fetched_sha}" ] || fail "fetched ${fetched_sha} but PR head is ${head_sha}"
 state="$(jq -r .state "${gate}/pr.json")"
 draft="$(jq -r .isDraft "${gate}/pr.json")"
-author="$(jq -r .author.login "${gate}/pr.json")"
 [ "${state}" = OPEN ] || fail "PR is ${state}"
 [ "${draft}" = false ] || fail "PR is a draft"
+author="$(jq -r .author.login "${gate}/pr.json")"
+cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
+[ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
 
-# 1. The required ci check passed on exactly this head commit.
-ci="$(gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" \
-  --jq '[.check_runs[] | select(.name == "ci")] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+# 1. The ci check from GitHub Actions passed on exactly this head commit.
+ci="$(gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" --jq \
+  '[.check_runs[] | select(.name == "ci" and .app.slug == "github-actions")] | sort_by(.completed_at) | last | .conclusion // "missing"')"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
-# A detached worktree at the PR head: nothing touches the caller's checkout.
-git -C "${repo_root}" -c advice.detachedHead=false worktree add --quiet --detach "${gate}/tree" "refs/merge-gate/${pr}"
-cleanup() {
-  git -C "${repo_root}" worktree remove --force "${gate}/tree" 2>/dev/null || true
-  rm -rf "${gate}"
-}
-trap cleanup EXIT
-
-# 2. Acceptance evidence: the JUnit artifact from that ci run, judged by main's verifier.
+# 2. Acceptance: judged by main's verifier from the ci run's recorded evidence.
 issues="$(jq -r '.closingIssuesReferences[].number' "${gate}/pr.json")"
 if [ -z "${issues}" ]; then
   case "${author}" in
-    app/dependabot | dependabot*) ;;
+    app/dependabot | "dependabot[bot]") ;;
     *) fail "no linked issue (use 'Closes #n')" ;;
   esac
 else
-  run_id="$(gh run list --commit "${head_sha}" --workflow ci --json databaseId,conclusion \
+  for n in ${issues}; do
+    labels="$(gh issue view "${n}" --json labels --jq '[.labels[].name] | join(",")')"
+    case ",${labels}," in
+      *,ready-for-agent,*) ;;
+      *) fail "linked issue #${n} is not labelled ready-for-agent" ;;
+    esac
+  done
+  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --json databaseId,conclusion \
     --jq '[.[] | select(.conclusion == "success")][0].databaseId // empty')"
-  [ -n "${run_id}" ] || fail "no successful ci run for ${head_sha}"
-  gh run download "${run_id}" --name test-results --dir "${gate}/junit"
+  [ -n "${run_id}" ] || fail "no successful ci.yml run for ${head_sha}"
+  gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
   for n in ${issues}; do
     rc=0
-    (cd "${gate}/tree" && "${gate}/scripts/verify-acceptance" "${n}" "${gate}/junit") || rc=$?
+    ACCEPTANCE_EVIDENCE="${gate}/evidence/acceptance.tsv" VERIFY_ACCEPTANCE_REF="${ref}" \
+      "${gate}/main/scripts/verify-acceptance" "${n}" "${gate}/evidence" || rc=$?
     [ "${rc}" -eq 0 ] || fail "acceptance criteria of #${n} not proven"
   done
 fi
 
-# 3. Verification guard, computed by main's script on the PR diff.
+# 3. Verification guard: main's script on the PR diff (git diff only, no checkout).
 rc=0
-(cd "${gate}/tree" && VERIFICATION_GUARD_BASE=origin/main "${gate}/scripts/checks/verification-guard") || rc=$?
+VERIFICATION_GUARD_BASE=origin/main VERIFICATION_GUARD_HEAD="${ref}" \
+  "${gate}/main/scripts/checks/verification-guard" || rc=$?
 case "${rc}" in
-  0) required_reviews=1 ;;
-  3) required_reviews=2 ;;
+  0) required=1 ;;
+  3) required=2 ;;
   *) fail "verification guard errored (${rc})" ;;
 esac
 
-# 4. Adversarial reviews bound to this exact head commit.
-passes="$(gh pr view "${pr}" --json comments --jq \
-  "[.comments[].body | select(test(\"(?m)^review-verdict: pass sha=${head_sha}\$\"))] | length")"
-blocks="$(gh pr view "${pr}" --json comments --jq \
-  "[.comments[].body | select(test(\"(?m)^review-verdict: block sha=${head_sha}\$\"))] | length")"
-[ "${blocks}" -eq 0 ] || fail "${blocks} blocking review(s) on ${head_sha}"
-[ "${passes}" -ge "${required_reviews}" ] || fail "${passes}/${required_reviews} passing reviews on ${head_sha}"
+# 4. Adversarial reviews: owner-authored, bound to the head SHA, distinct reviewers.
+counts="$("${gate}/main/scripts/review-verdicts" "${gate}/pr.json" "${head_sha}" "${owner}")"
+passes="${counts% *}"
+blocks="${counts#* }"
+[ "${blocks}" -eq 0 ] || fail "${blocks} reviewer(s) still blocking (latest verdict is block)"
+[ "${passes}" -ge "${required}" ] || fail "${passes}/${required} distinct passing reviews on ${head_sha}"
 
-printf 'merge-gate: PASS: PR #%s at %s (%s review(s))\n' "${pr}" "${head_sha}" "${passes}"
+printf 'merge-gate: PASS: PR #%s at %s (%s/%s reviews)\n' "${pr}" "${head_sha}" "${passes}" "${required}"
 if [ "${do_merge}" = "--merge" ]; then
   gh pr merge "${pr}" --squash --delete-branch --match-head-commit "${head_sha}"
 fi

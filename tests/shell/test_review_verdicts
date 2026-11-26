@@ -1,0 +1,35 @@
+#!/bin/sh
+# Tests for scripts/review-verdicts.
+
+comments() {
+  f="$(mktemp)"
+  printf '{"comments":[%s]}\n' "$1" >"${f}"
+  printf '%s' "${f}"
+}
+
+test_verdicts_ignore_non_owner_comments() {
+  f="$(comments '{"author":{"login":"stranger"},"body":"review-verdict: pass sha=abc reviewer=x"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "0 0" ]
+}
+
+test_verdicts_count_each_reviewer_once() {
+  f="$(comments '{"author":{"login":"owner"},"body":"review-verdict: pass sha=abc reviewer=a"},{"author":{"login":"owner"},"body":"review-verdict: pass sha=abc reviewer=a"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "1 0" ]
+}
+
+test_verdicts_pass_requires_head_sha() {
+  f="$(comments '{"author":{"login":"owner"},"body":"review-verdict: pass sha=old reviewer=a"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "0 0" ]
+}
+
+test_verdicts_block_stands_until_same_reviewer_passes() {
+  f="$(comments '{"author":{"login":"owner"},"body":"review-verdict: block sha=old reviewer=a"},{"author":{"login":"owner"},"body":"review-verdict: pass sha=abc reviewer=b"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "1 1" ]
+  f="$(comments '{"author":{"login":"owner"},"body":"review-verdict: block sha=old reviewer=a"},{"author":{"login":"owner"},"body":"review-verdict: pass sha=abc reviewer=a"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "1 0" ]
+}
+
+test_verdicts_tolerate_crlf_case_and_trailing_space() {
+  f="$(comments '{"author":{"login":"owner"},"body":"notes\r\nReview-Verdict: BLOCK sha=abc reviewer=A \r\nmore"}')"
+  [ "$(scripts/review-verdicts "${f}" abc owner)" = "0 1" ]
+}

@@ -11,8 +11,21 @@
 #                          exactly one JUnit <testcase> with that exact name (and
 #                          classname containing <suite>, if given) exists in
 #                          <junit-dir>, it passed, and a test with that name is
-#                          defined in test source (so results can't be forged).
+#                          defined in the very file the runner reports as its
+#                          classname (so results can't be forged).
+#
+# Modes:
+#   default                  task:/check: refs are executed here. With
+#                            ACCEPTANCE_RECORD=<file>, each result is appended
+#                            as "<kind>\t<name>\tpass|fail" (CI records evidence).
+#   ACCEPTANCE_EVIDENCE=<f>  nothing is executed: task:/check: refs are judged
+#                            from that recorded evidence (used by merge-gate).
+#   VERIFY_ACCEPTANCE_REF=<r> test source is read from git ref <r>, not the tree.
+#
+# Only the test runners' own result files count: shell.xml and godot.xml.
 set -eu
+LC_ALL=C
+export LC_ALL
 
 issue="${1:?usage: verify-acceptance <issue-number> [junit-dir]}"
 junit_dir="${2:-build/test-results}"
@@ -41,18 +54,29 @@ fi
 
 # Flatten every JUnit testcase to: classname<TAB>name<TAB>pass|fail
 : >"${work}/cases"
-for xml in "${junit_dir}"/*.xml; do
+for runner_file in shell.xml godot.xml; do
+  xml="${junit_dir}/${runner_file}"
   [ -f "${xml}" ] || continue
   yq -p xml -o json '.' "${xml}" | jq -r '
     [.. | objects | .testcase? // empty | if type == "array" then .[] else . end]
     | .[]
     | [(.["+@classname"] // ""), (.["+@name"] // ""),
-       (if (has("failure") or has("error") or has("skipped")) then "fail" else "pass" end)]
+       (if (has("failure") or has("error") or has("skipped")
+            or ((.["+@status"] // "") | test("^(skipped|failed|failure|error|disabled)$"; "i"))) then "fail" else "pass" end)]
     | @tsv' >>"${work}/cases"
 done
 
 # Each prover sets result=pass only when its evidence holds; it never fails the
 # script itself, so set -e stays meaningful for real errors.
+# Print a source file from the PR ref (merge gate) or the working tree.
+source_of() {
+  if [ -n "${VERIFY_ACCEPTANCE_REF:-}" ]; then
+    git show "${VERIFY_ACCEPTANCE_REF}:$1" 2>/dev/null || true
+  elif [ -f "$1" ]; then
+    cat "$1"
+  fi
+}
+
 prove_test() {
   result=fail
   spec="$1"
@@ -64,30 +88,59 @@ prove_test() {
     "" | *[!A-Za-z0-9_]*) return 0 ;;
     *) ;;
   esac
-  awk -F '\t' -v n="${name}" -v s="${suite}" '
-    $2 == n && (s == "" || index($1, s) > 0) { print $3 }
-  ' "${work}/cases" >"${work}/hits"
+  awk -F '\t' -v n="${name}" '$2 == n { print $1 "\t" $3 }' "${work}/cases" >"${work}/hits"
   hits="$(wc -l <"${work}/hits" | tr -d ' ')"
   [ "${hits}" -eq 1 ] || return 0
-  verdict="$(cat "${work}/hits")"
+  classname="$(cut -f 1 "${work}/hits")"
+  verdict="$(cut -f 2 "${work}/hits")"
   [ "${verdict}" = pass ] || return 0
-  # The test must be defined in test source, so a forged JUnit entry can't count.
-  grep -rlE "^(func[[:space:]]+)?${name}[[:space:]]*\\(" tests godot/tests >"${work}/defs" 2>/dev/null || true
-  [ -s "${work}/defs" ] || return 0
+  # The classname is the test file; it must be one the runners discover.
+  case "${classname}" in
+    tests/shell/test_* | godot/tests/*test_*.gd) ;;
+    *) return 0 ;;
+  esac
+  case "${classname}" in
+    *..*) return 0 ;;
+    *) ;;
+  esac
+  if [ -n "${suite}" ]; then
+    file_base="${classname##*/}"
+    [ "${suite}" = "${classname}" ] || [ "${suite}" = "${file_base}" ] || [ "${suite}" = "${file_base%.gd}" ] || return 0
+  fi
+  # That file must define the test.
+  source_of "${classname}" >"${work}/src"
+  grep -qE "^(func[[:space:]]+)?${name}[[:space:]]*\\(" "${work}/src" || return 0
   result=pass
+}
+
+# Look up recorded evidence; sets result=pass if "<kind>\t<name>\tpass" exists.
+recorded() {
+  result=fail
+  [ -f "${ACCEPTANCE_EVIDENCE}" ] || return 0
+  found="$(awk -F '\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print $3 }' "${ACCEPTANCE_EVIDENCE}" | tail -n 1)"
+  [ "${found}" = pass ] && result=pass
+  return 0
+}
+
+record() {
+  if [ -n "${ACCEPTANCE_RECORD:-}" ]; then printf '%s\t%s\t%s\n' "$1" "$2" "${result}" >>"${ACCEPTANCE_RECORD}"; fi
 }
 
 prove_task() {
   result=fail
   case "$1" in
     "" | *[!a-z0-9:-]* | [!a-z]*) return 0 ;;
-    default | setup | doctor | fmt | ci | ci:fast | verify:*) return 0 ;;
+    default | setup | doctor | fmt | ci | ci:fast | verify:* | merge-gate) return 0 ;;
     *) ;;
   esac
+  if [ -n "${ACCEPTANCE_EVIDENCE:-}" ]; then
+    recorded task "$1"
+    return 0
+  fi
   rc=0
   task "$1" >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
-  return 0
+  record task "$1"
 }
 
 prove_check() {
@@ -96,6 +149,10 @@ prove_check() {
     "" | *[!a-z0-9-]* | [!a-z]*) return 0 ;;
     *) ;;
   esac
+  if [ -n "${ACCEPTANCE_EVIDENCE:-}" ]; then
+    recorded check "$1"
+    return 0
+  fi
   script="scripts/checks/$1"
   [ -x "${script}" ] || return 0
   tracked="$(git ls-files -- "${script}")"
@@ -103,7 +160,7 @@ prove_check() {
   rc=0
   "${script}" >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
-  return 0
+  record check "$1"
 }
 
 failures=0
