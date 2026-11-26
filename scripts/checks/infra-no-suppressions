@@ -9,7 +9,9 @@
 #      anywhere in the repo (.tf, .tofu, .tftpl, .tfvars, .hcl, ...).
 #   2. Any trivy or tflint config / ignore file other than the two that
 #      scripts/infra passes explicitly: infra/trivy.yaml and infra/.tflint.hcl.
-#   3. JSON-syntax configuration (.tf.json, .tofu.json), which check 4 cannot parse.
+#   3. JSON-syntax configuration (.tf.json, .tofu.json), which check 4 cannot
+#      parse, and override files (override.tf, *_override.tf, .tofu and JSON
+#      forms), anywhere in the repo.
 #   4. Module blocks under infra/ whose source is not a local path inside
 #      infra/ (a module elsewhere would escape checks 1 and 2).
 set -eu
@@ -84,8 +86,13 @@ while IFS= read -r f; do
       ;;
   esac
 
-  # 3. JSON-syntax configuration.
+  # 3. JSON-syntax configuration, and override files: OpenTofu merges an
+  #    override into another file's blocks, but trivy scans the unmerged base.
   case "${lower}" in
+    override.tf | *_override.tf | override.tofu | *_override.tofu | \
+      override.tf.json | *_override.tf.json | override.tofu.json | *_override.tofu.json)
+      fail "${f}" "override files are not allowed (edit the block itself)"
+      ;;
     *.tf.json | *.tofu.json) fail "${f}" "JSON-syntax configuration is not allowed (write HCL)" ;;
     *) ;;
   esac

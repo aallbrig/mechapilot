@@ -1,7 +1,7 @@
 #!/bin/sh
 # Tests for infra/modules/github-deploy-trust: the deploy role's trust policy.
-# The module is rendered offline (it has no provider, so `tofu apply` only
-# computes outputs into a throwaway local state), then candidate OIDC tokens
+# The module is rendered offline with `tofu console` (it has no provider, and
+# console only evaluates expressions), then candidate OIDC tokens
 # are judged the way IAM would: aud by StringEquals, sub by StringLike and
 # StringNotLike, where `*` (any run of characters, ":" included) and `?` (one
 # character) are the only wildcards. The numeric IDs below are fakes.
@@ -11,20 +11,19 @@
 render_trust() {
   d="$(mktemp -d)"
   cp infra/modules/github-deploy-trust/*.tf "${d}/"
-  if ! tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null; then
-    rm -rf "${d}"
-    return 1
-  fi
-  tofu -chdir="${d}" apply -auto-approve -input=false -no-color \
-    -var oidc_provider_arn=arn:aws:iam::provider/token.actions.githubusercontent.com \
-    -var github_owner=octo -var github_owner_id=11 \
-    -var github_repository=game -var github_repository_id=22 >/dev/null || {
-    rm -rf "${d}"
-    return 1
-  }
   rc=0
-  tofu -chdir="${d}" output -raw policy_json || rc=$?
-  # The scratch copy holds the module, .terraform and the local state file.
+  # tofu console only evaluates expressions: no plan, no apply, no state.
+  if tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null; then
+    printf 'jsonencode(local.policy)\n' |
+      tofu -chdir="${d}" console -no-color \
+        -var oidc_provider_arn=arn:aws:iam::provider/token.actions.githubusercontent.com \
+        -var github_owner=octo -var github_owner_id=11 \
+        -var github_repository=game -var github_repository_id=22 >"${d}/out" || rc=$?
+  else
+    rc=1
+  fi
+  # console prints the JSON as a quoted string; jq decodes it.
+  [ "${rc}" -ne 0 ] || jq -r . "${d}/out" || rc=$?
   rm -rf "${d}"
   return "${rc}"
 }

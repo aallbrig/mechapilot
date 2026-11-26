@@ -1,0 +1,90 @@
+#!/bin/sh
+# Tests that only a human can run tofu plan or apply: scripts/infra plan|apply
+# need --human, an interactive terminal and no CI or agent environment, and
+# nothing else in the repo calls tofu plan/apply or those subcommands.
+# A fake `tofu` first on PATH records any call, so these tests can never reach
+# the real tool (or AWS).
+
+# guarded_rc <VAR=value or ""> <scripts/infra args...>: runs scripts/infra in a
+# clean environment (plus that one variable) with stdin from /dev/null; prints
+# "<exit status> <called|unused> <reason>": whether the fake tofu was reached,
+# and which refusal scripts/infra gave (flag, ci, agent, terminal or other).
+guarded_rc() {
+  var="$1"
+  shift
+  fake="$(mktemp -d)"
+  printf '#!/bin/sh\n: >"%s/called"\nexit 0\n' "${fake}" >"${fake}/tofu"
+  chmod +x "${fake}/tofu"
+  rc=0
+  env -i PATH="${fake}:${PATH}" HOME="${HOME}" ${var:+"${var}"} scripts/infra "$@" </dev/null >/dev/null 2>"${fake}/err" || rc=$?
+  used=unused
+  [ ! -f "${fake}/called" ] || used=called
+  err="$(cat "${fake}/err")"
+  case "${err}" in
+    *"pass --human"*) reason=flag ;;
+    *"run in CI"*) reason=ci ;;
+    *"under an agent"*) reason=agent ;;
+    *"interactive terminal"*) reason=terminal ;;
+    *) reason=other ;;
+  esac
+  rm -rf "${fake}"
+  printf '%s %s %s' "${rc}" "${used}" "${reason}"
+}
+
+test_infra_plan_and_apply_need_the_human_flag() {
+  r1="$(guarded_rc "" plan)"
+  r2="$(guarded_rc "" apply prod)"
+  [ "${r1}" = "1 unused flag" ] && [ "${r2}" = "1 unused flag" ]
+}
+
+test_infra_plan_and_apply_refuse_ci() {
+  r1="$(guarded_rc CI=true plan --human)"
+  r2="$(guarded_rc GITHUB_ACTIONS=true apply --human)"
+  [ "${r1}" = "1 unused ci" ] && [ "${r2}" = "1 unused ci" ]
+}
+
+test_infra_plan_and_apply_refuse_agents() {
+  r1="$(guarded_rc CLAUDECODE=1 plan --human)"
+  r2="$(guarded_rc CLAUDE_CODE_ENTRYPOINT=cli apply --human)"
+  r3="$(guarded_rc CODEX_SANDBOX=1 plan --human)"
+  r4="$(guarded_rc AGENT_LOOP=1 apply --human)"
+  for r in "${r1}" "${r2}" "${r3}" "${r4}"; do
+    [ "${r}" = "1 unused agent" ] || return 1
+  done
+}
+
+test_infra_plan_and_apply_refuse_without_a_terminal() {
+  r1="$(guarded_rc "" plan --human)"
+  r2="$(guarded_rc "" apply --human prod)"
+  [ "${r1}" = "1 unused terminal" ] && [ "${r2}" = "1 unused terminal" ]
+}
+
+# Static: tofu/terraform plan or apply appears only in scripts/infra, after
+# the human_only gate; scripts/infra plan|apply is called only by the two
+# Taskfile targets; no script, workflow, hook, agent config, test or other
+# Taskfile target calls those targets.
+test_infra_plan_and_apply_have_no_other_callers() {
+  self="tests/shell/test_infra_human_only"
+  direct="$(git grep -lE '(tofu|terraform)([[:space:]]+-[^[:space:]]+)*[[:space:]]+(plan|apply)([[:space:]]|$)' -- ':!*.md' ":!${self}" || true)"
+  [ "${direct}" = "scripts/infra" ] || {
+    printf 'direct tofu plan/apply in: %s\n' "${direct}"
+    return 1
+  }
+  gate="$(grep -n 'human_only "' scripts/infra | head -n 1 | cut -d: -f1)"
+  first="$(grep -nE '^[^#]*tofu[^#]*[[:space:]](plan|apply)[[:space:]]' scripts/infra | head -n 1 | cut -d: -f1)"
+  [ -n "${gate}" ] && [ -n "${first}" ] && [ "${gate}" -lt "${first}" ] || return 1
+  wrappers="$(git grep -lE 'scripts/infra[[:space:]]+(plan|apply)' -- ':!*.md' ":!${self}" ':!scripts/infra' || true)"
+  [ "${wrappers}" = "Taskfile.yml" ] || {
+    printf 'scripts/infra plan/apply called from: %s\n' "${wrappers}"
+    return 1
+  }
+  targets="$(git grep -lE 'infra:(plan|apply)' -- scripts .github .githooks .claude tests ":!${self}" || true)"
+  if grep -qE 'task:[[:space:]]*infra:(plan|apply)' Taskfile.yml; then
+    printf 'a Taskfile target calls infra:plan/apply\n'
+    return 1
+  fi
+  [ -z "${targets}" ] || {
+    printf 'infra:plan/apply referenced from: %s\n' "${targets}"
+    return 1
+  }
+}

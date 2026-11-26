@@ -113,6 +113,7 @@ tasks:
       - scripts/checks/large-files
       - scripts/checks/infra-no-identifiers
       - scripts/checks/infra-no-suppressions
+      - scripts/checks/no-symlinks
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
@@ -130,12 +131,12 @@ tasks:
       - scripts/infra scan
 
   infra:plan:
-    desc: "Human only: plan a stack with your own AWS credentials (usage: task infra:plan -- [stack]); refuses to run in CI"
+    desc: "Human only: plan a stack with your own AWS credentials (usage: task infra:plan -- --human [stack]); refuses CI and agents"
     cmds:
       - scripts/infra plan {{.CLI_ARGS}}
 
   infra:apply:
-    desc: "Human only: apply the saved plan of a stack (usage: task infra:apply -- [stack]); refuses to run in CI"
+    desc: "Human only: apply the saved plan of a stack (usage: task infra:apply -- --human [stack]); refuses CI and agents"
     cmds:
       - scripts/infra apply {{.CLI_ARGS}}
 

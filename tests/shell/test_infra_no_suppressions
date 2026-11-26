@@ -192,3 +192,35 @@ EOT
     fi
   done
 }
+
+test_infra_no_suppressions_rejects_override_files() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  # An override that switches off a bucket's public-access block: OpenTofu
+  # merges it, trivy scans only the secure base block.
+  cat >"${r}/infra/stacks/a/main_override.tf" <<'EOF'
+resource "aws_s3_bucket_public_access_block" "state" {
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+EOF
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  for f in override.tf x_override.tofu override.tf.json elsewhere/y_override.tofu.json; do
+    git -C "${r}" rm --quiet -r --cached infra/stacks/a/main_override.tf 2>/dev/null || true
+    rm -f "${r}/infra/stacks/a/main_override.tf"
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf '{}\n' >"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+}

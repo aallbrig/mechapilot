@@ -49,7 +49,7 @@ test_infra_validate_rejects_local_module_outside_infra() {
   [ "${rc}" = 1 ]
 }
 
-test_infra_modules_rejects_remote_module_with_unquoted_label() {
+test_infra_modules_rejects_git_source() {
   t="$(infra_tree)"
   stack "${t}" ../../modules/ok
   manifest "${t}" hidden 'git::https://example.invalid/x.git' .terraform/modules/hidden
@@ -59,7 +59,7 @@ test_infra_modules_rejects_remote_module_with_unquoted_label() {
   [ "${rc}" = 1 ]
 }
 
-test_infra_modules_rejects_remote_module_with_quoted_label() {
+test_infra_modules_rejects_registry_source() {
   t="$(infra_tree)"
   stack "${t}" ../../modules/ok
   manifest "${t}" m registry.opentofu.org/example/y/aws .terraform/modules/m
@@ -83,4 +83,24 @@ test_infra_modules_accepts_committed_infra() {
   scripts/infra validate >/dev/null 2>&1 || rc=$?
   [ "${rc}" = 0 ] || return 1
   scripts/infra modules
+}
+
+test_infra_validate_and_scan_refuse_override_files() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  printf 'module "m" {\n  v = "y"\n}\n' >"${t}/infra/stacks/a/main_override.tf"
+  rc_validate="$(infra_rc "${t}" validate)"
+  rc_scan="$(infra_rc "${t}" scan)"
+  rm -rf "${t}"
+  [ "${rc_validate}" = 1 ] && [ "${rc_scan}" = 1 ]
+}
+
+test_infra_validate_and_scan_refuse_symlinks() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  ln -s ../../../mods/x/main.tf "${t}/infra/stacks/a/evil.tf"
+  rc_validate="$(infra_rc "${t}" validate)"
+  rc_scan="$(infra_rc "${t}" scan)"
+  rm -rf "${t}"
+  [ "${rc_validate}" = 1 ] && [ "${rc_scan}" = 1 ]
 }

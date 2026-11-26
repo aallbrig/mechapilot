@@ -1,7 +1,8 @@
 #!/bin/sh
 # OpenTofu checks and human-only operations for infra/.
 #
-# Usage: scripts/infra validate|lint|scan|modules|plan|apply [stack]
+# Usage: scripts/infra validate|lint|scan|modules
+#        scripts/infra plan|apply --human [stack]
 #   validate  tofu fmt -check, then init -backend=false and validate for every
 #             module and stack (offline apart from the provider download; the
 #             committed lock file is read-only)
@@ -12,6 +13,10 @@
 #             in every module and stack: each must be a local path inside infra/
 #   plan      human only: init with backend.hcl and plan a stack (default prod)
 #   apply     human only: apply the saved plan of a stack
+# plan and apply need the explicit --human flag, an interactive terminal, and
+# no CI or agent environment (CI, GITHUB_ACTIONS, CLAUDE*, CODEX*, AGENT*).
+# They are the only places in the repo that run tofu plan or apply
+# (tests/shell/test_infra_human_only checks that).
 # validate, lint and scan never touch AWS.
 set -eu
 LC_ALL=C
@@ -79,15 +84,38 @@ EOF
   return "${bad}"
 }
 
+refuse() {
+  printf 'infra: %s is for humans only: %s\n' "${cmd}" "$1" >&2
+  exit 1
+}
+
 human_only() {
-  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
-    printf 'infra: %s is for humans only and refuses to run in CI\n' "${cmd}" >&2
+  [ "${1:-}" = "--human" ] || refuse "pass --human (task infra:${cmd} -- --human [stack])"
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then refuse "refusing to run in CI"; fi
+  agent_vars="$(env | sed -n -e 's/^\(CLAUDE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(CODEX[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(AGENT[A-Za-z0-9_]*\)=.*/\1/p')"
+  if [ -n "${agent_vars}" ]; then
+    names="$(printf '%s' "${agent_vars}" | tr '\n' ' ')"
+    refuse "refusing to run under an agent (${names})"
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then refuse "needs an interactive terminal"; fi
+}
+
+# Files OpenTofu loads that the scanners don't see as written: override files
+# are merged into other resources (trivy scans the unmerged base), and symlinks
+# are followed by tofu but not by trivy.
+refuse_hidden_config() {
+  hidden="$(find "${root}" -name .terraform -prune -o \( -type l -o -name 'override.tf' -o -name '*_override.tf' \
+    -o -name 'override.tofu' -o -name '*_override.tofu' -o -name 'override.tf.json' -o -name '*_override.tf.json' \
+    -o -name 'override.tofu.json' -o -name '*_override.tofu.json' \) -print)"
+  if [ -n "${hidden}" ]; then
+    printf 'infra: override files and symlinks are not allowed under %s/:\n%s\n' "${root}" "${hidden}" >&2
     exit 1
   fi
 }
 
 case "${cmd}" in
   validate)
+    refuse_hidden_config
     tofu fmt -check -recursive -diff "${root}"
     for d in $(tf_dirs); do
       printf 'infra validate: %s\n' "${d}"
@@ -122,6 +150,7 @@ case "${cmd}" in
     # (--ignorefile ""). Inline ignores are rejected by
     # scripts/checks/infra-no-suppressions. The flags repeat the config so a
     # config edit can never relax them.
+    refuse_hidden_config
     # tofu get installs modules only (no providers), so this works offline.
     for d in $(tf_dirs); do
       tofu -chdir="${d}" get -no-color >/dev/null
@@ -134,8 +163,8 @@ case "${cmd}" in
       --severity HIGH,CRITICAL --exit-code 1 "${root}"
     ;;
   plan | apply)
-    human_only
-    stack="${2:-prod}"
+    human_only "${2:-}"
+    stack="${3:-prod}"
     case "${stack}" in
       "" | *[!a-z0-9-]*)
         printf 'infra: bad stack name\n' >&2

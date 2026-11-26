@@ -1,0 +1,41 @@
+#!/bin/sh
+# Tests for scripts/checks/no-symlinks (run by scripts/test-shell).
+
+symlink_repo() {
+  r="$(mktemp -d)"
+  git -C "${r}" init --quiet
+  mkdir -p "${r}/infra/stacks/a" "${r}/mods"
+  printf 'resource "x" "y" {}\n' >"${r}/mods/evil.txt"
+  ln -s ../../../mods/evil.txt "${r}/infra/stacks/a/evil.tf"
+  git -C "${r}" add -A
+  printf '%s' "${r}"
+}
+
+test_no_symlinks_rejects_tracked_symlink() {
+  r="$(symlink_repo)"
+  check="$(pwd)/scripts/checks/no-symlinks"
+  rc=0
+  (cd "${r}" && "${check}" >/dev/null 2>&1) || rc=$?
+  rm -rf "${r}"
+  [ "${rc}" = 1 ]
+}
+
+test_no_symlinks_rejects_symlink_path() {
+  r="$(symlink_repo)"
+  rc=0
+  scripts/checks/no-symlinks "${r}/infra/stacks/a/evil.tf" >/dev/null 2>&1 || rc=$?
+  rm -rf "${r}"
+  [ "${rc}" = 1 ]
+}
+
+test_no_symlinks_allows_regular_files() {
+  r="$(symlink_repo)"
+  rc=0
+  scripts/checks/no-symlinks "${r}/mods/evil.txt" || rc=$?
+  rm -rf "${r}"
+  [ "${rc}" = 0 ]
+}
+
+test_no_symlinks_passes_on_committed_tree() {
+  scripts/checks/no-symlinks
+}

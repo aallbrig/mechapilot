@@ -38,24 +38,24 @@ OpenTofu, tflint, the tflint AWS ruleset and trivy are pinned in `.mise.toml` wi
 
 ## Human runbook
 
-Prerequisites: `task setup`, and AWS credentials for the account in your shell (never in the repo). `task infra:plan` and `task infra:apply` refuse to run in CI.
+Prerequisites: `task setup`, and AWS credentials for the account in your shell (never in the repo). `task infra:plan` and `task infra:apply` need the explicit `--human` flag and an interactive terminal. They refuse to run in CI or under an agent (any `CI`, `GITHUB_ACTIONS`, `CLAUDE*`, `CODEX*` or `AGENT*` variable). Nothing else in the repo runs `tofu plan` or `tofu apply` (`tests/shell/test_infra_human_only`).
 
 ### 0. Preconditions in GitHub (before the first apply of `prod`)
 
 The deploy role is only as safe as these settings. Do all of them, and confirm them, **before** the first `task infra:apply` of the prod stack. Do not apply the role until they are in place.
 
 1. **OIDC subject customization.** The repository's OIDC sub claim must use `include_claim_keys = ["repo", "ref", "environment"]`, in that order, with immutable subjects. Confirm with `gh api repos/aallbrig/mechapilot/actions/oidc/customization/sub`. Tokens then carry `repo:aallbrig@<owner-id>/mechapilot@<repo-id>:ref:<ref>:environment:<env>`. The role trusts exactly one pattern, a `refs/tags/v*` ref **and** environment `production`, and it rejects any subject that contains `:environment:` twice. The environment comes last because ref names cannot contain `:`, so a workflow-chosen environment name can't splice in a fake tag or environment. A token in any other format matches nothing, so the trust fails closed.
-2. **The `production` environment exists and is protected.** It needs a required reviewer (the owner) and a deployment policy that allows only tags matching `v**` (same reason as the ruleset below). If the environment is missing, a workflow that names it creates it with no protection.
-3. **A tag ruleset on `v**`.** Only the owner may create, update or delete matching tags. Use `v**`, not `v*`: GitHub's `*` stops at `/`, but IAM's `v*` accepts any tag starting with `v`, including `v1/x`, so the ruleset must cover all of them. Otherwise anyone with write access could push a tag and request deploy credentials.
-4. **On the first deploy, check one real token.** Print the `sub` claim of a real production-environment tag run (for example with a one-off step that decodes the token without printing it in full), and confirm it matches `repo:aallbrig@<owner-id>/mechapilot@<repo-id>:ref:refs/tags/v…:environment:production`. GitHub documents the immutable prefix but not this exact key combination.
+2. **The `production` environment exists and is protected.** It needs a required reviewer (the owner) and a deployment policy that allows only tags matching `v*`. GitHub's `*` stops at `/`, so the environment accepts fewer tags than IAM's `v*` does, which is the safe direction. If the environment is missing, a workflow that names it creates it with no protection.
+3. **A tag ruleset on `v**`.** Only the owner may create, update or delete matching tags. The ruleset uses `v**`, not `v*` like the environment: IAM's `v*` accepts any tag starting with `v`, including `v1/x`, and only `v**` covers all of those. Otherwise anyone with write access could push a tag and request deploy credentials.
+4. **On the first deploy, check one real token.** In a one-off step of a real production-environment tag run, decode the token's `sub` claim and write it **only to the job summary** (`$GITHUB_STEP_SUMMARY`), never to the log, with the numeric owner and repository IDs replaced by `<id>`. The log of this public repo is world-readable, and the token itself must never be printed. Confirm the redacted value reads `repo:aallbrig@<id>/mechapilot@<id>:ref:refs/tags/v…:environment:production`. GitHub documents the immutable prefix but not this exact key combination.
 5. Put the numeric owner and repository IDs (`gh api users/aallbrig --jq .id`, `gh api repos/aallbrig/mechapilot --jq .id`) in `prod.auto.tfvars`. They are never committed.
 
 ### 1. Bootstrap the state bucket (once)
 
 ```sh
 cp infra/stacks/bootstrap/bootstrap.auto.tfvars.example infra/stacks/bootstrap/bootstrap.auto.tfvars   # fill in
-task infra:plan -- bootstrap
-task infra:apply -- bootstrap
+task infra:plan -- --human bootstrap
+task infra:apply -- --human bootstrap
 ```
 
 Its local state (`terraform.tfstate`, gitignored) holds only the state bucket and key. Keep a copy somewhere private, or leave it: the bucket has `prevent_destroy` and can be re-imported.
@@ -65,7 +65,7 @@ Its local state (`terraform.tfstate`, gitignored) holds only the state bucket an
 ```sh
 cp infra/stacks/prod/backend.hcl.example infra/stacks/prod/backend.hcl         # bucket and region from step 1's outputs
 cp infra/stacks/prod/prod.auto.tfvars.example infra/stacks/prod/prod.auto.tfvars   # zone ID, cert ARN, two new bucket names
-task infra:plan
+task infra:plan -- --human
 ```
 
 Read the plan before applying:
@@ -77,7 +77,7 @@ Read the plan before applying:
 ### 3. Apply and deploy
 
 ```sh
-task infra:apply
+task infra:apply -- --human
 ```
 
 Then, in GitHub, without putting any value in the repo:
@@ -90,7 +90,7 @@ Deploys must upload `.wasm` as `application/wasm`, and pre-compressed files with
 
 1. Upload the Marketing Site build to the new bucket and check it on the new distribution's `*.cloudfront.net` name (output `marketing_site.distribution_domain_name`).
 2. Move the names: either remove `mechafighter.com` and `www.mechafighter.com` from the 2022 distribution's alternate domain names (a few minutes of errors until step 3), or move them with no downtime with `aws cloudfront associate-alias` after adding the TXT record it asks for.
-3. Set `marketing_aliases_enabled = true`, then `task infra:plan` and `task infra:apply`. The apex and `www` `A` records are overwritten to point at the new distribution, and `AAAA` records are added.
+3. Set `marketing_aliases_enabled = true`, then `task infra:plan -- --human` and `task infra:apply -- --human`. The apex and `www` `A` records are overwritten to point at the new distribution, and `AAAA` records are added.
 4. Check `https://mechafighter.com`, `https://www.mechafighter.com` (301 to the apex) and `https://game.mechafighter.com` over IPv4 and IPv6, and the response headers.
 
 ### 5. Retire the 2022 resources (separate, deliberate step)
