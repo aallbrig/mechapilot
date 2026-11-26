@@ -9,38 +9,19 @@ const PLAYER_SPEED := 11.0
 const DRIFT := 0.3
 const FIRE_INTERVAL := 0.1
 const BULLET_SPEED := 46.0
-const BULLET_LIFE := 1.1
+const BULLET_LIFE := 1.4
+## Downward pull on player shots, in units/s^2. 0 = laser-straight.
+const BULLET_GRAVITY := 20.0
+## Share of the mech's velocity a shot inherits.
+const BULLET_INHERIT := 0.6
 const SPHERE_RADIUS := 40.0
 const SPAWN_DIST := 25.0
-const CAM_PITCH := -1.08
-const CAM_OFFSET := Vector3(0, 21.0, 11.5)
+const CAM_OFFSET := Vector3(0, 0, 22.0)
 const WAVE_INTERVAL := 14.0
 const COMBO_WINDOW := 1.6
-const CLOUD_SPAN := 80.0
+const CLOUD_SPAN := Vector2(150.0, 100.0)
 const STICK_RANGE := 70.0
-const GRID_SHADER := """
-shader_type spatial;
-render_mode unshaded;
-
-varying vec3 wpos;
-
-void vertex() {
-	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-}
-
-float grid(vec2 p, float cell) {
-	vec2 q = p / cell;
-	vec2 g = abs(fract(q - 0.5) - 0.5) / fwidth(q);
-	return 1.0 - min(min(g.x, g.y), 1.0);
-}
-
-void fragment() {
-	vec3 base = vec3(0.02, 0.05, 0.14);
-	vec3 line = vec3(0.15, 0.45, 1.0);
-	float l = grid(wpos.xz, 4.0) * 0.35 + grid(wpos.xz, 20.0) * 0.9;
-	ALBEDO = base + line * l;
-}
-"""
+const SKY_SHADER := preload("res://sky.gdshader")
 
 
 class Enemy:
@@ -67,8 +48,9 @@ var body: Node3D
 var gun_pivot: Node3D
 var legs: Array[Node3D] = []
 var velocity := Vector3.ZERO
-var move_dir := Vector3(0, 0, -1)
-var aim_dir := Vector3(0, 0, -1)
+var move_dir := Vector3(0, 1, 0)
+var aim_dir := Vector3(1, 0, 0)
+var facing := 1.0
 var fire_cd := 0.0
 var bullets: Array[Bullet] = []
 var enemies: Array[Enemy] = []
@@ -184,8 +166,8 @@ func _build_world() -> void:
 	env.ambient_light_color = Color(0.45, 0.5, 0.7)
 	env.ambient_light_energy = 0.6
 	env.fog_enabled = true
-	env.fog_light_color = Color(0.1, 0.16, 0.38)
-	env.fog_density = 0.012
+	env.fog_light_color = Color(0.35, 0.55, 0.85)
+	env.fog_density = 0.01
 	env.glow_enabled = true
 	env.glow_intensity = 0.9
 	env.glow_bloom = 0.05
@@ -195,7 +177,7 @@ func _build_world() -> void:
 	add_child(we)
 
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-60, 30, 0)
+	sun.rotation_degrees = Vector3(-35, 25, 0)
 	sun.light_color = Color(1, 0.957, 0.839)
 	sun.light_energy = 1.1
 	add_child(sun)
@@ -205,38 +187,36 @@ func _build_world() -> void:
 	cam.near = 0.3
 	cam.far = 200.0
 	cam.position = CAM_OFFSET
-	cam.rotation = Vector3(CAM_PITCH, 0, 0)
 	add_child(cam)
 
-	var floor_mi := MeshInstance3D.new()
-	floor_mi.name = "Floor"
-	var pm := PlaneMesh.new()
-	pm.size = Vector2(260, 260)
-	floor_mi.mesh = pm
-	var sh := Shader.new()
-	sh.code = GRID_SHADER
+	var sky := MeshInstance3D.new()
+	sky.name = "Sky"
+	var qm := QuadMesh.new()
+	qm.size = Vector2(520, 320)
+	sky.mesh = qm
 	var sm := ShaderMaterial.new()
-	sm.shader = sh
-	floor_mi.material_override = sm
-	floor_mi.position = Vector3(0, -4, 0)
-	add_child(floor_mi)
+	sm.shader = SKY_SHADER
+	sky.material_override = sm
+	sky.position = Vector3(0, 0, -90)
+	add_child(sky)
 
-	var cloud_mat := _mat(Color(0.75, 0.85, 1.0, 0.1), 0.0, true)
-	for i in 46:
+	# Parallax cloud layers: perspective does the parallax, deeper = slower.
+	for i in 50:
 		var c := MeshInstance3D.new()
 		var sp := SphereMesh.new()
 		sp.radius = 1.0
 		sp.height = 2.0
-		sp.radial_segments = 12
-		sp.rings = 6
+		sp.radial_segments = 14
+		sp.rings = 7
 		c.mesh = sp
-		c.material_override = cloud_mat
-		var s := randf_range(1.5, 5.0)
-		c.scale = Vector3(s * randf_range(1.0, 2.2), 0.3, s)
+		var depth := randf_range(-55.0, -6.0)
+		var near := 1.0 - clampf((-depth - 6.0) / 49.0, 0.0, 1.0)
+		var alpha := lerpf(0.2, 0.5, near)
+		c.material_override = _mat(Color(1, 1, 1, snappedf(alpha, 0.05)), 0.0, true)
+		var s := randf_range(2.0, 6.0) * lerpf(2.0, 1.0, near)
+		c.scale = Vector3(s * randf_range(1.6, 3.0), s * 0.45, s * 0.6)
 		c.position = Vector3(
-			randf_range(-CLOUD_SPAN, CLOUD_SPAN) * 0.5,
-			randf_range(-3.5, -1.5),
-			randf_range(-CLOUD_SPAN, CLOUD_SPAN) * 0.5
+			randf_range(-0.5, 0.5) * CLOUD_SPAN.x, randf_range(-0.5, 0.5) * CLOUD_SPAN.y, depth
 		)
 		add_child(c)
 		clouds.append(c)
@@ -255,6 +235,8 @@ func _build_player() -> void:
 	player.scale = Vector3.ONE * 1.5
 	add_child(player)
 	body = Node3D.new()
+	body.position.y = -1.0
+	body.rotation.y = -PI / 2.0
 	player.add_child(body)
 	var hull := _mat(Color(0.72, 0.78, 0.85))
 	var dark := _mat(Color(0.2, 0.24, 0.3))
@@ -273,10 +255,10 @@ func _build_player() -> void:
 		legs.append(leg)
 		_box(body, Vector3(0.35, 0.8, 0.35), Vector3(0.9 * side, 1.0, 0), hull)
 	gun_pivot = Node3D.new()
-	gun_pivot.position = Vector3(0, 1.2, 0)
+	gun_pivot.position = Vector3(0, 0.25, 0.75)
 	player.add_child(gun_pivot)
-	_box(gun_pivot, Vector3(0.3, 0.3, 1.6), Vector3(0.85, 0, -0.6), dark)
-	_box(gun_pivot, Vector3(0.2, 0.2, 0.3), Vector3(0.85, 0, -1.45), accent)
+	_box(gun_pivot, Vector3(0.3, 0.3, 1.6), Vector3(0, 0, -0.6), dark)
+	_box(gun_pivot, Vector3(0.2, 0.2, 0.3), Vector3(0, 0, -1.45), accent)
 
 	muzzle_light = OmniLight3D.new()
 	muzzle_light.light_color = Color(1.0, 0.85, 0.3)
@@ -380,7 +362,9 @@ func _start_game() -> void:
 	Engine.time_scale = 1.0
 	player.position = Vector3.ZERO
 	player.visible = true
-	move_dir = Vector3(0, 0, -1)
+	move_dir = Vector3(0, 1, 0)
+	aim_dir = Vector3(1, 0, 0)
+	facing = 1.0
 	velocity = move_dir * 5.0
 	cam_focus = Vector3.ZERO
 	center_label.text = "GET READY"
@@ -517,16 +501,16 @@ func _read_fire() -> Vector2:
 		var mp := hud.get_viewport().get_mouse_position()
 		var ro := cam.project_ray_origin(mp)
 		var rn := cam.project_ray_normal(mp)
-		if absf(rn.y) > 0.01:
-			var hit := ro + rn * ((1.2 - ro.y) / rn.y)
+		if absf(rn.z) > 0.01:
+			var hit := ro + rn * ((0.0 - ro.z) / rn.z)
 			var to_mouse := hit - player.position
-			to_mouse.y = 0.0
+			to_mouse.z = 0.0
 			if to_mouse.length() > 0.5:
 				aim_dir = to_mouse.normalized()
 		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-			return Vector2(aim_dir.x, aim_dir.z)
+			return Vector2(aim_dir.x, -aim_dir.y)
 	if autotest or Input.is_physical_key_pressed(KEY_SPACE):
-		return Vector2(aim_dir.x, aim_dir.z)
+		return Vector2(aim_dir.x, -aim_dir.y)
 	return Vector2.ZERO
 
 
@@ -560,7 +544,7 @@ func _process(scaled_delta: float) -> void:
 		if autotest and dead_timer <= 0.0:
 			_start_game()
 	else:
-		body.rotation.y += real_dt * 0.8
+		body.rotation.y = -PI / 2.0 + sin(clock * 0.8) * 0.6
 
 	_update_effects(delta)
 	_update_camera(real_dt)
@@ -587,48 +571,51 @@ func _update_player(delta: float) -> void:
 	var mv := _read_move()
 	var target: Vector3
 	if mv.length() > 0.15:
-		move_dir = Vector3(mv.x, 0, mv.y).normalized()
-		target = Vector3(mv.x, 0, mv.y) * PLAYER_SPEED
+		move_dir = Vector3(mv.x, -mv.y, 0).normalized()
+		target = Vector3(mv.x, -mv.y, 0) * PLAYER_SPEED
 	else:
 		target = move_dir * PLAYER_SPEED * DRIFT
 	velocity = velocity.lerp(target, 1.0 - exp(-10.0 * delta))
 	player.position += velocity * delta
 
-	var yaw := atan2(-move_dir.x, -move_dir.z)
-	body.rotation.y = lerp_angle(body.rotation.y, yaw, 1.0 - exp(-14.0 * delta))
-	var local_v := velocity.rotated(Vector3.UP, -body.rotation.y)
-	body.rotation.x = lerpf(body.rotation.x, local_v.z * 0.03, 1.0 - exp(-8.0 * delta))
-	body.rotation.z = lerpf(body.rotation.z, -local_v.x * 0.04, 1.0 - exp(-8.0 * delta))
+	if absf(velocity.x) > 2.0 and fire_cd < -0.4:
+		facing = signf(velocity.x)
+	var yaw := -PI / 2.0 * facing
+	body.rotation.y = lerp_angle(body.rotation.y, yaw, 1.0 - exp(-12.0 * delta))
+	var pitch := clampf(velocity.y * 0.04 * facing, -0.5, 0.5)
+	body.rotation.x = lerpf(body.rotation.x, pitch, 1.0 - exp(-8.0 * delta))
 	var stride := clock * (6.0 + velocity.length())
 	var swing := clampf(velocity.length() / PLAYER_SPEED, 0.0, 1.0) * 0.7
 	legs[0].rotation.x = sin(stride) * swing
 	legs[1].rotation.x = -sin(stride) * swing
-	body.position.y = absf(sin(stride)) * swing * 0.15
+	body.position.y = -1.0 + absf(sin(stride)) * swing * 0.15
 
 	fire_cd -= delta
 	var fire := _read_fire()
 	if fire.length() > 0.1:
-		aim_dir = Vector3(fire.x, 0, fire.y).normalized()
+		aim_dir = Vector3(fire.x, -fire.y, 0).normalized()
+		if absf(aim_dir.x) > 0.2:
+			facing = signf(aim_dir.x)
 		if fire_cd <= 0.0:
 			_fire()
-	var aim_yaw := atan2(-aim_dir.x, -aim_dir.z)
-	gun_pivot.rotation.y = lerp_angle(gun_pivot.rotation.y, aim_yaw, 1.0 - exp(-30.0 * delta))
+	var want := Basis.looking_at(aim_dir, Vector3.BACK)
+	gun_pivot.basis = gun_pivot.basis.slerp(want, 1.0 - exp(-30.0 * delta)).orthonormalized()
 
 
 func _fire() -> void:
 	fire_cd = FIRE_INTERVAL
-	var dir := aim_dir.rotated(Vector3.UP, randf_range(-0.04, 0.04))
-	var muzzle := gun_pivot.global_transform * Vector3(0.85, 0, -1.6)
+	var dir := aim_dir.rotated(Vector3.BACK, randf_range(-0.04, 0.04))
+	var muzzle := gun_pivot.global_transform * Vector3(0, 0, -1.6)
 	var b := Bullet.new()
 	b.node = MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(0.28, 0.28, 1.3)
+	bm.size = Vector3(0.4, 0.4, 1.6)
 	(b.node as MeshInstance3D).mesh = bm
 	(b.node as MeshInstance3D).material_override = _mat(Color(1, 0.96, 0.3), 5.0, true)
 	add_child(b.node)
 	b.node.position = muzzle
-	b.node.basis = Basis.looking_at(dir, Vector3.UP)
-	b.vel = dir * BULLET_SPEED
+	b.vel = dir * BULLET_SPEED + velocity * BULLET_INHERIT
+	b.node.basis = Basis.looking_at(b.vel.normalized(), Vector3.BACK)
 	bullets.append(b)
 
 	velocity -= dir * 1.6
@@ -644,12 +631,14 @@ func _fire() -> void:
 
 func _update_bullets(delta: float) -> void:
 	for b: Bullet in bullets.duplicate():
+		b.vel.y -= BULLET_GRAVITY * delta
 		b.node.position += b.vel * delta
+		b.node.basis = Basis.looking_at(b.vel.normalized(), Vector3.BACK)
 		b.life -= delta
 		var hit: Enemy = null
 		for e in enemies:
 			var d := e.node.position - b.node.position
-			d.y = 0.0
+			d.z = 0.0
 			if d.length() < e.radius + 0.3:
 				hit = e
 				break
@@ -721,9 +710,9 @@ func _spawn_enemy(angle: float, big: bool) -> void:
 	var e := Enemy.new()
 	e.big = big
 	e.node = Node3D.new()
-	var off := Vector3(cos(angle), 0, sin(angle)) * randf_range(SPAWN_DIST, SPAWN_DIST + 4.0)
+	var off := Vector3(cos(angle), sin(angle), 0) * randf_range(SPAWN_DIST, SPAWN_DIST + 4.0)
 	e.node.position = player.position + off
-	e.node.position.y = 0.8
+	e.node.position.z = 0.0
 	add_child(e.node)
 	var col := Color(1.0, 0.45, 0.1) if big else Color(0.85, 0.15, 0.3)
 	var hull := _mat(col)
@@ -748,7 +737,7 @@ func _update_enemies(delta: float) -> void:
 		if not enemies.has(e):
 			continue
 		var to_p := player.position - e.node.position
-		to_p.y = 0.0
+		to_p.z = 0.0
 		if to_p.length() > SPHERE_RADIUS:
 			e.node.queue_free()
 			enemies.erase(e)
@@ -757,7 +746,7 @@ func _update_enemies(delta: float) -> void:
 		e.vel = e.vel.lerp(want, 1.0 - exp(-e.turn * delta))
 		e.node.position += e.vel * delta
 		if e.vel.length() > 0.1:
-			e.node.basis = Basis.looking_at(-e.vel.normalized(), Vector3.UP)
+			e.node.basis = Basis.looking_at(-e.vel.normalized(), Vector3.BACK)
 		e.node.scale = e.node.scale.lerp(Vector3.ONE, 1.0 - exp(-12.0 * delta))
 		if e.flash > 0.0:
 			e.flash -= delta
@@ -805,7 +794,6 @@ func _explode(pos: Vector3, color: Color, amount: int, size: float) -> void:
 	p.mesh = particle_mesh
 	p.direction = Vector3(0, 1, 0)
 	p.spread = 180.0
-	p.flatness = 0.6
 	p.gravity = Vector3.ZERO
 	p.initial_velocity_min = 7.0 * size
 	p.initial_velocity_max = 26.0 * size
@@ -833,7 +821,7 @@ func _explode(pos: Vector3, color: Color, amount: int, size: float) -> void:
 	light.light_color = color
 	light.omni_range = 8.0 * size
 	light.light_energy = 6.0
-	light.position = pos + Vector3(0, 1.5, 0)
+	light.position = pos + Vector3(0, 0, 2.5)
 	add_child(light)
 	var tw := create_tween()
 	tw.tween_property(light, "light_energy", 0.0, 0.35)
@@ -854,6 +842,7 @@ func _ring(pos: Vector3, color: Color, radius: float) -> void:
 	m.albedo_color = color.lightened(0.4)
 	mi.material_override = m
 	mi.position = pos
+	mi.rotation.x = PI / 2.0
 	mi.scale = Vector3.ONE * 0.3
 	add_child(mi)
 	var tw := create_tween().set_parallel(true)
@@ -873,10 +862,10 @@ func _float_text(pos: Vector3, text: String, color: Color) -> void:
 	l.modulate = color
 	l.no_depth_test = true
 	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	l.position = pos + Vector3(0, 2, 0)
+	l.position = pos + Vector3(0, 1.0, 2.0)
 	add_child(l)
 	var tw := create_tween().set_parallel(true)
-	tw.tween_property(l, "position:z", pos.z - 2.5, 0.7).set_ease(Tween.EASE_OUT).set_trans(
+	tw.tween_property(l, "position:y", pos.y + 3.5, 0.7).set_ease(Tween.EASE_OUT).set_trans(
 		Tween.TRANS_CUBIC
 	)
 	tw.tween_property(l, "modulate:a", 0.0, 0.7).set_delay(0.3)
@@ -898,10 +887,10 @@ func _update_camera(real_dt: float) -> void:
 	trauma = maxf(0.0, trauma - real_dt * 1.5)
 	var s := trauma * trauma
 	var t := clock * 40.0
-	var off := Vector3(shake_noise.get_noise_2d(t, 0), 0, shake_noise.get_noise_2d(0, t)) * s * 2.2
+	var off := Vector3(shake_noise.get_noise_2d(t, 0), shake_noise.get_noise_2d(0, t), 0) * s * 2.2
 	cam_kick = cam_kick.lerp(Vector3.ZERO, 1.0 - exp(-18.0 * real_dt))
 	cam.position = cam_focus + CAM_OFFSET + off + cam_kick
-	cam.rotation = Vector3(CAM_PITCH, 0, shake_noise.get_noise_2d(t, t) * s * 0.08)
+	cam.rotation = Vector3(0, 0, shake_noise.get_noise_2d(t, t) * s * 0.08)
 	fov_punch = lerpf(fov_punch, 0.0, 1.0 - exp(-8.0 * real_dt))
 	cam.fov = 60.0 - fov_punch
 
@@ -910,17 +899,17 @@ func _wrap_clouds() -> void:
 	var c := cam_focus
 	for cl in clouds:
 		var d := cl.position - c
-		if d.x > CLOUD_SPAN * 0.5:
-			cl.position.x -= CLOUD_SPAN
-		elif d.x < -CLOUD_SPAN * 0.5:
-			cl.position.x += CLOUD_SPAN
-		if d.z > CLOUD_SPAN * 0.5:
-			cl.position.z -= CLOUD_SPAN
-		elif d.z < -CLOUD_SPAN * 0.5:
-			cl.position.z += CLOUD_SPAN
-	var fl := get_node("Floor") as Node3D
-	fl.position.x = snappedf(c.x, 20.0)
-	fl.position.z = snappedf(c.z, 20.0)
+		if d.x > CLOUD_SPAN.x * 0.5:
+			cl.position.x -= CLOUD_SPAN.x
+		elif d.x < -CLOUD_SPAN.x * 0.5:
+			cl.position.x += CLOUD_SPAN.x
+		if d.y > CLOUD_SPAN.y * 0.5:
+			cl.position.y -= CLOUD_SPAN.y
+		elif d.y < -CLOUD_SPAN.y * 0.5:
+			cl.position.y += CLOUD_SPAN.y
+	var sky := get_node("Sky") as Node3D
+	sky.position.x = c.x
+	sky.position.y = c.y * 0.6
 
 
 # ---------------------------------------------------------------- HUD
