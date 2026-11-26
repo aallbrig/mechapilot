@@ -1,0 +1,78 @@
+#!/bin/sh
+# Production smoke check (#20): the Marketing Site and the Game Site answer
+# 200, and each host's TLS certificate stays valid for 14 days or more.
+#
+# Usage: scripts/checks/prod-smoke [--qa]
+#   --qa  check the QA Environment (GitHub Pages) instead of Production
+#
+# Environment:
+#   PROD_SMOKE_URLS     space-separated URLs to check instead (tests use it)
+#   MECHAFIGHTER_QA_URL the QA Marketing Site URL (default: this repo's Pages URL)
+#   PROD_SMOKE_MIN_DAYS certificate days required (default 14)
+# Network access is needed, so `task checks` and CI do not run it; the Agent
+# Loop and the Supervisor do.
+set -eu
+
+min_days="${PROD_SMOKE_MIN_DAYS:-14}"
+case "${min_days}" in
+  "" | *[!0-9]*)
+    printf 'prod-smoke: PROD_SMOKE_MIN_DAYS must be a whole number\n' >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+
+case "${1:-}" in
+  "")
+    default_urls="https://mechafighter.com/ https://game.mechafighter.com/"
+    ;;
+  --qa)
+    qa="${MECHAFIGHTER_QA_URL:-https://aallbrig.github.io/mechapilot/}"
+    default_urls="${qa} ${qa}game/"
+    ;;
+  *)
+    printf 'usage: prod-smoke [--qa]\n' >&2
+    exit 64
+    ;;
+esac
+urls="${PROD_SMOKE_URLS:-${default_urls}}"
+
+failed=0
+checked_hosts=""
+for url in ${urls}; do
+  case "${url}" in
+    https://*) ;;
+    *)
+      printf 'FAIL  %s: not an https URL\n' "${url}"
+      failed=1
+      continue
+      ;;
+  esac
+  code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 --location "${url}" || true)"
+  if [ "${code}" = 200 ]; then
+    printf 'PASS  %s: HTTP 200\n' "${url}"
+  else
+    printf 'FAIL  %s: HTTP %s\n' "${url}" "${code:-no response}"
+    failed=1
+  fi
+
+  host="${url#https://}"
+  host="${host%%/*}"
+  case " ${checked_hosts} " in
+    *" ${host} "*) continue ;;
+    *) checked_hosts="${checked_hosts} ${host}" ;;
+  esac
+  cert="$(openssl s_client -connect "${host}:443" -servername "${host}" </dev/null 2>/dev/null || true)"
+  if printf '%s\n' "${cert}" | openssl x509 -noout -checkend "$((min_days * 86400))" >/dev/null 2>&1; then
+    printf 'PASS  %s: certificate valid for %s days or more\n' "${host}" "${min_days}"
+  else
+    printf 'FAIL  %s: certificate missing or expires within %s days\n' "${host}" "${min_days}"
+    failed=1
+  fi
+done
+
+if [ "${failed}" -ne 0 ]; then
+  printf 'prod-smoke: FAILED\n'
+  exit 1
+fi
+printf 'prod-smoke: ok\n'

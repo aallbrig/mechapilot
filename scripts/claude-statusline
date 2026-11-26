@@ -1,0 +1,37 @@
+#!/bin/sh
+# Claude Code status line for the Agent Loop session (#20). Configured only in
+# the settings the Supervisor passes with --settings, so other sessions keep
+# their own status line. It runs unsandboxed, so the session runs it from the
+# Supervisor's read-only copy of origin/main, never from its own worktree.
+# It spends no tokens.
+#
+# Reads the status-line JSON on stdin, writes
+#   <state-dir>/context  {"session_id", "pct", "at"}  (context_window.used_percentage)
+# for the Supervisor, and prints one short line.
+# The state dir is AGENT_LOOP_STATE_DIR, else <main checkout>/.agent-loop
+# found from the session's project directory.
+set -eu
+
+input="$(cat)"
+project_dir="$(printf '%s' "${input}" | jq -r '.workspace.project_dir // .cwd // "."')"
+# A status line must always print, so a missing state dir is not an error.
+state_dir="${AGENT_LOOP_STATE_DIR:-}"
+if [ -z "${state_dir}" ]; then
+  common="$(git -C "${project_dir}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+  if [ -n "${common}" ]; then state_dir="$(dirname "${common}")/.agent-loop"; fi
+fi
+now="$(date +%s)"
+
+if [ -n "${state_dir}" ] && mkdir -p "${state_dir}" 2>/dev/null; then
+  printf '%s' "${input}" | jq -c --argjson now "${now}" \
+    '{session_id: (.session_id // ""), pct: .context_window.used_percentage, at: $now}' \
+    >"${state_dir}/context.tmp" && mv -f "${state_dir}/context.tmp" "${state_dir}/context"
+fi
+
+machine=""
+if [ -n "${state_dir}" ] && [ -f "${state_dir}/machine" ]; then
+  machine="$(cat "${state_dir}/machine")"
+fi
+printf '%s' "${input}" | jq -r --arg machine "${machine}" \
+  '[(.session_name // "agent loop"), "ctx \(.context_window.used_percentage // 0 | floor)%", $machine]
+   | map(select(. != "")) | join(" | ")'

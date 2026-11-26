@@ -1,0 +1,1080 @@
+#!/bin/sh
+# The Supervisor (#20): starts the Agent Loop session when work exists, nudges
+# it when it stalls, files an agent-loop-stall issue when nudges fail, restarts
+# it at about 45% context and ends it when no work remains. POSIX sh; it spends
+# no inference tokens (only gh, `claude agents --json`, tmux and files).
+#
+# Usage: scripts/agent-loop-supervisor <command>
+#   run        supervise until the stop file is set (the tmux loops pane runs this)
+#   once       gather, decide and act once, then exit (status 10 after the
+#              exit action; `run` runs each tick this way)
+#   snapshot   print the current state snapshot (schemas/agent-loop-snapshot.schema.json)
+#   preflight  check the human-only prerequisites (docs/agent-loop.md); exit 1 if any fails
+#   start      pin the runtime to origin/main if nothing is pinned yet, run
+#              preflight, clear the stop file and any held stall episode, and
+#              make sure a Supervisor runs (task loop:start)
+#   pin <sha>  pin the session's runtime to a commit a human chose (task loop:pin)
+#   confirm-token  record the human's confirmation of the token permissions
+#              preflight cannot probe (task loop:confirm-token)
+#   stop       set the stop file: the current issue finishes, then the session
+#              ends and the Supervisor exits (task loop:stop)
+#   status     print the Agent Loop's state (task loop:status)
+#   alias      print this machine's alias, generating it if needed (task setup)
+#
+# Each tick (AGENT_LOOP_TICK_SECONDS, default 60) builds a snapshot and lets
+# agent_loop_decide (scripts/agent-loop-lib) pick one action. GitHub is read at
+# most every AGENT_LOOP_GH_SECONDS (default 300) through scripts/agent-loop-gh,
+# with ETag conditional requests. A failing tick (git, tmux or GitHub hiccup)
+# is logged and retried on the next tick; it never stops the Supervisor.
+#
+# The boundary (docs/agent-loop.md): the session runs with Claude Code's
+# sandbox, only the settings below, and a least-privilege GitHub token.
+#   - The settings, status line, hooks and skill come from a read-only export
+#     of the commit in <state>/runtime-pin, which only a human sets (task
+#     loop:start records origin/main once; task loop:pin -- <sha> moves it).
+#     Never a newer origin/main: a PR the session got merged cannot change
+#     what runs unsandboxed until a human pins it.
+#   - Tools task ci:sandbox needs from the network (npm packages, OpenTofu
+#     providers) are installed by the Supervisor, outside the sandbox, from the
+#     pinned commit's lockfiles, into a read-only dir in the state dir; the
+#     session copies them in itself (scripts/agent-loop-deps). After it creates
+#     the clone, the Supervisor never writes into the session's checkout. The
+#     sandbox's network allowlist stays GitHub, QA and Production only, and
+#     local binding stays off; the Chrome steps run only in the ci check.
+#   - claude runs with --restricted (no user, project or local settings files),
+#     --strict-mcp-config (no MCP servers) and --permission-mode dontAsk.
+#   - GH_TOKEN comes from AGENT_LOOP_TOKEN_FILE (default
+#     ~/.config/mechafighter-agent-loop/gh-token, mode 0600) and GH_CONFIG_DIR
+#     is an empty directory, so the owner's gh login is never visible. Without
+#     the token the Supervisor starts no session.
+#
+# State lives in AGENT_LOOP_STATE_DIR (default <main checkout>/.agent-loop):
+#   machine, stop, metrics.jsonl, heartbeat, context, supervisor.pid, pane,
+#   nudges, episode-nudges, stall-episode, last-start, started-at, claimed,
+#   gh/, prod.json, prod-history.jsonl, prod-smoke.log, runtime-pin,
+#   runtime/ (read-only, pinned), ci-deps/, token-confirmed, launch
+# The session runs in its own checkout, AGENT_LOOP_WORKTREE (default
+# <main checkout>.agent-loop, a sibling directory): a separate clone at
+# origin/main, so its .git sits inside the sandbox's write scope.
+#
+# Tuning (seconds unless noted): AGENT_LOOP_STALL_SECONDS (900),
+# AGENT_LOOP_TOOL_TIMEOUT_SECONDS (600, the Bash tool's maximum timeout),
+# AGENT_LOOP_NUDGE_GAP_SECONDS (300), AGENT_LOOP_NUDGE_WINDOW_SECONDS (1800),
+# AGENT_LOOP_MAX_NUDGES (2), AGENT_LOOP_MAX_EPISODE_NUDGES (6),
+# AGENT_LOOP_MAX_ESCALATIONS (2),
+# AGENT_LOOP_RESTART_PCT (45), AGENT_LOOP_FORCE_RESTART_PCT (60),
+# AGENT_LOOP_START_COOLDOWN_SECONDS (600).
+# Tests: AGENT_LOOP_NOW fixes the clock, AGENT_LOOP_MAX_TICKS bounds `run`,
+# AGENT_LOOP_RUNTIME_REPO is the repository the pinned runtime is read from,
+# AGENT_LOOP_RETRY_SECONDS (5) is the pause between retries.
+set -eu
+
+# Every git command this script runs (clone, fetch, checkout, archive,
+# rev-parse, and so on) runs no hooks and no fsmonitor: configuration from the
+# environment overrides every repository's config, so a hook carried by a
+# fetched commit, or a hooksPath in a repo's config, never runs outside the
+# sandbox. This is set once, here, so no git call can miss it.
+GIT_CONFIG_COUNT=2
+GIT_CONFIG_KEY_0=core.hooksPath
+GIT_CONFIG_VALUE_0=/dev/null
+GIT_CONFIG_KEY_1=core.fsmonitor
+GIT_CONFIG_VALUE_1=false
+export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+repo_root="$(cd "${script_dir}/.." && pwd -P)"
+# shellcheck source=agent-loop-lib
+. "${script_dir}/agent-loop-lib"
+
+state_dir="$(agent_loop_default_state_dir "${repo_root}")"
+main_root="$(dirname "${state_dir}")"
+worktree="${AGENT_LOOP_WORKTREE:-${main_root}.agent-loop}"
+session_name="$(agent_loop_session_name)"
+tick_seconds="${AGENT_LOOP_TICK_SECONDS:-60}"
+gh_seconds="${AGENT_LOOP_GH_SECONDS:-300}"
+token_file="${AGENT_LOOP_TOKEN_FILE:-${HOME}/.config/mechafighter-agent-loop/gh-token}"
+runtime_repo="${AGENT_LOOP_RUNTIME_REPO:-${repo_root}}"
+runtime_dir="${state_dir}/runtime"
+pin_file="${state_dir}/runtime-pin"
+# Exit status of a tick that ends the Supervisor (the exit action).
+exit_tick=10
+mkdir -p "${state_dir}"
+
+log() {
+  stamp="$(date -u +%H:%M:%SZ)"
+  printf '%s supervisor: %s\n' "${stamp}" "$*"
+}
+
+die() {
+  printf 'agent-loop-supervisor: %s\n' "$*" >&2
+  exit 1
+}
+
+now() {
+  if [ -n "${AGENT_LOOP_NOW:-}" ]; then
+    printf '%s\n' "${AGENT_LOOP_NOW}"
+  else
+    date +%s
+  fi
+}
+
+# read_or <file> <default>: the file's first line, or the default.
+read_or() {
+  if [ -s "$1" ]; then head -n 1 "$1"; else printf '%s\n' "$2"; fi
+}
+
+machine() {
+  agent_loop_ensure_alias "${state_dir}"
+}
+
+# metric <event> [<key> <value>]...: append one line to metrics.jsonl
+# (schemas/agent-loop-metrics-event.schema.json). issue, seconds and pct are numbers.
+metric() {
+  event="$1"
+  shift
+  at="$(now)"
+  alias_now="$(machine)"
+  line="$(jq -nc --argjson at "${at}" --arg event "${event}" --arg machine "${alias_now}" \
+    '{at: $at, event: $event, machine: $machine}')"
+  while [ "$#" -ge 2 ]; do
+    case "$1" in
+      issue | seconds | pct) line="$(printf '%s\n' "${line}" | jq -c --arg k "$1" --argjson v "$2" '.[$k] = $v')" ;;
+      *) line="$(printf '%s\n' "${line}" | jq -c --arg k "$1" --arg v "$2" '.[$k] = $v')" ;;
+    esac
+    shift 2
+  done
+  printf '%s\n' "${line}" >>"${state_dir}/metrics.jsonl"
+}
+
+# retry <attempts> <command...>: run until it succeeds, pausing between tries.
+# Called as a plain statement: when every attempt fails, set -e ends the
+# current tick (a subshell), which the run loop logs and retries.
+retry() {
+  attempts="$1"
+  shift
+  n=1
+  while :; do
+    if "$@"; then return 0; fi
+    [ "${n}" -lt "${attempts}" ] || return 1
+    log "retrying (${n}/${attempts}): $*" >&2
+    n=$((n + 1))
+    sleep "${AGENT_LOOP_RETRY_SECONDS:-5}"
+  done
+}
+
+# Refuse values that would break the quoting of the launch script.
+safe_path() {
+  case "$1" in
+    *"'"* | *'
+'*) die "path contains a quote or newline: $1" ;;
+    *) ;;
+  esac
+}
+
+# ---- gathering (the only side effects are reads and caches) ----
+
+# refresh_github: re-read issues and Production every gh_seconds at most.
+refresh_github() {
+  t="$(now)"
+  last="$(read_or "${state_dir}/gh-fetched-at" 0)"
+  [ $((t - last)) -ge "${gh_seconds}" ] || return 0
+  printf '%s\n' "${t}" >"${state_dir}/gh-fetched-at"
+  if "${script_dir}/agent-loop-gh" issues ready-for-agent "${state_dir}/gh" >"${state_dir}/issues.json.tmp"; then
+    mv -f "${state_dir}/issues.json.tmp" "${state_dir}/issues.json"
+  else
+    rm -f "${state_dir}/issues.json.tmp"
+    log "GitHub read failed; keeping the last issue list"
+  fi
+  refresh_prod
+  track_claims
+}
+
+# Production is expected once a v* release exists; only then is it smoke-tested.
+# The Supervisor runs prod-smoke outside the sandbox and records the result
+# (prod.json, prod-history.jsonl, prod-smoke.log) for the session to read.
+refresh_prod() {
+  git -C "${main_root}" fetch --quiet --tags origin 2>/dev/null || true
+  tags="$(git -C "${main_root}" tag -l 'v*' 2>/dev/null || true)"
+  expected=false ok=true incident=false
+  if [ -n "${tags}" ]; then
+    expected=true
+    if ! "${script_dir}/checks/prod-smoke" >"${state_dir}/prod-smoke.log" 2>&1; then
+      ok=false
+      incidents="$("${script_dir}/agent-loop-gh" issues prod-incident "${state_dir}/gh" 2>/dev/null || printf '[]')"
+      count="$(printf '%s\n' "${incidents}" | jq length)"
+      [ "${count}" -eq 0 ] || incident=true
+    fi
+  fi
+  t="$(now)"
+  jq -nc --argjson e "${expected}" --argjson o "${ok}" --argjson i "${incident}" \
+    '{expected: $e, ok: $o, incident_open: $i}' >"${state_dir}/prod.json"
+  # The session reads this history: it cannot run prod-smoke itself, because
+  # the TLS check needs a direct connection the sandbox does not allow.
+  if [ "${expected}" = true ]; then
+    jq -nc --argjson at "${t}" --argjson o "${ok}" '{at: $at, ok: $o}' >>"${state_dir}/prod-history.jsonl"
+  fi
+}
+
+# track_claims: metrics for issues this machine claimed that closed (delivered)
+# or lost the machine label (unclaimed). <state>/claimed holds "<n> <first-seen>".
+track_claims() {
+  [ -f "${state_dir}/issues.json" ] || return 0
+  me="$(machine)"
+  t="$(now)"
+  mine="$(jq -r --arg l "machine:${me}" '.[] | select(.labels | index($l)) | .number' "${state_dir}/issues.json")"
+  listed="$(jq -r '.[].number' "${state_dir}/issues.json")"
+  : >"${state_dir}/claimed.new"
+  if [ -f "${state_dir}/claimed" ]; then
+    while read -r n seen; do
+      if printf '%s\n' "${mine}" | grep -qx "${n}"; then
+        printf '%s %s\n' "${n}" "${seen}" >>"${state_dir}/claimed.new"
+      elif printf '%s\n' "${listed}" | grep -qx "${n}"; then
+        metric unclaimed issue "${n}"
+      else
+        closed_as="$("${script_dir}/agent-loop-gh" issue-state "${n}" </dev/null 2>/dev/null || printf 'unknown')"
+        case "${closed_as}" in
+          completed)
+            metric delivered issue "${n}" seconds "$((t - seen))"
+            rm -f "${state_dir}/stall-episode" "${state_dir}/episode-nudges"
+            ;;
+          open | unknown) printf '%s %s\n' "${n}" "${seen}" >>"${state_dir}/claimed.new" ;;
+          *) metric unclaimed issue "${n}" ;;
+        esac
+      fi
+    done <"${state_dir}/claimed"
+  fi
+  for n in ${mine}; do
+    grep -q "^${n} " "${state_dir}/claimed.new" || printf '%s %s\n' "${n}" "${t}" >>"${state_dir}/claimed.new"
+  done
+  mv -f "${state_dir}/claimed.new" "${state_dir}/claimed"
+}
+
+# session_row: the `claude agents --json` entry for the Agent Loop, or nothing.
+# It matches the session name, or the pid of the session's tmux pane (the
+# launcher execs claude), in case a /clear drops the name.
+session_row() {
+  agents="$(claude agents --json 2>/dev/null)" || agents='[]'
+  pane_pid=0
+  p="$(read_or "${state_dir}/pane" '')"
+  if [ -n "${p}" ]; then
+    pane_pid="$(tmux display-message -p -t "${p}" '#{pane_pid}' 2>/dev/null)" || pane_pid=0
+    case "${pane_pid}" in "" | *[!0-9]*) pane_pid=0 ;; *) ;; esac
+  fi
+  printf '%s\n' "${agents}" | jq -c --arg n "${session_name}" --argjson pp "${pane_pid}" \
+    '[.[]? | select(.pid != null and (.name == $n or ($pp > 0 and .pid == $pp)))][0] // empty' 2>/dev/null || true
+}
+
+# pane: the tmux pane running the session, if it is still alive.
+pane() {
+  p="$(read_or "${state_dir}/pane" '')"
+  [ -n "${p}" ] || return 0
+  dead="$(tmux display-message -p -t "${p}" '#{pane_dead}' 2>/dev/null || printf 'gone')"
+  if [ "${dead}" = 0 ]; then printf '%s\n' "${p}"; fi
+}
+
+# The state file written by the status line or heartbeat. Only the loop
+# session's settings configure those writers, and every (re)start resets the
+# files, so a reading belongs to the current session whatever its session id
+# (which changes on /clear).
+fresh_json() {
+  [ -s "$1" ] || return 0
+  jq -c 'select(type == "object")' "$1" 2>/dev/null || true
+}
+
+snapshot() {
+  t="$(now)"
+  me="$(machine)"
+  stop=false
+  [ ! -e "${state_dir}/stop" ] || stop=true
+  issues="$(read_or "${state_dir}/issues.json" '[]')"
+  prod="$(read_or "${state_dir}/prod.json" '{"expected":false,"ok":true,"incident_open":false}')"
+  row="$(session_row)"
+  live_pane="$(pane)"
+  started_at="$(read_or "${state_dir}/started-at" "${t}")"
+  if [ -n "${row}" ]; then
+    session="$(printf '%s\n' "${row}" | jq -c --argjson fallback "${started_at}" \
+      '{status: (if .status == "busy" or .status == "waiting" or .status == "idle" then .status else "unknown" end),
+        waiting_for: (if .waitingFor == null then null
+          elif ([.waitingFor] | inside(["permission prompt", "input needed", "sandbox request", "worker request", "dialog open"]))
+          then .waitingFor else "other" end),
+        started_at: (if .startedAt then (.startedAt / 1000 | floor) else $fallback end)}')"
+  elif [ -n "${live_pane}" ]; then
+    session="$(jq -nc --argjson s "${started_at}" '{status: "unknown", waiting_for: null, started_at: $s}')"
+  else
+    session=null
+  fi
+  heartbeat="$(fresh_json "${state_dir}/heartbeat")"
+  context="$(fresh_json "${state_dir}/context")"
+  episode_nudges="$(read_or "${state_dir}/episode-nudges" 0)"
+  case "${episode_nudges}" in "" | *[!0-9]*) episode_nudges=0 ;; *) ;; esac
+  escalations="$(read_or "${state_dir}/stall-episode" 0)"
+  case "${escalations}" in "" | *[!0-9]*) escalations=0 ;; *) ;; esac
+  nudges="$(if [ -s "${state_dir}/nudges" ]; then jq -sc . "${state_dir}/nudges"; else printf '[]'; fi)"
+  last_start="$(read_or "${state_dir}/last-start" null)"
+  jq -n \
+    --argjson now "${t}" --arg machine "${me}" --argjson stop "${stop}" \
+    --argjson issues "${issues}" --argjson prod "${prod}" --argjson session "${session}" \
+    --argjson heartbeat "${heartbeat:-null}" --argjson context "${context:-null}" \
+    --argjson nudges "${nudges}" --argjson last_start "${last_start}" \
+    --argjson escalations "${escalations}" --argjson episode_nudges "${episode_nudges}" \
+    --argjson max_episode_nudges "${AGENT_LOOP_MAX_EPISODE_NUDGES:-6}" \
+    --argjson stall "${AGENT_LOOP_STALL_SECONDS:-900}" \
+    --argjson tool_timeout "${AGENT_LOOP_TOOL_TIMEOUT_SECONDS:-600}" \
+    --argjson max_escalations "${AGENT_LOOP_MAX_ESCALATIONS:-2}" \
+    --argjson gap "${AGENT_LOOP_NUDGE_GAP_SECONDS:-300}" \
+    --argjson window "${AGENT_LOOP_NUDGE_WINDOW_SECONDS:-1800}" \
+    --argjson max_nudges "${AGENT_LOOP_MAX_NUDGES:-2}" \
+    --argjson restart "${AGENT_LOOP_RESTART_PCT:-45}" \
+    --argjson force "${AGENT_LOOP_FORCE_RESTART_PCT:-60}" \
+    --argjson cooldown "${AGENT_LOOP_START_COOLDOWN_SECONDS:-600}" \
+    '{
+      now: $now, machine: $machine, stop_requested: $stop, issues: $issues, prod: $prod,
+      session: $session,
+      tool_running: ($heartbeat.phase? == "pre"),
+      last_activity_at: ([$heartbeat.at?, $context.at?] | map(select(. != null)) | max),
+      context_pct: (if $session == null then null else $context.pct? end),
+      nudges: $nudges, escalations: $escalations, episode_nudges: $episode_nudges, last_start_at: $last_start,
+      config: {stall_seconds: $stall, tool_timeout_seconds: $tool_timeout,
+        nudge_gap_seconds: $gap, nudge_window_seconds: $window,
+        max_nudges: $max_nudges, max_escalations: $max_escalations, max_episode_nudges: $max_episode_nudges,
+        restart_pct: $restart, force_restart_pct: $force,
+        start_cooldown_seconds: $cooldown}
+    }'
+}
+
+# ---- acting ----
+
+ensure_worktree() {
+  safe_path "${worktree}"
+  safe_path "${state_dir}"
+  safe_path "${token_file}"
+  # A separate clone, not a `git worktree`: a worktree's objects, refs and
+  # config live in the main repository's .git, outside the sandbox's write
+  # scope, and opening that up would let the session rewrite the config the
+  # Supervisor and the human run git with. The clone's own .git is inside the
+  # sandbox scope, and its config and hooks stay protected there.
+  if [ ! -d "${worktree}" ]; then
+    origin_url="$(git -C "${main_root}" remote get-url origin)"
+    git clone --quiet --no-checkout "${main_root}" "${worktree}"
+    git -C "${worktree}" remote set-url origin "${origin_url}"
+    retry 3 git -C "${worktree}" fetch --quiet origin main
+    git -C "${worktree}" checkout --quiet --detach origin/main
+    log "created the Agent Loop checkout ${worktree}"
+  fi
+  # The Supervisor creates nothing else in the checkout here: the session
+  # creates its gh config and cache directories itself, inside its sandbox.
+}
+
+# token_state: "ok" when the least-privilege token file exists, is a regular
+# non-empty file owned by this user, and has mode 0600; otherwise "missing".
+token_state() {
+  me_uid="$(id -u)"
+  found=""
+  if [ -s "${token_file}" ]; then
+    found="$(find "${token_file}" -prune -type f -user "${me_uid}" -perm 600 2>/dev/null || true)"
+  fi
+  if [ -n "${found}" ] && [ "${found}" = "${token_file}" ]; then printf 'ok\n'; else printf 'missing\n'; fi
+}
+
+# pinned_sha: the commit in <state>/runtime-pin, if it is a full SHA.
+pinned_sha() {
+  pin="$(read_or "${pin_file}" '')"
+  case "${pin}" in
+    [0-9a-f]*)
+      others="$(printf '%s' "${pin}" | tr -d '0-9a-f')"
+      if [ "${#pin}" -eq 40 ] && [ -z "${others}" ]; then printf '%s\n' "${pin}"; fi
+      ;;
+    *) ;;
+  esac
+}
+
+# runtime_paths <sha>: the runtime and provisioning files that exist at <sha>.
+runtime_paths() {
+  git -C "${runtime_repo}" ls-tree -r --name-only "$1" -- \
+    scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
+    .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md \
+    package.json package-lock.json infra .githooks
+}
+
+# refresh_runtime: export the pinned commit's settings, status line, hooks,
+# skill and lockfiles into <state>/runtime, read-only, and write the session
+# settings there. Nothing newer than the pin, and nothing from the session's
+# checkout, is ever exported.
+refresh_runtime() {
+  pin="$(pinned_sha)"
+  [ -n "${pin}" ] || return 1
+  current="$(read_or "${runtime_dir}/PIN" '')"
+  if [ "${current}" = "${pin}" ] && [ -s "${runtime_dir}/session-settings.json" ]; then return 0; fi
+  if ! git -C "${runtime_repo}" cat-file -e "${pin}^{commit}" 2>/dev/null; then
+    retry 3 git -C "${runtime_repo}" fetch --quiet origin
+  fi
+  new="${state_dir}/runtime.new"
+  if [ -d "${new}" ]; then chmod -R u+w "${new}" && rm -rf "${new}"; fi
+  mkdir -p "${new}"
+  paths="$(runtime_paths "${pin}")"
+  printf '%s\n' "${paths}" | grep -qx '.claude/agent-loop-settings.json' || return 1
+  printf '%s\n' "${paths}" >"${new}.paths"
+  git -C "${runtime_repo}" archive --format=tar -o "${new}.tar" "${pin}" -- .claude/agent-loop-settings.json
+  tar -x -f "${new}.tar" -C "${new}"
+  while IFS= read -r path; do
+    git -C "${runtime_repo}" archive --format=tar -o "${new}.tar" "${pin}" -- "${path}"
+    tar -x -f "${new}.tar" -C "${new}"
+  done <"${new}.paths"
+  rm -f "${new}.tar" "${new}.paths"
+  printf '%s\n' "${pin}" >"${new}/PIN"
+  token_parent="$(dirname "${token_file}")"
+  token_dir="${token_parent}"
+  if [ -d "${token_parent}" ]; then token_dir="$(cd "${token_parent}" && pwd -P)"; fi
+  me="$(machine)"
+  # Absolute paths are given in both the single-slash and the double-slash form,
+  # so they hold whichever form the sandbox reads as absolute.
+  jq --arg sl "'${runtime_dir}/scripts/claude-statusline'" \
+    --arg pre "'${runtime_dir}/scripts/agent-loop-heartbeat' pre" \
+    --arg post "'${runtime_dir}/scripts/agent-loop-heartbeat' post" \
+    --arg state "${state_dir}" --arg machine "${me}" --arg pin "${pin}" \
+    --arg token_dir "${token_dir}" --arg runtime "${runtime_dir}" '
+      .statusLine = {type: "command", command: $sl}
+      | .env = ((.env // {}) + {AGENT_LOOP_STATE_DIR: $state, AGENT_LOOP_MACHINE: $machine,
+          AGENT_LOOP_CI_DEPS: ($state + "/ci-deps/" + $pin)})
+      | .sandbox.filesystem.denyRead = ((.sandbox.filesystem.denyRead // []) + [$token_dir, "/" + $token_dir] | unique)
+      | .permissions.deny = ((.permissions.deny // []) + ["Read(/" + $token_dir + "/**)"] | unique)
+      | .permissions.allow = ((.permissions.allow // []) + ["Read(/" + $runtime + "/**)"] | unique)
+      | .hooks = {
+          PreToolUse: [{hooks: [{type: "command", command: $pre, async: true}]}],
+          PostToolUse: [{hooks: [{type: "command", command: $post, async: true}]}],
+          PostToolUseFailure: [{hooks: [{type: "command", command: $post, async: true}]}]
+        }' "${new}/.claude/agent-loop-settings.json" >"${new}/session-settings.json"
+  if [ -d "${runtime_dir}" ]; then chmod -R u+w "${runtime_dir}" && rm -rf "${runtime_dir}"; fi
+  mv "${new}" "${runtime_dir}"
+  chmod -R a-w "${runtime_dir}"
+}
+
+# provision_ci: install what task ci:sandbox downloads (npm packages from the
+# pinned package-lock.json with --ignore-scripts, OpenTofu providers from the
+# pinned lockfiles) once per pin, outside the sandbox, into the state dir, and
+# make the result read-only. The Supervisor never writes into the session's
+# checkout: the session copies these in itself, sandboxed, with
+# scripts/agent-loop-deps (AGENT_LOOP_CI_DEPS points here). Pinning a commit
+# trusts its npm and tofu init steps with full user access (docs/agent-loop.md).
+provision_ci() {
+  pin="$(pinned_sha)"
+  deps="${state_dir}/ci-deps/${pin}"
+  if [ -e "${deps}/.done" ]; then return 0; fi
+  if [ -d "${deps}" ]; then chmod -R u+w "${deps}" && rm -rf "${deps}"; fi
+  mkdir -p "${deps}"
+  cp -RP "${runtime_dir}/." "${deps}/"
+  chmod -R u+w "${deps}"
+  if [ -f "${deps}/package-lock.json" ]; then
+    (cd "${deps}" && npm_config_cache="${deps}/npm-cache" npm ci --ignore-scripts --no-audit --no-fund >/dev/null)
+  fi
+  if [ -d "${deps}/infra" ]; then
+    for tf_dir in $(find "${deps}/infra" -name .terraform -prune -o -type f -name '*.tf' -print | sed 's|/[^/]*$||' | sort -u); do
+      TF_CLI_CONFIG_FILE=/dev/null tofu -chdir="${tf_dir}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+    done
+  fi
+  : >"${deps}/.done"
+  chmod -R a-w "${deps}"
+}
+
+# checkout_users: pids of live processes with the checkout open (as cwd or
+# as an open file). A process the last session left behind (double-forked,
+# setsid) is invisible to kill_tree but not to lsof.
+checkout_users() {
+  lsof -t +D "${worktree}" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true
+}
+
+# kill_tree <pid>: stop a process and every descendant (a session's background
+# jobs can outlive its tmux pane), then its process group.
+kill_tree() {
+  root="$1"
+  case "${root}" in "" | 0 | 1 | *[!0-9]*) return 0 ;; *) ;; esac
+  table="$(ps -A -o pid= -o ppid= 2>/dev/null || true)"
+  victims="${root}"
+  frontier="${root}"
+  while [ -n "${frontier}" ]; do
+    next=""
+    for parent_pid in ${frontier}; do
+      children="$(printf '%s\n' "${table}" | awk -v p="${parent_pid}" '$2 == p { print $1 }')"
+      next="${next} ${children}"
+    done
+    frontier="$(printf '%s\n' "${next}" | tr ' ' '\n' | sed '/^$/d')"
+    victims="${victims} ${frontier}"
+  done
+  for victim in ${victims}; do kill -TERM "${victim}" 2>/dev/null || true; done
+  kill -TERM -- "-${root}" 2>/dev/null || true
+}
+
+# process_identity <pid>: "<start time>|<command name>" of a live process, or
+# nothing. A pid plus its start time names one process, even after pid reuse.
+process_identity() {
+  case "$1" in "" | *[!0-9]*) return 0 ;; *) ;; esac
+  started="$(ps -o lstart= -p "$1" 2>/dev/null || true)"
+  command_name="$(ps -o comm= -p "$1" 2>/dev/null || true)"
+  if [ -n "${started}" ]; then printf '%s|%s\n' "${started}" "${command_name##*/}"; fi
+}
+
+# record_session <pid>: remember the session's claude process by pid, start
+# time and command name, so a later kill can prove it is the same process.
+record_session() {
+  identity="$(process_identity "$1")"
+  if [ -n "${identity}" ]; then printf '%s\t%s\n' "$1" "${identity}" >"${state_dir}/session-pid"; fi
+}
+
+# kill_previous_session: before provisioning, nothing the last session started
+# may still be running with write access to the checkout. The recorded pid is
+# killed only while it is still the same process (pid, start time and command
+# name all match); a reused pid is never killed.
+kill_previous_session() {
+  if [ -s "${state_dir}/session-pid" ]; then
+    tab="$(printf '\t')"
+    recorded="$(head -n 1 "${state_dir}/session-pid")"
+    old="${recorded%%"${tab}"*}"
+    want="${recorded#*"${tab}"}"
+    have="$(process_identity "${old}")"
+    if [ -n "${have}" ] && [ "${have}" = "${want}" ]; then
+      kill_tree "${old}"
+    elif [ -n "${have}" ]; then
+      log "not killing pid ${old}: it is no longer the session's process (${have})"
+    fi
+  fi
+  rm -f "${state_dir}/session-pid"
+}
+
+# loop_prompt: what the Supervisor types to start or nudge a pass. It points at
+# the pinned copy of the skill, so the instructions the session follows are the
+# ones a human pinned, whatever its checkout or the skill loader holds.
+loop_prompt() {
+  printf "Run the Agent Loop: run cat '%s/.claude/skills/agent-loop/SKILL.md' and follow it exactly.\n" "${runtime_dir}"
+}
+
+send() {
+  p="$(pane)"
+  if [ -z "${p}" ]; then
+    log "no live tmux pane for the session; cannot send $*"
+    return 0
+  fi
+  case "$1" in
+    Escape | Enter) tmux send-keys -t "${p}" "$1" ;;
+    *)
+      tmux send-keys -t "${p}" -l "$1"
+      tmux send-keys -t "${p}" Enter
+      ;;
+  esac
+}
+
+# A (re)started session gets a fresh heartbeat (for any session id), so the
+# stall clock starts now rather than when the claude process started.
+reset_session_state() {
+  rm -f "${state_dir}/nudges" "${state_dir}/context"
+  t="$(now)"
+  printf '{"session_id":"","at":%s,"phase":"reset"}\n' "${t}" >"${state_dir}/heartbeat"
+}
+
+# write_launcher: the pane's command. Everything the session can reach comes
+# from here: the sandboxed settings in the read-only runtime copy, the
+# least-privilege token, an empty gh config, git over HTTPS with that token
+# only (SSH cannot pass the sandbox's proxy), and no AWS or SSH agent variables.
+write_launcher() {
+  me="$(machine)"
+  pin="$(pinned_sha)"
+  launcher="${state_dir}/launch"
+  rm -f "${launcher}"
+  cat >"${launcher}" <<EOF
+#!/bin/sh
+# Written by scripts/agent-loop-supervisor; runs in the session's tmux pane.
+cd '${worktree}' || exit 1
+if command -v mise >/dev/null 2>&1; then
+  toolchain="\$(mise env -C '${main_root}' --shell bash)" || exit 1
+  eval "\${toolchain}"
+fi
+unset SSH_AUTH_SOCK AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GITHUB_TOKEN TMUX TMUX_PANE
+GH_TOKEN="\$(cat '${token_file}')" || exit 1
+GH_CONFIG_DIR='${worktree}/.agent-loop/gh-config'
+GH_NO_UPDATE_NOTIFIER=1
+GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_COUNT=5
+GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
+GIT_CONFIG_VALUE_0=git@github.com:
+GIT_CONFIG_KEY_1=credential.helper
+GIT_CONFIG_VALUE_1=
+GIT_CONFIG_KEY_2=credential.helper
+GIT_CONFIG_VALUE_2='!gh auth git-credential'
+GIT_CONFIG_KEY_3=core.sshCommand
+GIT_CONFIG_VALUE_3=false
+GIT_CONFIG_KEY_4=core.hooksPath
+GIT_CONFIG_VALUE_4='${runtime_dir}/.githooks'
+AGENT_LOOP_CI_DEPS='${state_dir}/ci-deps/${pin}'
+XDG_CACHE_HOME='${worktree}/.agent-loop/cache'
+npm_config_cache='${worktree}/.agent-loop/cache/npm'
+npm_config_offline=true
+HUGO_CACHEDIR='${worktree}/.agent-loop/cache/hugo'
+AGENT_LOOP_STATE_DIR='${state_dir}'
+AGENT_LOOP_MACHINE='${me}'
+export GH_TOKEN GH_CONFIG_DIR GH_NO_UPDATE_NOTIFIER GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \\
+  GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \\
+  GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 GIT_CONFIG_KEY_4 GIT_CONFIG_VALUE_4 AGENT_LOOP_CI_DEPS XDG_CACHE_HOME npm_config_cache npm_config_offline HUGO_CACHEDIR AGENT_LOOP_STATE_DIR AGENT_LOOP_MACHINE
+exec claude --name '${session_name}' --remote-control '${session_name}' --permission-mode dontAsk \\
+  --restricted --strict-mcp-config --tools 'Bash,Read,Edit,Write,Glob,Grep,Agent,WebFetch,Skill' \\
+  --settings '${runtime_dir}/session-settings.json'
+EOF
+  chmod 0500 "${launcher}"
+}
+
+do_start() {
+  ts="$(token_state)"
+  if [ "${ts}" != ok ]; then
+    log "refusing to start a session: no least-privilege token at ${token_file} (mode 0600); see docs/agent-loop.md"
+    return 0
+  fi
+  pin="$(pinned_sha)"
+  if [ -z "${pin}" ]; then
+    log "refusing to start a session: no runtime pin (a human runs task loop:start or task loop:pin -- <sha>)"
+    return 0
+  fi
+  # A failure in any step below ends this tick; the next tick tries again.
+  kill_previous_session
+  if [ -d "${worktree}" ]; then
+    users="$(checkout_users)"
+    if [ -n "${users}" ]; then
+      log "refusing to start a session: processes still use the checkout (pids ${users})"
+      do_escalate none "checkout in use by leftover processes ${users}"
+      return 0
+    fi
+  fi
+  ensure_worktree
+  refresh_runtime
+  provision_ci
+  write_launcher
+  if [ -n "${TMUX_PANE:-}" ]; then
+    p="$(retry 2 tmux split-window -d -P -F '#{pane_id}' -t "${TMUX_PANE}" -c "${worktree}" "'${launcher}'")"
+  elif tmux has-session -t '=agent-loop' 2>/dev/null; then
+    p="$(retry 2 tmux new-window -d -P -F '#{pane_id}' -t '=agent-loop:' -c "${worktree}" "'${launcher}'")"
+  else
+    p="$(retry 2 tmux new-session -d -P -F '#{pane_id}' -s agent-loop -c "${worktree}" "'${launcher}'")"
+  fi
+  t="$(now)"
+  printf '%s\n' "${p}" >"${state_dir}/pane"
+  printf '%s\n' "${t}" >"${state_dir}/last-start"
+  printf '%s\n' "${t}" >"${state_dir}/started-at"
+  rm -f "${state_dir}/episode-nudges"
+  reset_session_state
+  metric session_start reason "$1"
+  # The prompt is typed once the session is listed and idle, so the optional
+  # --remote-control name can never swallow it.
+  i=0
+  while [ "${i}" -lt 45 ]; do
+    row="$(session_row)"
+    status="$(printf '%s\n' "${row}" | jq -r '.status // empty')"
+    if [ "${status}" = idle ]; then
+      session_pid="$(printf '%s\n' "${row}" | jq -r '.pid // empty')"
+      record_session "${session_pid}"
+      prompt="$(loop_prompt)"
+      send "${prompt}"
+      log "started the session in pane ${p}"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 2
+  done
+  log "the session in pane ${p} never became idle (workspace not trusted, sandbox unavailable, or not logged in?); nudges will retry"
+}
+
+do_nudge() {
+  status="$1"
+  if [ "${status}" != idle ]; then send Escape; fi
+  prompt="$(loop_prompt)"
+  send "${prompt}"
+  now >>"${state_dir}/nudges"
+  count="$(read_or "${state_dir}/episode-nudges" 0)"
+  case "${count}" in "" | *[!0-9]*) count=0 ;; *) ;; esac
+  printf '%s\n' "$((count + 1))" >"${state_dir}/episode-nudges"
+  metric nudge reason "$2"
+}
+
+kill_session() {
+  kill_previous_session
+  p="$(pane)"
+  if [ -n "${p}" ]; then
+    tmux kill-pane -t "${p}" 2>/dev/null || true
+  else
+    row="$(session_row)"
+    pid="$(printf '%s\n' "${row}" | jq -r '.pid // empty')"
+    if [ -n "${pid}" ]; then kill -INT "${pid}" 2>/dev/null || true; fi
+  fi
+  rm -f "${state_dir}/pane" "${state_dir}/started-at" "${state_dir}/episode-nudges"
+  reset_session_state
+}
+
+# do_escalate: at most one GitHub write per stall episode (an episode ends when
+# an issue is delivered or a human runs task loop:start). After
+# config.max_escalations escalations in one episode, agent_loop_decide holds:
+# no new session until a human has looked.
+do_escalate() {
+  reason="$2"
+  case "${reason}" in
+    checkout*) title="Agent Loop held: leftover processes use the session checkout" ;;
+    waiting*) title="Agent Loop stalled: session waiting on a prompt" ;;
+    idle*) title="Agent Loop stalled: session idle with work and nudges did not help" ;;
+    *) title="Agent Loop stalled: session busy with no heartbeat" ;;
+  esac
+  count="$(read_or "${state_dir}/stall-episode" 0)"
+  case "${count}" in "" | *[!0-9]*) count=0 ;; *) ;; esac
+  if [ "${count}" -eq 0 ]; then
+    body="$(mktemp)"
+    me="$(machine)"
+    pct="unknown"
+    if [ -s "${state_dir}/context" ]; then pct="$(jq -r '.pct // "unknown"' "${state_dir}/context")"; fi
+    cat >"${body}" <<EOF
+The Supervisor nudged the Agent Loop session ${AGENT_LOOP_MAX_NUDGES:-2} times with no sign of life after the nudges, so it restarted the session. After ${AGENT_LOOP_MAX_ESCALATIONS:-2} such restarts in one episode it holds the loop until a human runs task loop:start.
+
+- Machine: ${me}
+- Status: $1
+- Reason: ${reason}
+- Context: ${pct}%
+
+This is for a human. Changes to the loop's permissions, sandbox, token or allowlist (.claude/agent-loop-settings.json) are human-only; a fix to the skill or the Supervisor goes through a normal ready-for-agent issue that a human files.
+EOF
+    if ! "${script_dir}/agent-loop-gh" file-stall "${title}" "${body}"; then
+      log "filing the stall issue failed"
+    fi
+    rm -f "${body}"
+  else
+    log "stall episode already reported; not writing to GitHub again"
+  fi
+  printf '%s\n' "$((count + 1))" >"${state_dir}/stall-episode"
+  metric stall reason "${reason}"
+  kill_session
+}
+
+do_restart() {
+  status="$1"
+  pct="$(jq -r '.pct // 0' "${state_dir}/context" 2>/dev/null || printf '0')"
+  if [ "${status}" != idle ]; then
+    send Escape
+    sleep 2
+  fi
+  send /clear
+  sleep 3
+  prompt="$(loop_prompt)"
+  send "${prompt}"
+  reset_session_state
+  metric restart pct "${pct}" reason "$2"
+}
+
+do_stop_session() {
+  send /exit
+  i=0
+  while [ "${i}" -lt 15 ]; do
+    p="$(pane)"
+    [ -n "${p}" ] || break
+    i=$((i + 1))
+    sleep 2
+  done
+  kill_session
+  metric shutoff reason "$1"
+}
+
+# tick: gather, decide, act. Exits the script on the exit action.
+tick() {
+  refresh_github
+  snap="${state_dir}/snapshot.json"
+  snapshot >"${snap}.tmp"
+  mv -f "${snap}.tmp" "${snap}"
+  decision="$(agent_loop_decide "${snap}")"
+  action="$(printf '%s\n' "${decision}" | cut -f 1)"
+  reason="$(printf '%s\n' "${decision}" | cut -f 2-)"
+  status="$(jq -r '.session.status // "none"' "${snap}")"
+  printf '%s\n' "${decision}" >"${state_dir}/last-decision"
+  if [ "${action}" != wait ]; then log "${action}: ${reason}"; fi
+  case "${action}" in
+    wait) ;;
+    start) do_start "${reason}" ;;
+    nudge) do_nudge "${status}" "${reason}" ;;
+    escalate) do_escalate "${status}" "${reason}" ;;
+    restart) do_restart "${status}" "${reason}" ;;
+    stop-session) do_stop_session "${reason}" ;;
+    exit)
+      metric supervisor_exit reason "${reason}"
+      log "stop file set and no session running; exiting (task loop:start resumes)"
+      exit "${exit_tick}"
+      ;;
+    *) die "unknown action from agent_loop_decide: ${action}" ;;
+  esac
+}
+
+# check <label> <command...>: one preflight line; counts failures.
+check() {
+  label="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf 'PASS  %s\n' "${label}"
+  else
+    printf 'FAIL  %s\n' "${label}"
+    preflight_failures=$((preflight_failures + 1))
+  fi
+}
+
+# Probes with only the loop's token and an empty gh config (never the owner's login).
+token_reads_repo() {
+  (cd "${repo_root}" && GH_TOKEN="${loop_token}" GITHUB_TOKEN='' GH_CONFIG_DIR="${empty_gh}" gh api 'repos/{owner}/{repo}')
+}
+token_lacks_administration() {
+  if (cd "${repo_root}" && GH_TOKEN="${loop_token}" GITHUB_TOKEN='' GH_CONFIG_DIR="${empty_gh}" \
+    gh api 'repos/{owner}/{repo}/branches/main/protection') >/dev/null 2>&1; then
+    return 1
+  fi
+}
+token_lacks_secrets() {
+  if (cd "${repo_root}" && GH_TOKEN="${loop_token}" GITHUB_TOKEN='' GH_CONFIG_DIR="${empty_gh}" \
+    gh api 'repos/{owner}/{repo}/actions/secrets') >/dev/null 2>&1; then
+    return 1
+  fi
+}
+
+# With the owner's gh login: an active tag ruleset that restricts creating,
+# moving (update) and deleting v* tags, excludes nothing, and lets no role or user bypass it (the loop's
+# token acts as a user with a repository role). Only a deploy key or a GitHub
+# App may bypass, so a human releases with one of those, or by deliberately
+# turning the ruleset off and on again.
+tag_ruleset_protects_releases() {
+  list="$(cd "${repo_root}" && gh api 'repos/{owner}/{repo}/rulesets?targets=tag')"
+  ids="$(printf '%s\n' "${list}" | jq -r '.[]? | select(.target == "tag" and .enforcement == "active") | .id')"
+  for id in ${ids}; do
+    detail="$(cd "${repo_root}" && gh api "repos/{owner}/{repo}/rulesets/${id}" || true)"
+    if printf '%s\n' "${detail}" | jq -e '
+        .enforcement == "active"
+        and ((.conditions.ref_name.include // []) | any(. == "~ALL" or . == "refs/tags/v*" or . == "refs/tags/v**"))
+        and ((.conditions.ref_name.exclude // []) | length == 0)
+        and ([(.rules // [])[].type] | index("creation") != null and index("update") != null and index("deletion") != null)
+        and ((.bypass_actors // []) | all(.actor_type == "DeployKey" or .actor_type == "Integration"))' >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# production requires a reviewer, admins cannot bypass it, and nobody approves
+# a deployment they triggered.
+production_needs_reviewer() {
+  env_json="$(cd "${repo_root}" && gh api 'repos/{owner}/{repo}/environments/production')"
+  printf '%s\n' "${env_json}" | jq -e '
+    (.can_admins_bypass == false)
+    and ([.protection_rules[]? | select(.type == "required_reviewers" and .prevent_self_review == true)] | length > 0)'
+}
+
+# token_fingerprint: a SHA-256 of the token file (never the token itself).
+token_fingerprint() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum <"${token_file}" | cut -d ' ' -f 1
+  else
+    shasum -a 256 <"${token_file}" | cut -d ' ' -f 1
+  fi
+}
+
+token_confirmed() {
+  [ -s "${state_dir}/token-confirmed" ] || return 1
+  want="$(token_fingerprint)"
+  have="$(cat "${state_dir}/token-confirmed")"
+  [ "${want}" = "${have}" ]
+}
+
+runtime_pinned() {
+  pin="$(pinned_sha)"
+  [ -n "${pin}" ] && git -C "${runtime_repo}" cat-file -e "${pin}^{commit}"
+}
+
+# The token permissions preflight cannot probe without using them.
+unprobed_permissions='Workflows, Environments, Variables, Secrets, Deployments, Administration'
+
+confirm_token() {
+  ts="$(token_state)"
+  [ "${ts}" = ok ] || die "no token file at ${token_file} (mode 0600); create it first (docs/agent-loop.md)"
+  cat <<EOF
+Confirm, from the token's settings page on GitHub, that the Agent Loop token has
+NONE of these permissions: ${unprobed_permissions}.
+
+Workflows matters most: a token that can push .github/workflows/* can add a
+workflow that runs on push with the repository's secrets and its OIDC deploy
+role, so it could release, deploy or leak secrets without any review.
+
+Type exactly "I confirm" to record this for the current token file:
+EOF
+  IFS= read -r answer || answer=""
+  [ "${answer}" = "I confirm" ] || die "not confirmed"
+  token_fingerprint >"${state_dir}/token-confirmed"
+  printf 'confirm-token: recorded for the current token (a new token needs a new confirmation)\n'
+}
+
+pin_runtime() {
+  sha="${1:-}"
+  case "${sha}" in
+    "" | *[!0-9a-f]*) die "usage: task loop:pin -- <40-character commit SHA>" ;;
+    *) ;;
+  esac
+  [ "${#sha}" -eq 40 ] || die "usage: task loop:pin -- <40-character commit SHA>"
+  git -C "${runtime_repo}" cat-file -e "${sha}^{commit}" 2>/dev/null || die "${sha} is not a commit here (git fetch first)"
+  if git -C "${runtime_repo}" rev-parse --verify --quiet origin/main >/dev/null; then
+    git -C "${runtime_repo}" merge-base --is-ancestor "${sha}" origin/main || die "${sha} is not on origin/main"
+  fi
+  printf '%s\n' "${sha}" >"${pin_file}"
+  printf 'loop:pin: the session runtime is pinned to %s (takes effect at the next session start)\n' "${sha}"
+}
+
+sandbox_available() {
+  case "$(uname -s)" in
+    Darwin) command -v sandbox-exec ;;
+    Linux) command -v bwrap && command -v socat ;;
+    *) return 1 ;;
+  esac
+}
+
+token_file_ok() {
+  ts="$(token_state)"
+  [ "${ts}" = ok ]
+}
+
+# preflight: the human-only steps of docs/agent-loop.md, verified. Sets
+# preflight_failures (0 when every check passed); never fails itself.
+preflight() {
+  preflight_failures=0
+  printf 'Agent Loop preflight (docs/agent-loop.md):\n'
+  check "token file ${token_file} exists, owned by you, mode 0600" token_file_ok
+  ts="$(token_state)"
+  if [ "${ts}" = ok ]; then
+    loop_token="$(cat "${token_file}")"
+    empty_gh="$(mktemp -d)"
+    check "the token can read this repository" token_reads_repo
+    check "the token cannot read branch protection (no Administration permission)" token_lacks_administration
+    check "the token cannot read Actions secrets (no Secrets permission)" token_lacks_secrets
+    rm -rf "${empty_gh}"
+    loop_token=""
+    check "you confirmed the token has none of: ${unprobed_permissions} (task loop:confirm-token)" token_confirmed
+  fi
+  check "the runtime is pinned to a commit a human chose (task loop:start or task loop:pin)" runtime_pinned
+  check "an active tag ruleset restricts creating, updating and deleting v* tags" tag_ruleset_protects_releases
+  check "production requires a reviewer, admins cannot bypass, no self-review" production_needs_reviewer
+  check "Claude Code's sandbox is available (sandbox-exec, or bwrap and socat)" sandbox_available
+  check "lsof is available (leftover session processes are found before a start)" command -v lsof
+  printf 'preflight: %s failed\n' "${preflight_failures}"
+}
+
+supervisor_pid() {
+  pid="$(read_or "${state_dir}/supervisor.pid" '')"
+  if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then printf '%s\n' "${pid}"; fi
+}
+
+run() {
+  other="$(supervisor_pid)"
+  [ -z "${other}" ] || die "a Supervisor already runs (pid ${other})"
+  for tool in claude tmux gh jq git; do
+    command -v "${tool}" >/dev/null 2>&1 || die "${tool} is not on PATH (task setup installs the pinned tools)"
+  done
+  preflight
+  [ "${preflight_failures}" -eq 0 ] || die "preflight failed: no unattended runs until the human steps in docs/agent-loop.md are done"
+  printf '%s\n' "$$" >"${state_dir}/supervisor.pid"
+  trap 'rm -f "${state_dir}/supervisor.pid"' EXIT
+  trap 'exit 130' INT TERM
+  me="$(machine)"
+  metric supervisor_start
+  log "machine ${me}, state ${state_dir}, worktree ${worktree}"
+  ticks=0
+  while :; do
+    # Each tick is its own process: a transient failure ends only that tick.
+    rc=0
+    "${script_dir}/agent-loop-supervisor" once || rc=$?
+    case "${rc}" in
+      0) ;;
+      "${exit_tick}") return 0 ;;
+      *) log "tick failed (status ${rc}); retrying next tick" ;;
+    esac
+    ticks=$((ticks + 1))
+    if [ -n "${AGENT_LOOP_MAX_TICKS:-}" ] && [ "${ticks}" -ge "${AGENT_LOOP_MAX_TICKS}" ]; then return 0; fi
+    sleep "${tick_seconds}"
+  done
+}
+
+start() {
+  pin="$(pinned_sha)"
+  if [ -z "${pin}" ]; then
+    retry 3 git -C "${runtime_repo}" fetch --quiet origin main
+    head="$(git -C "${runtime_repo}" rev-parse origin/main)"
+    printf '%s\n' "${head}" >"${pin_file}"
+    printf 'loop:start: pinned the session runtime to origin/main %s (task loop:pin -- <sha> moves it)\n' "${head}"
+  fi
+  preflight
+  [ "${preflight_failures}" -eq 0 ] || die "preflight failed: finish the human steps in docs/agent-loop.md, then run task loop:start again"
+  rm -f "${state_dir}/stop" "${state_dir}/stall-episode"
+  pid="$(supervisor_pid)"
+  if [ -n "${pid}" ]; then
+    printf 'loop:start: the Supervisor already runs (pid %s)\n' "${pid}"
+    return 0
+  fi
+  if tmux has-session -t '=mechafighter' 2>/dev/null; then
+    tmux split-window -d -t '=mechafighter:loops' -c "${repo_root}" "'${script_dir}/agent-loop-supervisor' run"
+    printf 'loop:start: the Supervisor starts in the loops window (task dev to watch)\n'
+  else
+    # A new tmux server inherits this environment; the human's panes must keep
+    # their own git hooks, so drop the Supervisor's hook-free git config first.
+    (
+      unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+      "${repo_root}/scripts/dev/session" start-detached
+    )
+    printf 'loop:start: started the dev session; its loops window runs the Supervisor (task dev to watch)\n'
+  fi
+}
+
+status() {
+  me="$(machine)"
+  t="$(now)"
+  pid="$(supervisor_pid)"
+  row="$(session_row)"
+  session_status="not running"
+  if [ -n "${row}" ]; then session_status="$(printf '%s\n' "${row}" | jq -r '.status // "unknown"')"; fi
+  pct="?"
+  if [ -s "${state_dir}/context" ]; then pct="$(jq -r '.pct // "?"' "${state_dir}/context")"; fi
+  last="$(read_or "${state_dir}/last-decision" 'none')"
+  printf 'machine:     %s\n' "${me}"
+  printf 'supervisor:  %s\n' "${pid:+running (pid ${pid})}${pid:-not running}"
+  if [ -e "${state_dir}/stop" ]; then printf 'stop file:   set (task loop:start clears it)\n'; fi
+  printf 'worktree:    %s\n' "${worktree}"
+  pinned="$(read_or "${pin_file}" 'none (task loop:start pins origin/main)')"
+  printf 'runtime pin: %s\n' "${pinned}"
+  printf 'session:     %s\n' "${session_status}"
+  printf 'context:     %s%%\n' "${pct}"
+  if [ -s "${state_dir}/heartbeat" ]; then
+    hb="$(jq -r '.at' "${state_dir}/heartbeat")"
+    printf 'heartbeat:   %ss ago\n' "$((t - hb))"
+  fi
+  printf 'last tick:   %s\n' "${last}" | tr '\t' ' '
+  if [ -s "${state_dir}/metrics.jsonl" ]; then
+    printf 'recent events:\n'
+    tail -n 5 "${state_dir}/metrics.jsonl" | jq -r '"  \(.at | todate) \(.event) \(.reason // .issue // "")"'
+  fi
+}
+
+cmd="${1:-}"
+case "${cmd}" in
+  run) run ;;
+  once) tick ;;
+  preflight)
+    preflight
+    [ "${preflight_failures}" -eq 0 ]
+    ;;
+  snapshot)
+    refresh_github
+    snapshot
+    ;;
+  start) start ;;
+  stop)
+    : >"${state_dir}/stop"
+    printf 'loop:stop: stop file set; the current issue finishes, then the session ends and the Supervisor exits\n'
+    ;;
+  status) status ;;
+  alias) machine ;;
+  pin) pin_runtime "${2:-}" ;;
+  confirm-token) confirm_token ;;
+  *)
+    printf 'usage: %s run|once|snapshot|preflight|start|stop|status|alias|pin <sha>|confirm-token\n' "$0" >&2
+    exit 64
+    ;;
+esac

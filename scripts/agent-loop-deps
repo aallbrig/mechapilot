@@ -1,0 +1,33 @@
+#!/bin/sh
+# Copy the tools the Supervisor pre-installed for this pin (node_modules, the
+# npm cache, OpenTofu .terraform dirs) into this checkout (#20). The Agent
+# Loop session runs this itself, inside its sandbox, before task ci:sandbox.
+# The Supervisor never writes into the session's checkout; it only provides a
+# read-only source dir, AGENT_LOOP_CI_DEPS (in its state dir).
+#
+# Usage: scripts/agent-loop-deps
+set -eu
+
+src="${AGENT_LOOP_CI_DEPS:-}"
+if [ -z "${src}" ] || [ ! -e "${src}/.done" ]; then
+  printf 'agent-loop-deps: AGENT_LOOP_CI_DEPS does not name a finished provisioning dir\n' >&2
+  exit 1
+fi
+root="$(git rev-parse --show-toplevel)"
+
+# copy <from, relative to src> <to, relative to the checkout>
+copy() {
+  rm -rf "${root:?}/$2"
+  mkdir -p "$(dirname "${root}/$2")"
+  cp -R "${src}/$1" "${root}/$2"
+  chmod -R u+w "${root}/$2"
+  printf 'agent-loop-deps: %s\n' "$2"
+}
+
+if [ -d "${src}/node_modules" ]; then copy node_modules node_modules; fi
+if [ -d "${src}/npm-cache" ]; then copy npm-cache .agent-loop/cache/npm; fi
+if [ -d "${src}/infra" ]; then
+  for tf in $(cd "${src}" && find infra -type d -name .terraform -prune -print); do
+    if [ -d "${root}/$(dirname "${tf}")" ]; then copy "${tf}" "${tf}"; fi
+  done
+fi

@@ -17,6 +17,7 @@ tasks:
       - mise trust --quiet .mise.toml
       - mise install
       - git config core.hooksPath .githooks
+      - scripts/agent-loop-supervisor alias >/dev/null
       - task: doctor
 
   doctor:
@@ -84,7 +85,16 @@ tasks:
       - check-jsonschema --builtin-schema vendor.github-workflows .github/workflows/*.yml
       - check-jsonschema --builtin-schema vendor.dependabot .github/dependabot.yml
       - check-jsonschema --schemafile schemas/taskfile.schema.json Taskfile.yml
-      - check-jsonschema --schemafile schemas/claude-code-settings.schema.json .claude/settings.json
+      - check-jsonschema --schemafile schemas/claude-code-settings.schema.json .claude/settings.json .claude/agent-loop-settings.json
+      # Authored here: the Agent Loop Supervisor's state snapshot and metrics events
+      - check-jsonschema --check-metaschema schemas/agent-loop-snapshot.schema.json schemas/agent-loop-metrics-event.schema.json
+      - check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json tests/fixtures/agent-loop/snapshot-*.json
+      - |
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "${tmp}"' EXIT
+        split -l 1 tests/fixtures/agent-loop/metrics.jsonl "${tmp}/event-"
+        for f in "${tmp}"/event-*; do mv "${f}" "${f}.json"; done
+        check-jsonschema --schemafile schemas/agent-loop-metrics-event.schema.json "${tmp}"/event-*.json
       - check-jsonschema --check-metaschema schemas/tmuxinator.schema.json
       - scripts/checks/no-erb .tmuxinator.yml
       - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
@@ -138,6 +148,8 @@ tasks:
       - scripts/checks/infra-no-identifiers
       - scripts/checks/infra-no-suppressions
       - scripts/checks/no-symlinks
+      - scripts/checks/agent-loop-skill
+      - scripts/checks/agent-loop-skill-commands
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
@@ -206,13 +218,18 @@ tasks:
         done
       - scripts/site-budget build/site/qa/mechapilot build/site/production
 
-  site:validate:
-    desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
+  site:static:
+    desc: Build the site and validate every page with html-validate (no browser, no network, no localhost)
     cmds:
       - task: site:deps
       - task: site:build
       - scripts/site-no-overrides
       - npx --no-install html-validate --max-warnings 0 "build/site/**/*.html"
+
+  site:validate:
+    desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
+    cmds:
+      - task: site:static
       - scripts/site-observe build/site/qa build/site/production
 
   site:links:
@@ -264,6 +281,14 @@ tasks:
       - task: lint
       - task: test
 
+  ci:sandbox:
+    desc: "Agent Loop session gate: task ci minus the Chrome steps that bind localhost (site-observe, Lighthouse); the ci check runs them"
+    cmds:
+      - task: ci:fast
+      - task: site:static
+      - task: site:links
+      - task: secrets
+
   ci:
     desc: The full gate (the required `ci` status check runs exactly this)
     cmds:
@@ -301,6 +326,39 @@ tasks:
     desc: Report whether login autostart is installed and whether the dev session is running
     cmds:
       - scripts/autostart/autostart status
+
+  # ---- Agent Loop (#20): the Supervisor, its metrics and the session ----
+
+  loop:start:
+    desc: "Human only: pin the runtime if unpinned, run preflight, clear the stop file and start the Supervisor in the loops window"
+    cmds:
+      - scripts/agent-loop-supervisor start
+
+  loop:pin:
+    desc: "Human only: pin the Agent Loop session's runtime (settings, hooks, status line, skill) to a commit on origin/main (usage: task loop:pin -- <sha>)"
+    cmds:
+      - scripts/agent-loop-supervisor pin {{.CLI_ARGS}}
+
+  loop:confirm-token:
+    desc: "Human only: confirm the loop's token has no Workflows, Environments, Variables, Secrets, Deployments or Administration permission"
+    interactive: true
+    cmds:
+      - scripts/agent-loop-supervisor confirm-token
+
+  loop:stop:
+    desc: Ask the Supervisor to stop after the current issue (sets the stop file)
+    cmds:
+      - scripts/agent-loop-supervisor stop
+
+  loop:status:
+    desc: Show the Agent Loop's state (machine alias, Supervisor, session, context, recent events)
+    cmds:
+      - scripts/agent-loop-supervisor status
+
+  loop:report:
+    desc: Summarize the Agent Loop's metrics (delivered per day, median time to merge, stalls, restarts, nudges)
+    cmds:
+      - scripts/agent-loop-report {{.CLI_ARGS}}
 
   verify:acceptance:
     desc: "Prove an issue's acceptance criteria (usage: task verify:acceptance -- <issue#>)"

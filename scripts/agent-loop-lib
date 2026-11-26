@@ -1,0 +1,186 @@
+#!/bin/sh
+# Pure functions for the Agent Loop Supervisor (#20). Sourced, never run.
+#
+# The Supervisor gathers a state snapshot (JSON, schemas/agent-loop-snapshot.schema.json)
+# from gh, `claude agents --json`, tmux and files, then asks agent_loop_decide
+# what to do. The snapshot and decision functions read only their arguments,
+# so the tests drive them with fixture snapshots and no network.
+
+# The session name: shown in `claude agents`, /resume and on claude.ai/code.
+agent_loop_session_name() {
+  printf '%s\n' 'mechafighter.com dev loop'
+}
+
+# jq definitions shared by the work, classify and decide functions; each
+# function pipes these plus its own program to `jq -f /dev/stdin`.
+agent_loop_jq_defs() {
+  cat <<'JQ'
+def machine_labels: [.labels[] | select(startswith("machine:"))];
+def mine($m): machine_labels | index("machine:" + $m) != null;
+def other_machine($m): [machine_labels[] | select(. != "machine:" + $m)] | length > 0;
+def parked: [.labels[] | select(. == "needs-info" or . == "ready-for-human" or . == "wontfix")] | length > 0;
+def agent_ready: (.labels | index("ready-for-agent")) != null and (parked | not);
+def unblocked: (.blocked_by // 1) == 0;
+def incident: (.labels | index("prod-incident")) != null;
+def work:
+  .machine as $m
+  | {
+      mine: [.issues[] | select(agent_ready and mine($m)) | .number],
+      unclaimed: [.issues[] | select(agent_ready and (mine($m) | not) and (other_machine($m) | not) and unblocked
+        and (incident or (.assignees | length) == 0)) | .number],
+      prod_down: (.prod.expected and (.prod.ok | not) and (.prod.incident_open | not))
+    };
+def last_sign_of_life: [.last_activity_at // 0, .session.started_at] | max;
+# A tool call may run silently up to its timeout, so a running tool extends the limit.
+def silence_limit: .config.stall_seconds + (if .tool_running then .config.tool_timeout_seconds else 0 end);
+def class:
+  if .session == null then "none"
+  elif .session.status == "waiting" then "stalled"
+  elif .session.status == "idle" then "idle"
+  elif (.now - last_sign_of_life) > silence_limit then "stalled"
+  else "working" end;
+JQ
+}
+
+# agent_loop_work <snapshot-file>: the work this machine may do, as JSON
+# {"mine":[n...],"unclaimed":[n...],"prod_down":bool}.
+#   mine       open ready-for-agent issues labelled machine:<this alias>
+#   unclaimed  open, unblocked, unassigned ready-for-agent issues with no
+#              machine label (a prod-incident is assigned to the owner, so it
+#              counts while unblocked and no other machine holds it)
+#   prod_down  Production is expected (a v* release exists), fails its smoke
+#              check, and no prod-incident issue is open yet
+# needs-info, ready-for-human and wontfix park an issue even if it still
+# carries ready-for-agent. An issue whose blocked_by is unknown counts as blocked.
+agent_loop_work() {
+  {
+    agent_loop_jq_defs
+    printf 'work\n'
+  } | jq -c -f /dev/stdin "$1"
+}
+
+# agent_loop_classify <snapshot-file>: the session's state, one word.
+#   none     no Agent Loop session is running
+#   working  busy (or unknown), with a sign of life (heartbeat, status line or
+#            start) within config.stall_seconds, plus config.tool_timeout_seconds
+#            while a tool call is running (the PreToolUse heartbeat says so)
+#   stalled  busy with no sign of life for longer, or waiting on a prompt
+#   idle     the turn ended and nothing is running
+agent_loop_classify() {
+  {
+    agent_loop_jq_defs
+    printf 'class\n'
+  } | jq -r -f /dev/stdin "$1"
+}
+
+# agent_loop_decide <snapshot-file>: one line "<action>\t<reason>".
+#   exit          the stop file is set and no session runs
+#   start         work exists and no session runs (outside the start cooldown,
+#                 and not held after config.max_escalations escalations in
+#                 the current stall episode)
+#   nudge         stalled, or idle with work; config.nudge_gap_seconds apart
+#   escalate      still stalled after config.max_nudges nudges within
+#                 config.nudge_window_seconds (only nudges after the last sign
+#                 of life count), or config.max_episode_nudges nudges in this
+#                 episode even if the session kept replying: file an
+#                 agent-loop-stall issue and restart the session
+#   restart       /clear then /agent-loop: idle at config.restart_pct or more,
+#                 or busy at config.force_restart_pct or more (interrupt first)
+#   stop-session  idle and no work remains (with the stop file: the current
+#                 issue is done)
+#   wait          nothing to do this tick
+# With the stop file set, only this machine's claimed issue counts as work, so
+# the session finishes the current issue and nothing new starts.
+agent_loop_decide() {
+  {
+    agent_loop_jq_defs
+    cat <<'JQ'
+. as $s
+| $s.config as $c
+| ($s | work) as $w
+| (if $s.stop_requested then ($w.mine | length) > 0
+   else ($w.mine | length) > 0 or ($w.unclaimed | length) > 0 or $w.prod_down end) as $has_work
+| ($s | class) as $class
+| ($s.context_pct // 0) as $pct
+# A nudge that was followed by a sign of life worked, so only nudges newer
+# than the last sign of life count toward escalation.
+| [$s.nudges[] | select($s.now - . < $c.nudge_window_seconds)] as $window
+| ($s | last_sign_of_life) as $alive
+| [$window[] | select(. > $alive)] as $recent
+| ($window | max) as $last_nudge
+| def nudge_or_escalate($why):
+    if $last_nudge != null and ($s.now - $last_nudge) < $c.nudge_gap_seconds then
+      ["wait", "nudged \($s.now - $last_nudge)s ago (\($why))"]
+    elif ($recent | length) >= $c.max_nudges then ["escalate", $why]
+    elif $s.episode_nudges >= $c.max_episode_nudges then ["escalate", "\($why); nudge cap: \($s.episode_nudges) nudges this episode"]
+    else ["nudge", $why] end;
+if $class == "none" then
+  if $s.stop_requested then ["exit", "stop file set"]
+  elif ($has_work | not) then ["wait", "no work"]
+  elif $s.escalations >= $c.max_escalations then
+    ["wait", "held after \($s.escalations) stalls; a human checks the agent-loop-stall issue, then runs task loop:start"]
+  elif $s.last_start_at != null and ($s.now - $s.last_start_at) < $c.start_cooldown_seconds then
+    ["wait", "start cooldown, started \($s.now - $s.last_start_at)s ago"]
+  else ["start", "mine=\($w.mine) unclaimed=\($w.unclaimed) prod_down=\($w.prod_down)"] end
+elif $class == "stalled" then
+  if $s.session.status == "waiting" then nudge_or_escalate("waiting for \($s.session.waiting_for // "input")")
+  else nudge_or_escalate("busy, no heartbeat for \($s.now - ($s | last_sign_of_life))s") end
+elif $class == "idle" then
+  if ($has_work | not) then
+    ["stop-session", (if $s.stop_requested then "stop file set, current issue done" else "no work" end)]
+  elif $pct >= $c.restart_pct then ["restart", "context \($pct)%"]
+  elif ($s.now - ([$s.last_start_at // 0, ($s | last_sign_of_life)] | max)) < $c.nudge_gap_seconds then
+    ["wait", "idle with work, active recently"]
+  else nudge_or_escalate("idle with work") end
+elif $pct >= $c.force_restart_pct then ["restart", "context \($pct)%, busy"]
+else ["wait", "working"] end
+| @tsv
+JQ
+  } | jq -r -f /dev/stdin "$1"
+}
+
+# agent_loop_new_alias: a random, non-identifying machine alias m-<6 hex>.
+# It comes from /dev/urandom only, never from the hostname or any account.
+agent_loop_new_alias() {
+  hex="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  printf 'm-%s\n' "${hex}"
+}
+
+# agent_loop_valid_alias <alias>: exit 0 when it has the form m-<6 lowercase hex>.
+agent_loop_valid_alias() {
+  case "$1" in
+    m-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# agent_loop_ensure_alias <state-dir>: print the alias stored in
+# <state-dir>/machine, generating it first if it is missing or malformed.
+agent_loop_ensure_alias() {
+  mkdir -p "$1"
+  alias_file="$1/machine"
+  if [ -f "${alias_file}" ]; then
+    stored="$(cat "${alias_file}")"
+    if agent_loop_valid_alias "${stored}"; then
+      printf '%s\n' "${stored}"
+      return 0
+    fi
+  fi
+  fresh="$(agent_loop_new_alias)"
+  agent_loop_valid_alias "${fresh}" || return 1
+  printf '%s\n' "${fresh}" >"${alias_file}.tmp"
+  mv -f "${alias_file}.tmp" "${alias_file}"
+  printf '%s\n' "${fresh}"
+}
+
+# agent_loop_default_state_dir [dir]: <main checkout>/.agent-loop, shared by
+# every worktree (the git common dir's parent is the main checkout).
+# AGENT_LOOP_STATE_DIR overrides it.
+agent_loop_default_state_dir() {
+  if [ -n "${AGENT_LOOP_STATE_DIR:-}" ]; then
+    printf '%s\n' "${AGENT_LOOP_STATE_DIR}"
+    return 0
+  fi
+  common="$(git -c core.hooksPath=/dev/null -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir)" || return 1
+  printf '%s/.agent-loop\n' "$(dirname "${common}")"
+}

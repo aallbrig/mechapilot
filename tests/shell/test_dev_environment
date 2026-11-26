@@ -188,13 +188,6 @@ test_serve_waits_for_missing_parts_and_serves_what_exists() {
   ! scripts/dev/serve nonsense 2>/dev/null
 }
 
-test_loops_explains_how_to_start_the_supervisor() {
-  d="$(mktemp -d)"
-  out="$(DEV_REPO_ROOT="${d}" LOOPS_ONCE=1 scripts/dev/loops)" || return 1
-  printf '%s\n' "${out}" | grep -q 'issue #20' || return 1
-  printf '%s\n' "${out}" | grep -q 'task loop:start'
-}
-
 test_dev_check_rejects_config_missing_a_window() {
   d="$(mktemp -d)"
   sed '/^  - loops:/,$d' .tmuxinator.yml >"${d}/broken.yml" || return 1

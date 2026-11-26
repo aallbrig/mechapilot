@@ -1,0 +1,48 @@
+#!/bin/sh
+# Summarize the Agent Loop's metrics (#20): issues delivered per day, median
+# time to merge, stalls, restarts and the nudge success rate. Later changes to
+# the Agent Loop are judged against these numbers.
+#
+# Usage: scripts/agent-loop-report [metrics.jsonl]
+#   default file: <state-dir>/metrics.jsonl (see scripts/agent-loop-lib)
+# A nudge succeeded when no stall followed it within 30 minutes. Days are UTC.
+set -eu
+
+lib_dir="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=agent-loop-lib
+. "${lib_dir}/agent-loop-lib"
+
+if [ "$#" -gt 0 ]; then
+  file="$1"
+else
+  state_dir="$(agent_loop_default_state_dir)"
+  file="${state_dir}/metrics.jsonl"
+fi
+if [ ! -s "${file}" ]; then
+  printf 'agent-loop-report: no metrics yet (%s)\n' "${file}"
+  exit 0
+fi
+
+jq -rs -f /dev/stdin "${file}" <<'JQ'
+def dur: (. / 3600 | floor) as $h | ((. % 3600) / 60 | floor) as $m
+  | if $h > 0 then "\($h)h \($m | tostring | if length < 2 then "0" + . else . end)m" else "\($m)m" end;
+def median: sort | length as $n
+  | if $n == 0 then null elif $n % 2 == 1 then .[($n - 1) / 2] else ((.[$n / 2 - 1] + .[$n / 2]) / 2 | floor) end;
+. as $all
+| [$all[] | select(.event == "delivered")] as $delivered
+| [$all[] | select(.event == "stall") | .at] as $stalls
+| [$all[] | select(.event == "nudge") | .at] as $nudges
+| [$nudges[] | . as $t | select([$stalls[] | select(. >= $t and . - $t <= 1800)] | length == 0)] as $nudge_ok
+| ([$delivered[] | .seconds] | median) as $median
+| [
+    "delivered: \($delivered | length)",
+    "delivered per day (UTC):",
+    ($delivered | group_by(.at | strftime("%Y-%m-%d"))
+      | map("  \(.[0].at | strftime("%Y-%m-%d"))  \(length)") | if length == 0 then ["  none"] else . end | .[]),
+    "median time to merge: \(if $median == null then "n/a" else ($median | dur) end)",
+    "stalls: \($stalls | length)",
+    "restarts: \([$all[] | select(.event == "restart")] | length)",
+    "nudges: \($nudges | length) (\($nudge_ok | length) succeeded\(if ($nudges | length) > 0 then ", \(($nudge_ok | length) * 100 / ($nudges | length) | round)%" else "" end))"
+  ]
+| .[]
+JQ

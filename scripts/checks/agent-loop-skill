@@ -1,0 +1,68 @@
+#!/bin/sh
+# The Agent Loop skill (#20) keeps its pass order and its contract with the
+# merge gate. Fails when a required pass heading is missing or out of order,
+# or when a required instruction disappears.
+#
+# Usage: scripts/checks/agent-loop-skill [SKILL.md]
+set -eu
+
+skill="${1:-.claude/skills/agent-loop/SKILL.md}"
+[ -f "${skill}" ] || {
+  printf 'agent-loop-skill: no %s\n' "${skill}" >&2
+  exit 1
+}
+
+failed=0
+fail() {
+  printf 'agent-loop-skill: %s\n' "$*"
+  failed=1
+}
+
+# The passes, exactly these level-2 headings in exactly this order (#10).
+expected='## 1. Production
+## 2. Resume
+## 3. Claim
+## 4. Deliver
+## 5. Stop
+## Human-only'
+actual="$(grep -E '^## ' "${skill}")"
+if [ "${actual}" != "${expected}" ]; then
+  fail "the level-2 headings must be, in order:"
+  printf '%s\n' "${expected}" | sed 's/^/  /'
+  printf 'found:\n'
+  printf '%s\n' "${actual}" | sed 's/^/  /'
+fi
+
+# Instructions the Agent Loop must keep (fixed strings).
+while IFS= read -r needle; do
+  [ -n "${needle}" ] || continue
+  grep -qF -- "${needle}" "${skill}" || fail "missing: ${needle}"
+done <<'EOF'
+name: agent-loop
+disable-model-invocation: true
+$AGENT_LOOP_STATE_DIR/prod.json
+$AGENT_LOOP_MACHINE
+"$AGENT_LOOP_STATE_DIR/stop"
+machine:$AGENT_LOOP_MACHINE
+agent-loop/<alias>/<n>
+scripts/agent-loop-gh blockers <n>
+scripts/agent-loop-push <n>
+never an obstacle to work around
+Closes #<n>
+task ci
+scripts/verify-acceptance <n>
+review-verdict: pass sha=<40-char head SHA> reviewer=<tag>
+distinct lowercase tag
+task merge-gate -- <pr> --merge
+Merges happen only through the merge gate, never any other way.
+needs-info
+ready-for-human
+Agent Loop: no work remains.
+creating `v*` tags or releases
+applying infrastructure
+secrets
+changing the loop's token, sandbox or allowlist
+EOF
+
+if [ "${failed}" -ne 0 ]; then exit 1; fi
+printf 'agent-loop-skill: ok (%s)\n' "${skill}"

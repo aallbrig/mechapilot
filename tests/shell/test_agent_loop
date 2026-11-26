@@ -1,0 +1,1029 @@
+#!/bin/sh
+# Tests for the Agent Loop (#20): the Supervisor's pure decision functions
+# (scripts/agent-loop-lib), the Supervisor itself with stubbed claude, gh and
+# tmux, the GitHub adapter, the status line, the heartbeat hook, the metrics
+# report, the Production smoke check and the machine alias.
+# Run by scripts/test-shell from the repo root; each test_* function is one case.
+# Nothing here reaches the network or starts a real Claude session.
+
+fixtures=tests/fixtures/agent-loop
+
+# expect <want> <command...>: the command succeeds and prints exactly <want>.
+expect() {
+  want="$1"
+  shift
+  got="$("$@")" || {
+    printf 'command failed: %s\n' "$*"
+    return 1
+  }
+  [ "${got}" = "${want}" ] || {
+    printf 'expected [%s] but got [%s] from: %s\n' "${want}" "${got}" "$*"
+    return 1
+  }
+}
+
+# events <metrics-file>: the event names on one line.
+events() {
+  jq -r '.event' "$1" | tr '\n' ' '
+}
+
+# snap <fixture> <jq-filter>: a temp copy of a fixture snapshot with the filter applied.
+snap() {
+  out="$(mktemp)"
+  jq "$2" "${fixtures}/$1" >"${out}" || return 1
+  printf '%s\n' "${out}"
+}
+
+# decision <snapshot-file>: the action word agent_loop_decide picks.
+decision() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_decide "$1"
+  ) | cut -f 1
+}
+
+classify() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_classify "$1"
+  )
+}
+
+work() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_work "$1"
+  )
+}
+
+# stubs <dir>: fake claude, gh, tmux and sandbox tools in <dir>/bin that record
+# every call in <dir>/calls, plus a 0600 token file at <dir>/token.
+#   claude agents --json  prints <dir>/agents.json (or [])
+#   gh api --include ...  answers 200 with <dir>/issues.json and an ETag, or
+#                         304 when sent If-None-Match
+#   gh api repos/.../issues/<n> --jq ...  prints <dir>/issue-state (or completed)
+#   gh api (preflight)    the repo reads; branch protection and secrets fail
+#                         under GH_TOKEN unless <dir>/token-is-admin exists; a
+#                         v* tag ruleset (absent with <dir>/no-ruleset); a
+#                         production reviewer
+#   tmux split-window/new-session  print %9, mark the pane alive and, if
+#                         agents list from <dir>/agents-after-start.json (or a
+#                         default idle session, so no start waits for one); fail while <dir>/tmux-broken exists
+#   tmux display-message  prints 0 while <dir>/pane-alive exists
+#   tmux send-keys -l /exit and kill-pane  end the pane
+stubs() {
+  bin="$1/bin"
+  mkdir -p "${bin}"
+  cat >"${bin}/claude" <<EOF
+#!/bin/sh
+printf 'claude %s\n' "\$*" >>"$1/calls"
+if [ "\$1" = agents ]; then
+  if [ -f "$1/agents.json" ]; then cat "$1/agents.json"; else printf '[]\n'; fi
+fi
+EOF
+  cat >"${bin}/gh" <<EOF
+#!/bin/sh
+printf 'gh %s\n' "\$*" >>"$1/calls"
+case "\$*" in
+  *If-None-Match*) printf 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n\r\n'; exit 1 ;;
+  "api --include "*) printf 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\n\r\n'; cat "$1/issues.json" ;;
+  "api repos/{owner}/{repo}") printf '{"full_name":"o/r"}\n' ;;
+  "api repos/{owner}/{repo}/branches/main/protection" | "api repos/{owner}/{repo}/actions/secrets")
+    if [ -n "\${GH_TOKEN:-}" ] && [ ! -e "$1/token-is-admin" ]; then exit 1; fi
+    printf '{}\n' ;;
+  "api repos/{owner}/{repo}/rulesets?targets=tag")
+    if [ -e "$1/no-ruleset" ]; then printf '[]\n'; else printf '[{"id":1,"target":"tag","enforcement":"active"}]\n'; fi ;;
+  "api repos/{owner}/{repo}/rulesets/1")
+    exclude='[]'; bypass='[]'
+    if [ -e "$1/ruleset-excludes" ]; then exclude='["refs/tags/v9*"]'; fi
+    if [ -e "$1/ruleset-role-bypass" ]; then bypass='[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]'; fi
+    rules='[{"type":"creation"},{"type":"update"},{"type":"deletion"}]'
+    if [ -e "$1/ruleset-no-update" ]; then rules='[{"type":"creation"},{"type":"deletion"}]'; fi
+    printf '{"enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":%s}},"rules":%s,"bypass_actors":%s}\n' "\${exclude}" "\${rules}" "\${bypass}" ;;
+  "api repos/{owner}/{repo}/environments/production")
+    admins=false; self=true
+    if [ -e "$1/prod-admin-bypass" ]; then admins=true; fi
+    if [ -e "$1/prod-self-review" ]; then self=false; fi
+    printf '{"can_admins_bypass":%s,"protection_rules":[{"type":"required_reviewers","prevent_self_review":%s}]}\n' "\${admins}" "\${self}" ;;
+  "api repos/"*) if [ -f "$1/issue-state" ]; then cat "$1/issue-state"; else printf 'completed\n'; fi ;;
+  "issue list"*) printf '[]\n' ;;
+  *) ;;
+esac
+EOF
+  cat >"${bin}/tmux" <<EOF
+#!/bin/sh
+printf 'tmux %s\n' "\$*" >>"$1/calls"
+case "\$1" in
+  split-window | new-session | new-window)
+    [ ! -e "$1/tmux-broken" ] || exit 1
+    : >"$1/pane-alive"
+    if [ -f "$1/agents-after-start.json" ]; then
+      cp "$1/agents-after-start.json" "$1/agents.json"
+    else
+      printf '[{"pid":99999999,"status":"idle","name":"mechafighter.com dev loop","startedAt":1795700000000}]\n' >"$1/agents.json"
+    fi
+    printf '%%9\n' ;;
+  display-message) if [ -f "$1/pane-alive" ]; then printf '0\n'; else exit 1; fi ;;
+  send-keys) case "\$*" in *"-l /exit"*) rm -f "$1/pane-alive" "$1/agents.json" ;; *) ;; esac ;;
+  kill-pane) rm -f "$1/pane-alive" "$1/agents.json" ;;
+  has-session) exit 1 ;;
+  *) ;;
+esac
+EOF
+  # lsof reports the pids in <dir>/lsof-users as using the checkout.
+  cat >"${bin}/lsof" <<EOF
+#!/bin/sh
+if [ -s "$1/lsof-users" ]; then cat "$1/lsof-users"; else exit 1; fi
+EOF
+  chmod +x "${bin}/lsof"
+  for tool in sandbox-exec bwrap socat; do
+    printf '#!/bin/sh\nexit 0\n' >"${bin}/${tool}"
+  done
+  # Provisioning stubs: npm ci fills node_modules and the cache, npx installs a
+  # fake Chrome where --path says, tofu init creates .terraform.
+  cat >"${bin}/npm" <<EOF
+#!/bin/sh
+printf 'npm %s\n' "\$*" >>"$1/calls"
+mkdir -p node_modules "\${npm_config_cache:?}"
+: >node_modules/.package-lock.json
+: >"\${npm_config_cache}/index"
+EOF
+  cat >"${bin}/npx" <<EOF
+#!/bin/sh
+printf 'npx %s\n' "\$*" >>"$1/calls"
+path=""
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = --path ]; then path="\$2"; fi
+  shift
+done
+mkdir -p "\${path}/chrome"
+printf '#!/bin/sh\n' >"\${path}/chrome/chrome"
+chmod +x "\${path}/chrome/chrome"
+printf '%s\n' "\${path}/chrome/chrome"
+EOF
+  cat >"${bin}/tofu" <<EOF
+#!/bin/sh
+printf 'tofu %s\n' "\$*" >>"$1/calls"
+dir="\${1#-chdir=}"
+mkdir -p "\${dir}/.terraform/providers"
+EOF
+  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux" "${bin}/sandbox-exec" "${bin}/bwrap" "${bin}/socat" \
+    "${bin}/npm" "${bin}/npx" "${bin}/tofu"
+  : >"$1/calls"
+  printf '[]\n' >"$1/issues.json"
+  printf 'fake-token\n' >"$1/token"
+  chmod 600 "$1/token"
+}
+
+# supervisor <dir> <args...>: run the Supervisor against stubs and a private
+# state dir. Unless the test pinned something else, the runtime is pinned to
+# this repository's HEAD (so nothing is fetched).
+supervisor() {
+  d="$1"
+  shift
+  mkdir -p "${d}/state"
+  if [ ! -e "${d}/state/runtime-pin" ]; then git rev-parse HEAD >"${d}/state/runtime-pin"; fi
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
+    AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RETRY_SECONDS=0 \
+    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=0 TMUX_PANE='%1' \
+    scripts/agent-loop-supervisor "$@"
+}
+
+test_supervisor_detects_unclaimed_work() {
+  w="$(work "${fixtures}/snapshot-no-session.json")" || return 1
+  # 102 is blocked, 103 is another machine's, 104 needs info, 105 is assigned
+  # and 106's blockers are unknown: only 101 is free.
+  [ "${w}" = '{"mine":[],"unclaimed":[101],"prod_down":false}' ] || return 1
+  expect start decision "${fixtures}/snapshot-no-session.json" || return 1
+  # Without 101 there is nothing to start.
+  s="$(snap snapshot-no-session.json 'del(.issues[] | select(.number == 101))')" || return 1
+  expect wait decision "${s}" || return 1
+  # A prod-incident is assigned to the owner and still counts while unblocked.
+  s="$(snap snapshot-no-session.json '.issues = [{number: 7, labels: ["ready-for-agent", "prod-incident"], assignees: ["owner"], blocked_by: 0}]')" || return 1
+  expect '{"mine":[],"unclaimed":[7],"prod_down":false}' work "${s}" || return 1
+  # Production down with no incident filed yet is work too.
+  s="$(snap snapshot-no-session.json '.issues = [] | .prod = {expected: true, ok: false, incident_open: false}')" || return 1
+  expect start decision "${s}" || return 1
+  # Inside the start cooldown it waits.
+  s="$(snap snapshot-no-session.json '.last_start_at = .now - 60')" || return 1
+  expect wait decision "${s}"
+}
+
+test_supervisor_ignores_other_machine_work() {
+  only_others='.issues = [
+    {number: 103, labels: ["ready-for-agent", "machine:m-ffffff"], assignees: ["owner"], blocked_by: 0},
+    {number: 107, labels: ["ready-for-agent", "machine:m-000001"], assignees: [], blocked_by: 0},
+    {number: 108, labels: ["ready-for-agent", "prod-incident", "machine:m-ffffff"], assignees: ["owner"], blocked_by: 0}]'
+  s="$(snap snapshot-no-session.json "${only_others}")" || return 1
+  expect '{"mine":[],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect wait decision "${s}" || return 1
+  # The same issues, claimed by this machine instead, are work.
+  s="$(snap snapshot-no-session.json "${only_others} | .issues[0].labels = [\"ready-for-agent\", \"machine:m-a1b2c3\"]")" || return 1
+  expect '{"mine":[103],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect start decision "${s}"
+}
+
+test_supervisor_classifies_stale_heartbeat_as_stall() {
+  expect working classify "${fixtures}/snapshot-busy-session.json" || return 1
+  expect wait decision "${fixtures}/snapshot-busy-session.json" || return 1
+  # Busy with no heartbeat for 901s (stall_seconds is 900): stalled, so nudge.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 901')" || return 1
+  expect stalled classify "${s}" || return 1
+  expect nudge decision "${s}" || return 1
+  # Exactly at the limit it still counts as working.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 900')" || return 1
+  expect working classify "${s}" || return 1
+  # With no heartbeat at all, the session's start is the last sign of life.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = null')" || return 1
+  expect stalled classify "${s}" || return 1
+  # A session the Supervisor cannot see in `claude agents` (status unknown) is judged the same way.
+  s="$(snap snapshot-busy-session.json '.session.status = "unknown" | .last_activity_at = .now - 901')" || return 1
+  expect stalled classify "${s}" || return 1
+  # A tool call that is still running may be silent up to its timeout (600s) on top.
+  s="$(snap snapshot-busy-session.json '.tool_running = true | .last_activity_at = .now - 1400')" || return 1
+  expect working classify "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.tool_running = true | .last_activity_at = .now - 1501')" || return 1
+  expect stalled classify "${s}" || return 1
+  # Waiting on a prompt is a stall too.
+  s="$(snap snapshot-busy-session.json '.session.status = "waiting" | .session.waiting_for = "permission prompt"')" || return 1
+  expect stalled classify "${s}" || return 1
+  expect nudge decision "${s}" || return 1
+  # One nudge 200s ago: wait for the gap. Two nudges in the window: escalate.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 2000 | .nudges = [.now - 200]')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 2000 | .nudges = [.now - 900, .now - 400]')" || return 1
+  expect escalate decision "${s}" || return 1
+  # Nudges that were followed by a sign of life worked, so they do not count:
+  # nudges at -1500 and -900, a heartbeat at -400, stalled again: nudge, not escalate.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500, .now - 900]')" || return 1
+  expect nudge decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 950 | .nudges = [.now - 1750, .now - 1000, .now - 600]')" || return 1
+  expect nudge decision "${s}" || return 1
+  # Even when the session keeps replying, 6 nudges in one episode escalate.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500] | .episode_nudges = 6')" || return 1
+  expect escalate decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500] | .episode_nudges = 5')" || return 1
+  expect nudge decision "${s}" || return 1
+  # Nudges older than the 30-minute window do not count.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 4000 | .nudges = [.now - 3000, .now - 2500]')" || return 1
+  expect nudge decision "${s}"
+}
+
+test_supervisor_restarts_at_context_threshold() {
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .context_pct = 45')" || return 1
+  expect restart decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .context_pct = 44.9 | .last_activity_at = .now - 60')" || return 1
+  expect wait decision "${s}" || return 1
+  # Busy: not at 45%, only at 60% (the interrupt threshold).
+  s="$(snap snapshot-busy-session.json '.context_pct = 59')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.context_pct = 60')" || return 1
+  expect restart decision "${s}" || return 1
+  # The Supervisor carries it out: /clear, then /agent-loop, and a restart metric.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  jq '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' \
+    -n >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '{"session_id":"s1","pct":47,"at":1795699000}\n' >"${d}/state/context"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 -l /clear' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
+  ! grep -q 'Escape' "${d}/calls" || return 1
+  expect '[47,"m-a1b2c3"]' jq -c 'select(.event == "restart") | [.pct, .machine]' "${d}/state/metrics.jsonl" || return 1
+  # The context reading belonged to the cleared conversation.
+  [ ! -e "${d}/state/context" ]
+}
+
+test_supervisor_shuts_off_when_no_work() {
+  s="$(snap snapshot-busy-session.json '.issues = [] | .session.status = "idle"')" || return 1
+  expect stop-session decision "${s}" || return 1
+  # Busy with no work: let the turn finish first.
+  s="$(snap snapshot-busy-session.json '.issues = []')" || return 1
+  expect wait decision "${s}" || return 1
+  # Idle with work is not a shut-off.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 600')" || return 1
+  expect nudge decision "${s}" || return 1
+  # The Supervisor sends /exit and records the shut-off.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 -l /exit' "${d}/calls" || return 1
+  expect 'no work' jq -r 'select(.event == "shutoff") | .reason' "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/pane" ]
+}
+
+test_supervisor_honours_stop_file() {
+  # A session working on this machine's issue keeps going.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true')" || return 1
+  expect wait decision "${s}" || return 1
+  # Idle with the issue still claimed: nudged to finish it.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true | .session.status = "idle" | .last_activity_at = .now - 600')" || return 1
+  expect nudge decision "${s}" || return 1
+  # Once the current issue is done, unclaimed work no longer counts: shut off.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true | .session.status = "idle"
+    | .issues = [{number: 109, labels: ["ready-for-agent"], assignees: [], blocked_by: 0}]')" || return 1
+  expect stop-session decision "${s}" || return 1
+  # With no session, it exits instead of starting new work.
+  s="$(snap snapshot-no-session.json '.stop_requested = true')" || return 1
+  expect exit decision "${s}" || return 1
+  # The real loop exits on its own, starts nothing and says why.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  supervisor "${d}" stop >/dev/null || return 1
+  [ -e "${d}/state/stop" ] || return 1
+  out="$(AGENT_LOOP_MAX_TICKS=3 supervisor "${d}" run)" || return 1
+  printf '%s\n' "${out}" | grep -q 'stop file set and no session running; exiting' || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  expect 'supervisor_start supervisor_exit ' events "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/supervisor.pid" ]
+}
+
+test_supervisor_starts_a_named_session_in_its_worktree() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree/scripts" "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}},
+    {number: 102, title: "a PR", labels: [], assignees: [], pull_request: {}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q "^tmux split-window -d -P -F #{pane_id} -t %1 -c ${d}/worktree " "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
+  launcher="${d}/state/launch"
+  rt="${d}/state/runtime"
+  sh -n "${launcher}" || return 1
+  grep -qx "  --restricted --strict-mcp-config --tools 'Bash,Read,Edit,Write,Glob,Grep,Agent,WebFetch,Skill' \\\\" "${launcher}" || return 1
+  grep -qx "  --settings '${rt}/session-settings.json'" "${launcher}" || return 1
+  grep -qx "exec claude --name 'mechafighter.com dev loop' --remote-control 'mechafighter.com dev loop' --permission-mode dontAsk \\\\" "${launcher}" || return 1
+  # The token is read at launch from its file, never written into the launcher or settings.
+  grep -qx "GH_TOKEN=\"\\\$(cat '${d}/token')\" || exit 1" "${launcher}" || return 1
+  grep -qx "GH_CONFIG_DIR='${d}/worktree/.agent-loop/gh-config'" "${launcher}" || return 1
+  ! grep -rq fake-token "${launcher}" "${rt}" || return 1
+  # Settings, status line and hooks come from the read-only runtime copy.
+  settings="${rt}/session-settings.json"
+  check-jsonschema --schemafile schemas/claude-code-settings.schema.json "${settings}" >/dev/null || return 1
+  [ ! -w "${settings}" ] && [ ! -w "${rt}/scripts/agent-loop-heartbeat" ] || return 1
+  expect "'${rt}/scripts/claude-statusline'" jq -r '.statusLine.command' "${settings}" || return 1
+  expect "'${rt}/scripts/agent-loop-heartbeat' pre" jq -r '.hooks.PreToolUse[0].hooks[0].command' "${settings}" || return 1
+  expect true jq -r '.hooks.PostToolUse[0].hooks[0].async' "${settings}" || return 1
+  expect "${d}/state" jq -r '.env.AGENT_LOOP_STATE_DIR' "${settings}" || return 1
+  expect m-a1b2c3 jq -r '.env.AGENT_LOOP_MACHINE' "${settings}" || return 1
+  expect true jq -r '.sandbox.enabled and (.sandbox.allowUnsandboxedCommands == false) and .sandbox.failIfUnavailable' "${settings}" || return 1
+  real_dir="$(cd "${d}" && pwd -P)"
+  jq -e --arg t "${real_dir}" '.sandbox.filesystem.denyRead | index($t)' "${settings}" >/dev/null || return 1
+  jq -e --arg t "/${real_dir}" '.sandbox.filesystem.denyRead | index($t)' "${settings}" >/dev/null || return 1
+  ! grep -q '/worktree/' "${settings}" || return 1
+  expect '"m-a1b2c3"' jq -c 'select(.event == "session_start") | .machine' "${d}/state/metrics.jsonl" || return 1
+  # The runtime is the pinned commit, including the skill the prompt points at.
+  head="$(git rev-parse HEAD)"
+  expect "${head}" cat "${rt}/PIN" || return 1
+  cmp -s .claude/skills/agent-loop/SKILL.md "${rt}/.claude/skills/agent-loop/SKILL.md" || return 1
+  jq -e --arg r "Read(/${rt}/**)" '.permissions.allow | index($r)' "${settings}" >/dev/null || return 1
+  # What task ci:sandbox would download was installed outside the sandbox into
+  # a read-only dir in the state dir; nothing was written into the checkout.
+  deps="${d}/state/ci-deps/${head}"
+  [ -f "${deps}/node_modules/.package-lock.json" ] && [ -f "${deps}/npm-cache/index" ] || return 1
+  [ ! -w "${deps}/node_modules/.package-lock.json" ] || return 1
+  [ ! -e "${d}/worktree/node_modules" ] && [ ! -e "${d}/worktree/.agent-loop" ] || return 1
+  grep -qx "AGENT_LOOP_CI_DEPS='${deps}'" "${launcher}" || return 1
+  expect "${deps}" jq -r '.env.AGENT_LOOP_CI_DEPS' "${settings}" || return 1
+  # The session's git runs the pinned, read-only hooks.
+  grep -qx 'GIT_CONFIG_KEY_4=core.hooksPath' "${launcher}" || return 1
+  grep -qx "GIT_CONFIG_VALUE_4='${rt}/.githooks'" "${launcher}" || return 1
+  [ -x "${rt}/.githooks/pre-commit" ] && [ ! -w "${rt}/.githooks/pre-commit" ] || return 1
+  # No browser is installed for the session: the Chrome steps run only in the ci check.
+  ! grep -q '^npx ' "${d}/calls" || return 1
+  grep -q '^npm ci --ignore-scripts --no-audit --no-fund$' "${d}/calls" || return 1
+  grep -qx 'npm_config_offline=true' "${launcher}" || return 1
+  grep -q '^unset .* TMUX TMUX_PANE$' "${launcher}" || return 1
+  # The snapshot it decided from matches its schema, with the PR dropped.
+  check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${d}/state/snapshot.json" >/dev/null || return 1
+  expect '[101]' jq -c '[.issues[].number]' "${d}/state/snapshot.json"
+}
+
+test_supervisor_refuses_to_start_without_the_token() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # A token readable by others is refused like a missing one.
+  chmod 644 "${d}/token"
+  out="$(supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: no least-privilege token' || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  rm -f "${d}/token"
+  supervisor "${d}" once >/dev/null || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  [ ! -e "${d}/state/launch" ]
+}
+
+test_preflight_requires_the_human_steps() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  # Not yet confirmed: the unprobed permissions need a human's word.
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  you confirmed the token has none of: Workflows, Environments, Variables, Secrets, Deployments, Administration' || return 1
+  ! printf 'yes\n' | supervisor "${d}" confirm-token >/dev/null 2>&1 || return 1
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  ! grep -q fake-token "${d}/state/token-confirmed" || return 1
+  out="$(supervisor "${d}" preflight)" || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -qx 'preflight: 0 failed' || return 1
+  # The token probes run with the token and an empty gh config.
+  grep -qx 'gh api repos/{owner}/{repo}/branches/main/protection' "${d}/calls" || return 1
+  # A token that can read branch protection (an admin token) fails.
+  : >"${d}/token-is-admin"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read branch protection (no Administration permission)' || return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read Actions secrets (no Secrets permission)' || return 1
+  rm -f "${d}/token-is-admin"
+  # No tag ruleset, or one with an exclusion or a role bypass, fails.
+  for variant in no-ruleset ruleset-excludes ruleset-role-bypass ruleset-no-update; do
+    : >"${d}/${variant}"
+    out="$(supervisor "${d}" preflight)" && return 1
+    printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating, updating and deleting v\* tags' || return 1
+    rm -f "${d}/${variant}"
+  done
+  # Production that admins can bypass, or that allows self-review, fails.
+  for variant in prod-admin-bypass prod-self-review; do
+    : >"${d}/${variant}"
+    out="$(supervisor "${d}" preflight)" && return 1
+    printf '%s\n' "${out}" | grep -qx 'FAIL  production requires a reviewer, admins cannot bypass, no self-review' || return 1
+    rm -f "${d}/${variant}"
+  done
+  # A new token needs a new confirmation.
+  printf 'other-token\n' >"${d}/token"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf 'fake-token\n' >"${d}/token"
+  # No pin fails.
+  rm -f "${d}/state/runtime-pin"
+  printf 'not-a-sha\n' >"${d}/state/runtime-pin"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  the runtime is pinned' || return 1
+  rm -f "${d}/state/runtime-pin"
+  # No token fails, and the Supervisor will not run.
+  rm -f "${d}/token"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  token file ' || return 1
+  ! supervisor "${d}" run >/dev/null 2>&1 || return 1
+  ! supervisor "${d}" start >/dev/null 2>&1
+}
+
+test_supervisor_survives_a_failing_tick() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  : >"${d}/tmux-broken"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  out="$(AGENT_LOOP_MAX_TICKS=2 supervisor "${d}" run 2>&1)" || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  failed_ticks="$(printf '%s\n' "${out}" | grep -c 'tick failed' || true)"
+  [ "${failed_ticks}" -eq 2 ] || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -q 'retrying (1/2): tmux split-window' || return 1
+  [ ! -e "${d}/state/supervisor.pid" ]
+}
+
+test_supervisor_files_a_stall_issue_after_failed_nudges() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"busy","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '{"session_id":"s1","at":1795698000}\n' >"${d}/state/heartbeat"
+  # First tick: a nudge (Escape, then /agent-loop).
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 Escape' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
+  # Two nudges already in the window: file the issue and kill the session.
+  printf '1795699000\n1795699500\n' >"${d}/state/nudges"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q '^gh issue create --title Agent Loop stalled: session busy with no heartbeat --body-file .* --label agent-loop-stall --label ready-for-human$' "${d}/calls" || return 1
+  grep -qx 'tmux kill-pane -t %9' "${d}/calls" || return 1
+  expect 'busy, no heartbeat for 2000s' jq -r 'select(.event == "stall") | .reason' "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/nudges" ] || return 1
+  # A heartbeat after the nudges means they worked: nudge again, never escalate.
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  printf '[{"pid":99999999,"status":"busy","sessionId":"s2","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '1795698000\n1795698500\n' >"${d}/state/nudges"
+  printf '{"session_id":"s2","at":1795698900,"phase":"post"}\n' >"${d}/state/heartbeat"
+  : >"${d}/calls"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
+  ! grep -q '^gh issue' "${d}/calls" || return 1
+  # A second escalation in the same episode writes nothing to GitHub.
+  printf '1795699000\n1795699500\n' >"${d}/state/nudges"
+  : >"${d}/calls"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux kill-pane -t %9' "${d}/calls" || return 1
+  ! grep -q '^gh issue' "${d}/calls" || return 1
+  expect 2 cat "${d}/state/stall-episode" || return 1
+  # After two escalations the loop is held: work exists, but no new session.
+  s="$(snap snapshot-no-session.json '.escalations = 2')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-no-session.json '.escalations = 1')" || return 1
+  expect start decision "${s}"
+}
+
+test_supervisor_records_delivered_issues() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '101 1795696400\n' >"${d}/state/claimed"
+  # 101 is gone from the open list and GitHub says it was completed.
+  supervisor "${d}" snapshot >/dev/null || return 1
+  expect '[101,3600]' jq -c 'select(.event == "delivered") | [.issue, .seconds]' "${d}/state/metrics.jsonl" || return 1
+  [ ! -s "${d}/state/claimed" ]
+}
+
+test_gh_adapter_uses_conditional_requests() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  jq -n '[{number: 5, labels: [{name: "ready-for-agent"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 2}},
+    {number: 6, labels: [], assignees: [], pull_request: {}}]' >"${d}/issues.json"
+  first="$(PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache")" || return 1
+  [ "${first}" = '[{"number":5,"labels":["ready-for-agent"],"assignees":["owner"],"blocked_by":2}]' ] || return 1
+  expect 'W/"abc"' cat "${d}/cache/ready-for-agent.etag" || return 1
+  # The second read sends the ETag, gets 304 and answers from the cache.
+  printf 'not json\n' >"${d}/issues.json"
+  second="$(PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache")" || return 1
+  [ "${second}" = "${first}" ] || return 1
+  grep -q 'If-None-Match: W/"abc"' "${d}/calls" || return 1
+  # Anything other than 200 or 304 is an error.
+  printf '#!/bin/sh\nprintf "HTTP/2.0 500 Internal Server Error\\r\\n\\r\\n"\n' >"${d}/bin/gh"
+  rm -f "${d}/cache/ready-for-agent.etag"
+  ! PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache" 2>/dev/null
+}
+
+test_loop_report_summarizes_metrics() {
+  out="$(scripts/agent-loop-report "${fixtures}/metrics.jsonl")" || return 1
+  expected='delivered: 3
+delivered per day (UTC):
+  2026-11-26  2
+  2026-11-27  1
+median time to merge: 1h 00m
+stalls: 1
+restarts: 1
+nudges: 3 (1 succeeded, 33%)'
+  [ "${out}" = "${expected}" ] || {
+    printf 'got:\n%s\n' "${out}"
+    return 1
+  }
+  # An even count takes the mean of the middle two; no metrics is not an error.
+  f="$(mktemp)"
+  printf '{"at":1795651200,"event":"delivered","machine":"m-a1b2c3","issue":1,"seconds":600}\n{"at":1795651300,"event":"delivered","machine":"m-a1b2c3","issue":2,"seconds":1800}\n' >"${f}"
+  scripts/agent-loop-report "${f}" | grep -qx 'median time to merge: 20m' || return 1
+  scripts/agent-loop-report /nonexistent/metrics.jsonl | grep -q 'no metrics yet'
+}
+
+# prod_smoke_stubs <dir> <http-code> <cert-ok:0|1>
+prod_smoke_stubs() {
+  mkdir -p "$1/bin"
+  printf '#!/bin/sh\nprintf "%s"\n' "$2" >"$1/bin/curl"
+  cat >"$1/bin/openssl" <<EOF
+#!/bin/sh
+if [ "\$1" = x509 ]; then exit $3; fi
+printf 'CERT\n'
+EOF
+  chmod +x "$1/bin/curl" "$1/bin/openssl"
+}
+
+test_prod_smoke_fails_on_bad_status() {
+  d="$(mktemp -d)"
+  prod_smoke_stubs "${d}" 503 0
+  out="$(PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://mechafighter.com/: HTTP 503' || return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://game.mechafighter.com/: HTTP 503' || return 1
+  printf '%s\n' "${out}" | grep -qx 'prod-smoke: FAILED' || return 1
+  # 200 everywhere with good certificates passes, for QA too.
+  prod_smoke_stubs "${d}" 200 0
+  PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke | grep -qx 'prod-smoke: ok' || return 1
+  out="$(PATH="${d}/bin:${PATH}" MECHAFIGHTER_QA_URL=https://example.test/qa/ scripts/checks/prod-smoke --qa)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'PASS  https://example.test/qa/game/: HTTP 200' || return 1
+  # A certificate expiring within 14 days fails even with 200s.
+  prod_smoke_stubs "${d}" 200 1
+  out="$(PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  mechafighter.com: certificate missing or expires within 14 days'
+}
+
+test_machine_alias_is_not_hostname() {
+  d="$(mktemp -d)"
+  # Even with a hostname that looks like an alias, the alias never derives from it.
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nprintf "m-abcdef\\n"\n' >"${d}/bin/hostname"
+  printf '#!/bin/sh\nprintf "m-abcdef\\n"\n' >"${d}/bin/uname"
+  chmod +x "${d}/bin/hostname" "${d}/bin/uname"
+  a="$(PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias)" || return 1
+  b="$(PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/two" scripts/agent-loop-supervisor alias)" || return 1
+  for alias in "${a}" "${b}"; do
+    printf '%s\n' "${alias}" | grep -Eqx 'm-[0-9a-f]{6}' || return 1
+    [ "${alias}" != m-abcdef ] || return 1
+  done
+  [ "${a}" != "${b}" ] || return 1
+  real_host="$(command hostname 2>/dev/null || uname -n)"
+  short_host="${real_host%%.*}"
+  [ -z "${short_host}" ] || ! printf '%s\n' "${a}" | grep -qiF -- "${short_host}" || return 1
+  # Stable once stored; a malformed stored alias is replaced.
+  expect "${a}" env AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias || return 1
+  printf 'my-laptop\n' >"${d}/one/machine"
+  c="$(AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias)" || return 1
+  printf '%s\n' "${c}" | grep -Eqx 'm-[0-9a-f]{6}' || return 1
+  # The generator reads only /dev/urandom.
+  sed -n '/^agent_loop_new_alias()/,/^}/p' scripts/agent-loop-lib >"${d}/generator" || return 1
+  grep -q /dev/urandom "${d}/generator" || return 1
+  ! grep -nE 'hostname|uname|whoami|USER|HOME|scutil|git' "${d}/generator"
+}
+
+test_statusline_reports_context_for_the_supervisor() {
+  d="$(mktemp -d)"
+  printf 'm-a1b2c3\n' >"${d}/machine"
+  out="$(printf '{"session_id":"s1","session_name":"mechafighter.com dev loop","context_window":{"used_percentage":46.7},"workspace":{"project_dir":"/nowhere"}}' |
+    AGENT_LOOP_STATE_DIR="${d}" scripts/claude-statusline)" || return 1
+  [ "${out}" = 'mechafighter.com dev loop | ctx 46% | m-a1b2c3' ] || return 1
+  expect '["s1",46.7]' jq -c '[.session_id, .pct]' "${d}/context" || return 1
+  # Early in a session the percentage may be null; the line still prints.
+  out="$(printf '{"session_id":"s2","context_window":{"used_percentage":null}}' | AGENT_LOOP_STATE_DIR="${d}" scripts/claude-statusline)" || return 1
+  [ "${out}" = 'agent loop | ctx 0% | m-a1b2c3' ]
+}
+
+test_heartbeat_hook_records_progress() {
+  d="$(mktemp -d)"
+  printf '{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash"}' |
+    AGENT_LOOP_STATE_DIR="${d}" TMUX_PANE=%9 scripts/agent-loop-heartbeat pre || return 1
+  expect '["s1","pre","%9"]' jq -c '[.session_id, .phase, .pane]' "${d}/heartbeat" || return 1
+  printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash"}' |
+    AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat post || return 1
+  expect post jq -r '.phase' "${d}/heartbeat" || return 1
+  ! printf '{}' | AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat sideways 2>/dev/null || return 1
+  now="$(date +%s)"
+  at="$(jq -r '.at' "${d}/heartbeat")"
+  [ $((now - at)) -le 5 ]
+}
+
+test_loops_window_runs_the_supervisor() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts"
+  printf '#!/bin/sh\nprintf "supervisor %%s\\n" "$*"\n' >"${d}/scripts/agent-loop-supervisor"
+  chmod +x "${d}/scripts/agent-loop-supervisor"
+  out="$(DEV_REPO_ROOT="${d}" scripts/dev/loops)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'supervisor run' || return 1
+  printf '%s\n' "${out}" | grep -q 'task loop:start runs it again' || return 1
+  grep -q 'supervisor: scripts/dev/loops' .tmuxinator.yml
+}
+
+test_agent_loop_skill_check_rejects_reordered_passes() {
+  scripts/checks/agent-loop-skill >/dev/null || return 1
+  d="$(mktemp -d)"
+  # Claim before Resume: rejected.
+  sed -e 's/^## 2\. Resume$/## 2. TMP/' -e 's/^## 3\. Claim$/## 2. Resume/' -e 's/^## 2\. TMP$/## 3. Claim/' \
+    .claude/skills/agent-loop/SKILL.md >"${d}/swapped.md" || return 1
+  ! scripts/checks/agent-loop-skill "${d}/swapped.md" >/dev/null || return 1
+  # Losing the merge gate instruction: rejected.
+  grep -vF 'task merge-gate' .claude/skills/agent-loop/SKILL.md >"${d}/no-gate.md"
+  out="$(scripts/checks/agent-loop-skill "${d}/no-gate.md")" && return 1
+  printf '%s\n' "${out}" | grep -qF 'missing: task merge-gate -- <pr> --merge'
+}
+
+test_agent_loop_push_pushes_only_its_branch() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nprintf "git %%s\\n" "$*" >>"%s/calls"\n' "${d}" >"${d}/bin/git"
+  chmod +x "${d}/bin/git"
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push 42 >/dev/null || return 1
+  expect 'git push origin HEAD:refs/heads/agent-loop/m-a1b2c3/42' cat "${d}/calls" || return 1
+  # No refspec, tag, option or extra argument gets through.
+  for bad in 'x:refs/tags/v1' '+42' '42 --force' '-n' '042' ''; do
+    ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push "${bad}" 2>/dev/null || return 1
+  done
+  ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push 42 --force 2>/dev/null || return 1
+  ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=laptop scripts/agent-loop-push 42 2>/dev/null || return 1
+  expect 1 grep -c . "${d}/calls"
+}
+
+test_agent_loop_settings_sandbox_the_session() {
+  f=.claude/agent-loop-settings.json
+  expect true jq '.sandbox.enabled and .sandbox.failIfUnavailable and (.sandbox.allowUnsandboxedCommands == false)
+    and (.sandbox.autoAllowBashIfSandboxed == false) and .sandbox.network.strictAllowlist and .disableClaudeAiConnectors' "${f}" || return 1
+  home='~' # the literal tilde the sandbox expands, not this shell's home
+  for p in "${home}/.aws" "${home}/.ssh" "${home}/.config/gh" "${home}/.config/mechafighter-agent-loop" "${home}/.claude/.credentials.json" "${home}/.claude/ide"; do
+    jq -e --arg p "${p}" '.sandbox.filesystem.denyRead | index($p)' "${f}" >/dev/null || return 1
+  done
+  expect '["aallbrig.github.io","api.github.com","game.mechafighter.com","github.com","mechafighter.com"]' \
+    jq -c '.sandbox.network.allowedDomains | sort' "${f}" || return 1
+  expect true jq '(.sandbox.network.allowAllUnixSockets == false) and (.sandbox.network.allowUnixSockets == [])' "${f}" || return 1
+  # Local binding stays off: on macOS it opens every localhost port and listens
+  # on all interfaces (IDE bridges, the Godot editor, the LAN).
+  expect false jq '.sandbox.network.allowLocalBinding // false' "${f}" || return 1
+  for rule in 'Bash(git push *)' 'Bash(gh api *)' 'Bash(gh pr merge *)' 'Bash(git commit -n*)' 'Bash(git commit *--no-verify*)' \
+    'Bash(mise *)' 'Bash(curl *)' 'Bash(*--upload-pack*)' 'Bash(*--exec*)' 'Bash(find *-exec*)' 'Bash(git rebase *)' \
+    'Bash(git config *)' 'Bash(git -c *)' 'Bash(task loop:start*)' 'Bash(task loop:stop*)' 'Bash(task infra:*)' \
+    'Bash(gh workflow *)' 'Bash(scripts/agent-loop-supervisor *)' 'Read(~/.config/gh/**)' \
+    'Bash(task loop:pin*)' 'Bash(task loop:confirm-token*)' 'Bash(scripts/checks/prod-smoke*)' 'Bash(tmux *)' \
+    'Bash(task ci)' 'Bash(task site:validate*)' 'Bash(task site:audit*)' 'Bash(scripts/site-observe*)'; do
+    jq -e --arg r "${rule}" '.permissions.deny | index($r)' "${f}" >/dev/null || {
+      printf 'missing deny rule: %s\n' "${rule}"
+      return 1
+    }
+  done
+  jq -e '.permissions.allow | index("Bash(scripts/agent-loop-deps)")' "${f}" >/dev/null || return 1
+  # Nothing in the allowlist pushes, calls the API directly, fetches arbitrary URLs or runs mise.
+  expect '[]' jq -c '[.permissions.allow[] | select(test("^Bash\\((git push|gh api|curl|wget|mise|task loop:start|task loop:stop|scripts/agent-loop-supervisor)"))]' "${f}" || return 1
+  # The session's settings never point at the worktree: hooks and the status line are added from the runtime copy.
+  expect 'false' jq 'has("hooks") or has("statusLine")' "${f}"
+}
+
+# runtime_repo <dir>: a repository with two commits of the runtime files. The
+# second (origin/main) adds the sandbox domain example.invalid; a third commit
+# on a side branch is not on origin/main. Prints "<first> <second> <side>".
+runtime_repo() {
+  r="$1"
+  mkdir -p "${r}/scripts" "${r}/.claude/skills/agent-loop"
+  for f in scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
+    .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md; do
+    cp "${f}" "${r}/${f}"
+  done
+  git -C "${r}" init -q
+  git -C "${r}" config user.email t@example.invalid
+  git -C "${r}" config user.name t
+  git -C "${r}" add -A
+  git -C "${r}" commit -q -m first
+  first="$(git -C "${r}" rev-parse HEAD)"
+  jq '.sandbox.network.allowedDomains += ["example.invalid"]' "${r}/.claude/agent-loop-settings.json" >"${r}/new.json"
+  mv "${r}/new.json" "${r}/.claude/agent-loop-settings.json"
+  git -C "${r}" commit -q -am second
+  second="$(git -C "${r}" rev-parse HEAD)"
+  git -C "${r}" update-ref refs/remotes/origin/main "${second}"
+  git -C "${r}" switch -q -c side
+  printf 'side\n' >"${r}/side"
+  git -C "${r}" add side
+  git -C "${r}" commit -q -m side
+  side="$(git -C "${r}" rev-parse HEAD)"
+  printf '%s %s %s\n' "${first}" "${second}" "${side}"
+}
+
+test_supervisor_exports_only_the_pinned_runtime() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  shas="$(runtime_repo "${d}/runtime-repo")" || return 1
+  first="${shas%% *}"
+  rest="${shas#* }"
+  second="${rest%% *}"
+  side="${rest#* }"
+  printf '%s\n' "${first}" >"${d}/state/runtime-pin"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once >/dev/null || return 1
+  # origin/main is newer, but only the pinned commit is exported.
+  expect "${first}" cat "${d}/state/runtime/PIN" || return 1
+  expect false jq '.sandbox.network.allowedDomains | index("example.invalid") != null' "${d}/state/runtime/session-settings.json" || return 1
+  # Pins must be full SHAs of commits on origin/main.
+  for bad in abc123 "${side}" 0000000000000000000000000000000000000000; do
+    ! AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" pin "${bad}" >/dev/null 2>&1 || return 1
+  done
+  expect "${first}" cat "${d}/state/runtime-pin" || return 1
+  # A human advances the pin; the next session start exports that commit.
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" pin "${second}" >/dev/null || return 1
+  rm -f "${d}/state/pane" "${d}/state/last-start" "${d}/state/started-at" "${d}/pane-alive" "${d}/agents.json"
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once >/dev/null || return 1
+  expect "${second}" cat "${d}/state/runtime/PIN" || return 1
+  expect true jq '.sandbox.network.allowedDomains | index("example.invalid") != null' "${d}/state/runtime/session-settings.json" || return 1
+  # Without a valid pin, no session starts.
+  rm -f "${d}/state/pane" "${d}/state/last-start" "${d}/pane-alive" "${d}/agents.json"
+  printf 'none\n' >"${d}/state/runtime-pin"
+  : >"${d}/calls"
+  out="$(AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: no runtime pin' || return 1
+  ! grep -q '^tmux split-window' "${d}/calls"
+}
+
+# tree_state <dir>: every path below <dir> with its type and, for files, a checksum.
+tree_state() {
+  (cd "$1" && find . -print | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "${f}" ]; then
+      printf 'link %s\n' "${f}"
+    elif [ -f "${f}" ]; then
+      sum="$(cksum <"${f}")"
+      printf 'file %s %s\n' "${f}" "${sum}"
+    else
+      printf 'dir %s\n' "${f}"
+    fi
+  done)
+}
+
+test_supervisor_never_writes_into_the_checkout() {
+  # Statically: after creating the clone, no write targets the checkout.
+  writes="$(grep -nE '(>|>>|cp |mv |rm |mkdir |chmod |ln |touch |tar )[^#]*[$][{]worktree[}]' scripts/agent-loop-supervisor || true)"
+  [ -z "${writes}" ] || {
+    printf 'writes into the checkout:\n%s\n' "${writes}"
+    return 1
+  }
+  # A tick that starts a session succeeds against a checkout the Supervisor's
+  # own user cannot write, and leaves it byte-for-byte unchanged.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree/.agent-loop" "${d}/worktree/infra/stacks/prod" "${d}/state"
+  printf 'x\n' >"${d}/worktree/infra/stacks/prod/main.tf"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  before="$(tree_state "${d}/worktree")"
+  chmod -R a-w "${d}/worktree"
+  rc=0
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  chmod -R u+w "${d}/worktree"
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  after="$(tree_state "${d}/worktree")"
+  [ "${before}" = "${after}" ]
+}
+
+test_supervisor_ignores_links_swapped_in_during_a_tick() {
+  # The reviewer's race: a leftover session process keeps swapping checkout
+  # directories for links to outside/ while the Supervisor provisions and
+  # starts a session. Nothing outside the checkout may change.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree/.agent-loop/cache" "${d}/worktree/infra" "${d}/state" "${d}/outside/cache/npm"
+  printf 'victim\n' >"${d}/outside/cache/npm/victim"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  before="$(tree_state "${d}/outside")"
+  (
+    cd "${d}" || exit 1
+    while [ ! -e stop-swapping ]; do
+      for name in .agent-loop infra node_modules; do
+        rm -rf "worktree/${name}"
+        ln -s "${d}/outside" "worktree/${name}"
+      done
+      sleep 0.01 2>/dev/null || sleep 1
+      for name in .agent-loop infra node_modules; do
+        rm -f "worktree/${name}"
+        mkdir -p "worktree/${name}"
+      done
+    done
+  ) &
+  swapper=$!
+  rc=0
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  : >"${d}/stop-swapping"
+  wait "${swapper}" || true
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  after="$(tree_state "${d}/outside")"
+  [ "${before}" = "${after}" ]
+}
+
+test_supervisor_refuses_while_processes_use_the_checkout() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # A double-forked leftover (pid 4242) still has the checkout open.
+  printf '4242\n' >"${d}/lsof-users"
+  out="$(supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: processes still use the checkout (pids 4242)' || return 1
+  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+  grep -q '^gh issue create --title Agent Loop held: leftover processes use the session checkout --body-file .* --label agent-loop-stall --label ready-for-human$' "${d}/calls" || return 1
+  expect 1 cat "${d}/state/stall-episode" || return 1
+  # Once nothing uses it, the next start goes ahead.
+  rm -f "${d}/lsof-users" "${d}/state/last-start"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q '^tmux split-window' "${d}/calls"
+}
+
+test_agent_loop_deps_copies_the_provisioned_tools() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/src/node_modules/pkg" "${d}/src/npm-cache" "${d}/src/infra/stacks/prod/.terraform/providers" "${d}/repo/infra/stacks/prod"
+  : >"${d}/src/node_modules/pkg/index.js"
+  : >"${d}/src/npm-cache/index"
+  : >"${d}/src/infra/stacks/prod/.terraform/providers/p"
+  here="$(pwd -P)"
+  git -C "${d}/repo" init -q || return 1
+  # Not finished yet: refused.
+  out="$(cd "${d}/repo" && AGENT_LOOP_CI_DEPS="${d}/src" "${here}/scripts/agent-loop-deps" 2>&1)" && return 1
+  printf '%s\n' "${out}" | grep -q 'does not name a finished provisioning dir' || return 1
+  : >"${d}/src/.done"
+  chmod -R a-w "${d}/src"
+  (cd "${d}/repo" && AGENT_LOOP_CI_DEPS="${d}/src" "${here}/scripts/agent-loop-deps") >/dev/null || return 1
+  chmod -R u+w "${d}/src"
+  [ -f "${d}/repo/node_modules/pkg/index.js" ] && [ -w "${d}/repo/node_modules/pkg/index.js" ] || return 1
+  [ -f "${d}/repo/.agent-loop/cache/npm/index" ] || return 1
+  [ -f "${d}/repo/infra/stacks/prod/.terraform/providers/p" ]
+}
+
+# skill_doc <file> <step line>: a minimal skill with one step and a Human-only
+# section that mentions a denied command.
+skill_doc() {
+  bt="$(printf '\140')"
+  printf '# Skill\n\n## 1. Step\n\n%s\n\n## Human-only\n\n- %sgit push%s\n' "$2" "${bt}" "${bt}" >"$1"
+}
+
+test_skill_commands_match_the_allowlist() {
+  scripts/checks/agent-loop-skill-commands >/dev/null || return 1
+  d="$(mktemp -d)"
+  bt="$(printf '\140')"
+  # A command the rules deny, an env-prefixed command, and one they never allow all fail.
+  for cmd in "git tag -l 'v*'" "ACCEPTANCE_RECORD=x scripts/verify-acceptance 1" "curl -sS https://mechafighter.com/" "gh api repos/o/r -XPUT" \
+    "git log -1 & curl x" "cat \$(curl x)" "cat x > /tmp/y" "jq . < x" "task ci"; do
+    skill_doc "${d}/skill.md" "Run ${bt}${cmd}${bt}."
+    ! scripts/checks/agent-loop-skill-commands "${d}/skill.md" >/dev/null || return 1
+  done
+  # Mentions in the Human-only reference section are not commands.
+  skill_doc "${d}/ok.md" "Run ${bt}task ci:sandbox${bt}."
+  scripts/checks/agent-loop-skill-commands "${d}/ok.md" >/dev/null || return 1
+  # Deny beats allow, and a compound command needs every part allowed.
+  skill_doc "${d}/compound.md" "Run ${bt}git status --short && git push origin main${bt}."
+  out="$(scripts/checks/agent-loop-skill-commands "${d}/compound.md")" && return 1
+  printf '%s\n' "${out}" | grep -q 'denied: git push origin main'
+}
+
+test_supervisor_runs_no_git_hooks() {
+  # origin/main carries post-checkout and reference-transaction hooks, and the
+  # repository's own config points core.hooksPath at them (as task setup does
+  # in a human checkout). Creating the session's clone, fetching and checking
+  # out must run none of them.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/.githooks" "${d}/state"
+  for hook in post-checkout reference-transaction post-merge pre-commit; do
+    printf '#!/bin/sh\n: >>"%s/marker-%s"\n' "${d}" "${hook}" >"${d}/.githooks/${hook}"
+    chmod +x "${d}/.githooks/${hook}"
+  done
+  printf 'state/\nbin/\n*.json\ncalls\ntoken\n' >"${d}/.gitignore"
+  # An explicit main branch: CI runners default to another initial branch name.
+  git -C "${d}" init -q -b main
+  git -C "${d}" config user.email t@example.invalid
+  git -C "${d}" config user.name t
+  git -C "${d}" add .githooks .gitignore
+  git -C "${d}" -c core.hooksPath=/dev/null commit -q -m hooks
+  git -C "${d}" config core.hooksPath .githooks
+  git -C "${d}" remote add origin "${d}"
+  git -C "${d}" -c core.hooksPath=/dev/null fetch -q origin
+  rm -f "${d}"/marker-*
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  # The checkout does not exist yet: this tick creates the clone (first start).
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  [ -d "${d}/worktree/.git" ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  for marker in "${d}"/marker-*; do
+    if [ -e "${marker}" ]; then
+      printf 'a hook ran outside the sandbox: %s\n' "${marker}"
+      return 1
+    fi
+  done
+  # No repo-relative hooksPath is stored in the clone.
+  ! git -C "${d}/worktree" config --local --get core.hooksPath >/dev/null
+}
+
+test_supervisor_kills_only_the_recorded_session_process() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # Detached (its parent exits), so it is reaped as soon as it is killed.
+  victim="$(sh -c 'sleep 300 >/dev/null 2>&1 & echo $!')"
+  started="$(ps -o lstart= -p "${victim}")"
+  # A recorded pid whose start time no longer matches (pid reuse) is left alone.
+  printf '%s\t%s|%s\n' "${victim}" "Thu Jan  1 00:00:00 1970" "sleep" >"${d}/state/session-pid"
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  kill -0 "${victim}" 2>/dev/null || return 1
+  # The same pid, start time and command name: it is the session, so it is stopped.
+  rm -f "${d}/state/last-start" "${d}/state/pane" "${d}/pane-alive" "${d}/agents.json"
+  printf '%s\t%s|%s\n' "${victim}" "${started}" "sleep" >"${d}/state/session-pid"
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  i=0
+  while kill -0 "${victim}" 2>/dev/null && [ "${i}" -lt 20 ]; do
+    i=$((i + 1))
+    sleep 1
+  done
+  ! kill -0 "${victim}" 2>/dev/null
+}
