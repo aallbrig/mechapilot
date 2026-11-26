@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/blob/main/schemas/tmuxinator.schema.json",
+  "title": "tmuxinator project config (strict)",
+  "description": "Written for this repo; tmuxinator publishes no schema. Keys follow tmuxinator 3.4.2 (lib/tmuxinator/project.rb, window.rb, pane.rb, hooks/project.rb). Deliberately strict: deprecated keys (project_name, project_root, tabs, pre, post, pre_tab, cli_args, rbenv, rvm) and ERB are rejected, and every object forbids unknown keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "windows"],
+  "properties": {
+    "name": {
+      "description": "The tmux session name.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "root": {
+      "description": "The project root; windows start here unless they set their own root.",
+      "$ref": "#/$defs/path"
+    },
+    "windows": {
+      "description": "Windows in order. Each item is a one-key map from the window name to its definition.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/window" }
+    },
+    "startup_window": {
+      "description": "The window selected after start, by name or index.",
+      "type": ["string", "integer"]
+    },
+    "startup_pane": {
+      "description": "The pane selected in the startup window.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "attach": {
+      "description": "Whether `tmuxinator start` attaches (default true).",
+      "type": "boolean"
+    },
+    "pre_window": {
+      "description": "Commands run in every pane before its own commands.",
+      "$ref": "#/$defs/commands"
+    },
+    "on_project_start": { "$ref": "#/$defs/commands" },
+    "on_project_first_start": { "$ref": "#/$defs/commands" },
+    "on_project_restart": { "$ref": "#/$defs/commands" },
+    "on_project_exit": { "$ref": "#/$defs/commands" },
+    "on_project_stop": { "$ref": "#/$defs/commands" },
+    "tmux_command": {
+      "description": "The tmux executable (tmux or wemux).",
+      "enum": ["tmux", "wemux"]
+    },
+    "tmux_options": {
+      "description": "Extra options passed to every tmux invocation.",
+      "type": "string",
+      "minLength": 1
+    },
+    "socket_name": { "type": "string", "minLength": 1 },
+    "socket_path": { "$ref": "#/$defs/path" },
+    "enable_pane_titles": {
+      "description": "Show pane titles in the pane border.",
+      "type": "boolean"
+    },
+    "pane_title_position": { "enum": ["top", "bottom", "off"] },
+    "pane_title_format": { "type": "string", "minLength": 1 }
+  },
+  "dependentRequired": {
+    "pane_title_position": ["enable_pane_titles"],
+    "pane_title_format": ["enable_pane_titles"]
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "<%" }
+    },
+    "command": {
+      "description": "One shell command typed into a pane. ERB is not allowed, so the file stays plain YAML.",
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "<%" }
+    },
+    "commands": {
+      "oneOf": [
+        { "$ref": "#/$defs/command" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/command" }
+        }
+      ]
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "window": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/commands" },
+          { "$ref": "#/$defs/windowDefinition" }
+        ]
+      }
+    },
+    "windowDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["panes"],
+      "properties": {
+        "root": {
+          "description": "The window root, relative to the project root.",
+          "$ref": "#/$defs/path"
+        },
+        "layout": {
+          "description": "A tmux layout name or a custom layout string.",
+          "type": "string",
+          "minLength": 1
+        },
+        "synchronize": {
+          "description": "Synchronize panes (true or before: before the commands run; after: after them).",
+          "oneOf": [{ "type": "boolean" }, { "enum": ["before", "after"] }]
+        },
+        "pre": {
+          "description": "Commands run in every pane of this window before its own.",
+          "$ref": "#/$defs/commands"
+        },
+        "focused_pane": {
+          "description": "The pane selected in this window, by index or title.",
+          "type": ["string", "integer"]
+        },
+        "panes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/pane" }
+        }
+      }
+    },
+    "pane": {
+      "oneOf": [
+        { "$ref": "#/$defs/commands" },
+        {
+          "description": "A titled pane: a one-key map from the title to its commands.",
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/name" },
+          "additionalProperties": { "$ref": "#/$defs/commands" }
+        }
+      ]
+    }
+  }
+}

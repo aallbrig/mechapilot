@@ -1,0 +1,26 @@
+#!/bin/sh
+# The godot window: launch the Godot editor through `task godot:editor` (#17),
+# which uses non-default LSP/DAP/remote-debug ports so it can run beside other
+# Godot projects. Until that task exists, print how to start the editor.
+#
+# GODOT_EDITOR_ONCE=1 reports what it would run and exits, and DEV_REPO_ROOT
+# overrides the repo root (tests use these).
+set -eu
+
+repo_root="${DEV_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
+cd "${repo_root}"
+
+tasks="$(task --list-all --json 2>/dev/null || true)"
+defined="$(printf '%s\n' "${tasks}" | jq -r 'any(.tasks[]?; .name == "godot:editor")' 2>/dev/null || true)"
+if [ "${defined}" != true ]; then
+  cat <<'EOF'
+godot: the Godot editor task is not here yet (issue #17).
+Once #17 lands:
+  task godot:editor   open the editor on godot/ (LSP 6305, DAP 6306, remote debug 6307)
+EOF
+  exit 0
+fi
+
+printf 'godot: task godot:editor\n'
+if [ -n "${GODOT_EDITOR_ONCE:-}" ]; then exit 0; fi
+exec task godot:editor

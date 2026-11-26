@@ -1,0 +1,102 @@
+#!/bin/sh
+# Manage the Mecha Fighter tmux dev session defined in .tmuxinator.yml.
+#
+# Usage: scripts/dev/session start|start-detached|stop|status|check
+#   start           start the session and attach, or attach if it already runs
+#   start-detached  start the session without attaching (autostart uses this)
+#   stop            kill the session (no-op if it isn't running)
+#   status          print "running" or "stopped"; exit 0 either way
+#   check           render the config with `tmuxinator debug` and validate it
+#
+# DEV_SESSION_CONFIG overrides the config path (tests use this).
+set -eu
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
+config="${DEV_SESSION_CONFIG:-${repo_root}/.tmuxinator.yml}"
+session="mechafighter"
+# tmuxinator writes its script for $SHELL; launchd and systemd may not set it.
+SHELL="${SHELL:-/bin/sh}"
+export SHELL
+
+die() {
+  printf 'dev session: %s\n' "$*" >&2
+  exit 1
+}
+
+# Sets state to "running" or "stopped".
+probe() {
+  state=stopped
+  if command -v tmux >/dev/null 2>&1 && tmux has-session -t "=${session}" 2>/dev/null; then
+    state=running
+  fi
+}
+
+attach() {
+  if [ -n "${TMUX:-}" ]; then
+    exec tmux switch-client -t "=${session}"
+  fi
+  exec tmux attach-session -t "=${session}"
+}
+
+check() {
+  [ -f "${config}" ] || die "no config at ${config}"
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' EXIT
+  rc=0
+  (cd "${repo_root}" && tmuxinator debug -p "${config}") >"${work}/script" 2>"${work}/err" || rc=$?
+  err="$(cat "${work}/err")"
+  [ "${rc}" -eq 0 ] || die "tmuxinator debug failed (exit ${rc}): ${err}"
+  [ -z "${err}" ] || die "tmuxinator debug wrote errors: ${err}"
+  sh -n "${work}/script" || die "the rendered script is not valid sh"
+  grep -q "new-session -d -s ${session} " "${work}/script" ||
+    die "the rendered script does not create session ${session}"
+  for window in bootstrap editor godot serve ci loops; do
+    grep -q " -n ${window}\$" "${work}/script" || die "missing window: ${window}"
+  done
+  # Every repo script a pane runs must exist and be executable.
+  sed -n 's/.*send-keys -t [^ ]* \(scripts\/[^ \\]*\).*/\1/p' "${work}/script" | sort -u >"${work}/scripts"
+  [ -s "${work}/scripts" ] || die "no pane runs a repo script"
+  while IFS= read -r script; do
+    [ -x "${repo_root}/${script}" ] || die "pane command is not an executable file: ${script}"
+  done <"${work}/scripts"
+  count="$(wc -l <"${work}/scripts")"
+  printf 'dev:check: %s renders a valid session "%s" (%s pane scripts)\n' \
+    "${config##*/}" "${session}" "$((count))"
+}
+
+cmd="${1:-}"
+case "${cmd}" in
+  start)
+    probe
+    if [ "${state}" = running ]; then attach; fi
+    cd "${repo_root}"
+    exec tmuxinator start -p "${config}"
+    ;;
+  start-detached)
+    probe
+    if [ "${state}" = running ]; then
+      printf 'dev session: %s is already running\n' "${session}"
+      exit 0
+    fi
+    cd "${repo_root}"
+    tmuxinator start --no-attach -p "${config}"
+    ;;
+  stop)
+    probe
+    if [ "${state}" = running ]; then
+      tmux kill-session -t "=${session}"
+      printf 'dev session: stopped %s\n' "${session}"
+    else
+      printf 'dev session: %s is not running\n' "${session}"
+    fi
+    ;;
+  status)
+    probe
+    echo "${state}"
+    ;;
+  check) check ;;
+  *)
+    printf 'usage: %s start|start-detached|stop|status|check\n' "$0" >&2
+    exit 64
+    ;;
+esac

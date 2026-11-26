@@ -1,0 +1,162 @@
+#!/bin/sh
+# Tests for the dev environment (#19): scripts/dev/* and scripts/autostart/*.
+# Run by scripts/test-shell from the repo root; each test_* function is one case.
+
+# Fake, non-identifying values for rendering (never a real home or username).
+render_env() {
+  AUTOSTART_HOME=/home/dev \
+    AUTOSTART_REPO_ROOT='/home/dev/src/mecha fighter' \
+    AUTOSTART_MISE=/opt/mise/bin/mise \
+    AUTOSTART_PATH=/opt/mise/shims:/usr/bin:/bin \
+    "$@"
+}
+
+test_autostart_renders_valid_launchd_plist() {
+  d="$(mktemp -d)"
+  render_env scripts/autostart/autostart render launchd >"${d}/agent.plist" || return 1
+  # Portable: parse as XML with yq and check the structure launchd needs.
+  yq -p xml -o json '.' "${d}/agent.plist" >"${d}/plist.json" || return 1
+  v="$(jq -c '.plist["+@version"]' "${d}/plist.json")" || return 1
+  [ "${v}" = '"1.0"' ] || return 1
+  v="$(jq -c '.plist.dict.key' "${d}/plist.json")" || return 1
+  [ "${v}" = '["Label","ProgramArguments","WorkingDirectory","EnvironmentVariables","RunAtLoad","KeepAlive","StandardOutPath","StandardErrorPath"]' ] || return 1
+  v="$(jq -c '.plist.dict.string' "${d}/plist.json")" || return 1
+  [ "${v}" = '["com.mechafighter.dev-session","/home/dev/src/mecha fighter","/home/dev/Library/Logs/mechafighter-dev.log","/home/dev/Library/Logs/mechafighter-dev.log"]' ] || return 1
+  v="$(jq -c '.plist.dict.array.string' "${d}/plist.json")" || return 1
+  [ "${v}" = '["/opt/mise/bin/mise","exec","-C","/home/dev/src/mecha fighter","--","/home/dev/src/mecha fighter/scripts/dev/session","start-detached"]' ] || return 1
+  v="$(jq -c '.plist.dict.dict' "${d}/plist.json")" || return 1
+  [ "${v}" = '{"key":["PATH","MECHAFIGHTER_NO_BROWSER"],"string":["/opt/mise/shims:/usr/bin:/bin","1"]}' ] || return 1
+  # RunAtLoad is <true/> and KeepAlive is <false/>, in that order.
+  grep -A1 '<key>RunAtLoad</key>' "${d}/agent.plist" | grep -q '<true/>' || return 1
+  grep -A1 '<key>KeepAlive</key>' "${d}/agent.plist" | grep -q '<false/>' || return 1
+  ! grep -q '@[A-Z_]*@' "${d}/agent.plist" || return 1
+  # Apple's own linter too, wherever it exists (macOS).
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint -s "${d}/agent.plist" || return 1
+  fi
+}
+
+test_autostart_renders_systemd_unit() {
+  unit="$(render_env scripts/autostart/autostart render systemd)" || return 1
+  printf '%s\n' "${unit}" | grep -qx 'ExecStart="/opt/mise/bin/mise" exec -C "/home/dev/src/mecha fighter" -- "/home/dev/src/mecha fighter/scripts/dev/session" start-detached' || return 1
+  printf '%s\n' "${unit}" | grep -qx 'WantedBy=default.target' || return 1
+  printf '%s\n' "${unit}" | grep -qx 'Type=oneshot' || return 1
+  printf '%s\n' "${unit}" | grep -qx 'Environment=MECHAFIGHTER_NO_BROWSER=1' || return 1
+  ! printf '%s\n' "${unit}" | grep -q '@[A-Z_]*@'
+}
+
+test_autostart_detects_platform() {
+  mac="$(AUTOSTART_UNAME=Darwin scripts/autostart/autostart platform)" || return 1
+  linux="$(AUTOSTART_UNAME=Linux scripts/autostart/autostart platform)" || return 1
+  [ "${mac}" = launchd ] && [ "${linux}" = systemd ] || return 1
+  ! AUTOSTART_UNAME=FreeBSD scripts/autostart/autostart platform 2>/dev/null
+}
+
+test_autostart_refuses_unsafe_values() {
+  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT='/home/dev/a&b' AUTOSTART_MISE=/opt/mise AUTOSTART_PATH=/bin \
+    scripts/autostart/autostart render systemd 2>/dev/null || return 1
+  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=relative/mise AUTOSTART_PATH=/bin \
+    scripts/autostart/autostart render launchd 2>/dev/null || return 1
+  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=/opt/mise AUTOSTART_PATH="/bin:\$HOME/bin" \
+    scripts/autostart/autostart render systemd 2>/dev/null
+}
+
+# Stub service managers record their calls so install/uninstall touch nothing real.
+stub_bin() {
+  bin="$1/bin"
+  mkdir -p "${bin}"
+  for tool in systemctl launchctl; do
+    cat >"${bin}/${tool}" <<EOF
+#!/bin/sh
+printf '%s %s\n' ${tool} "\$*" >>"$1/calls"
+[ "\$1" != print ]
+EOF
+    chmod +x "${bin}/${tool}"
+  done
+}
+
+test_autostart_install_and_uninstall_are_idempotent() {
+  d="$(mktemp -d)"
+  stub_bin "${d}"
+  for os in Linux Darwin; do
+    run() {
+      PATH="${d}/bin:${PATH}" AUTOSTART_UNAME="${os}" AUTOSTART_HOME="${d}/home" AUTOSTART_XDG_CONFIG_HOME="${d}/home/.config" \
+        AUTOSTART_UID=501 AUTOSTART_MISE=/opt/mise/bin/mise AUTOSTART_PATH=/usr/bin:/bin scripts/autostart/autostart "$@"
+    }
+    target="$(run path)" || return 1
+    case "${os}" in
+    Linux) [ "${target}" = "${d}/home/.config/systemd/user/mechafighter-dev.service" ] || return 1 ;;
+    *) [ "${target}" = "${d}/home/Library/LaunchAgents/com.mechafighter.dev-session.plist" ] || return 1 ;;
+    esac
+    run install >/dev/null || return 1
+    [ -f "${target}" ] || return 1
+    run install | grep -q 'already up to date' || return 1
+    run status | grep -q '^autostart: installed' || return 1
+    run uninstall >/dev/null || return 1
+    [ ! -e "${target}" ] || return 1
+    run uninstall | grep -q 'not installed' || return 1
+    run status | grep -q '^autostart: not installed' || return 1
+  done
+  grep -qx 'systemctl --user enable mechafighter-dev.service' "${d}/calls" || return 1
+  grep -qx 'systemctl --user disable mechafighter-dev.service' "${d}/calls" || return 1
+  grep -qx 'launchctl enable gui/501/com.mechafighter.dev-session' "${d}/calls"
+}
+
+test_open_urls_uses_open_on_macos_and_xdg_open_on_linux() {
+  mac="$(DEV_UNAME=Darwin DEV_GIT_REMOTE=https://github.com/Example-Owner/example-repo.git OPEN_URLS_DRY_RUN=1 scripts/dev/open-urls)" || return 1
+  linux="$(DEV_UNAME=Linux DEV_GIT_REMOTE=git@github.com:example-owner/example-repo OPEN_URLS_DRY_RUN=1 scripts/dev/open-urls)" || return 1
+  expected='http://localhost:8060/
+http://localhost:1313/
+https://example-owner.github.io/example-repo/
+https://mechafighter.com/
+https://game.mechafighter.com/'
+  want_mac="$(printf '%s\n' "${expected}" | sed 's/^/open /')" || return 1
+  want_linux="$(printf '%s\n' "${expected}" | sed 's/^/xdg-open /')" || return 1
+  [ "${mac}" = "${want_mac}" ] && [ "${linux}" = "${want_linux}" ] || return 1
+  ! DEV_UNAME=SunOS OPEN_URLS_DRY_RUN=1 scripts/dev/open-urls 2>/dev/null
+}
+
+test_serve_waits_for_missing_parts_and_serves_what_exists() {
+  d="$(mktemp -d)"
+  DEV_REPO_ROOT="${d}" SERVE_ONCE=1 scripts/dev/serve game | grep -q 'waiting: no Godot web build yet' || return 1
+  DEV_REPO_ROOT="${d}" SERVE_ONCE=1 scripts/dev/serve site | grep -q 'waiting: no Hugo site yet' || return 1
+  mkdir -p "${d}/build/web"
+  : >"${d}/build/web/index.html"
+  DEV_REPO_ROOT="${d}" SERVE_ONCE=1 scripts/dev/serve game | grep -qx 'serve game: serving with python' || return 1
+  ! scripts/dev/serve nonsense 2>/dev/null
+}
+
+test_loops_explains_how_to_start_the_supervisor() {
+  d="$(mktemp -d)"
+  out="$(DEV_REPO_ROOT="${d}" LOOPS_ONCE=1 scripts/dev/loops)" || return 1
+  printf '%s\n' "${out}" | grep -q 'issue #20' || return 1
+  printf '%s\n' "${out}" | grep -q 'task loop:start'
+}
+
+test_dev_check_rejects_config_missing_a_window() {
+  d="$(mktemp -d)"
+  sed '/^  - loops:/,$d' .tmuxinator.yml >"${d}/broken.yml" || return 1
+  ! grep -q loops "${d}/broken.yml" || return 1
+  ! DEV_SESSION_CONFIG="${d}/broken.yml" scripts/dev/session check 2>/dev/null || return 1
+  scripts/dev/session check
+}
+
+test_tmuxinator_schema_rejects_unknown_and_deprecated_keys() {
+  d="$(mktemp -d)"
+  check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml >/dev/null || return 1
+  printf 'name: x\nwindows:\n  - a: ls\nwindowz: []\n' >"${d}/unknown.yml"
+  ! check-jsonschema --schemafile schemas/tmuxinator.schema.json "${d}/unknown.yml" >/dev/null 2>&1 || return 1
+  printf 'name: x\ntabs:\n  - a: ls\nwindows:\n  - a: ls\n' >"${d}/deprecated.yml"
+  ! check-jsonschema --schemafile schemas/tmuxinator.schema.json "${d}/deprecated.yml" >/dev/null 2>&1 || return 1
+  printf 'name: x\nwindows:\n  - a:\n      panes: [ls]\n      layut: tiled\n' >"${d}/typo.yml"
+  ! check-jsonschema --schemafile schemas/tmuxinator.schema.json "${d}/typo.yml" >/dev/null 2>&1
+}
+
+test_godot_window_uses_task_godot_editor_or_explains() {
+  d="$(mktemp -d)"
+  out="$(DEV_REPO_ROOT="${d}" GODOT_EDITOR_ONCE=1 scripts/dev/godot-editor)" || return 1
+  printf '%s\n' "${out}" | grep -q 'issue #17' || return 1
+  printf 'version: "3"\ntasks:\n  godot:editor:\n    cmds:\n      - "true"\n' >"${d}/Taskfile.yml"
+  out="$(DEV_REPO_ROOT="${d}" GODOT_EDITOR_ONCE=1 scripts/dev/godot-editor)" || return 1
+  [ "${out}" = 'godot: task godot:editor' ]
+}

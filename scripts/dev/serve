@@ -1,0 +1,77 @@
+#!/bin/sh
+# Serve whatever part of local dev exists, waiting for parts that don't yet.
+#
+# Usage: scripts/dev/serve game|site
+#   game  `task serve` once it is defined (#17); before that, build/web/ over
+#         python3's static server on MECHAFIGHTER_GAME_PORT (default 8060)
+#   site  `hugo server` on site/ (#30) on MECHAFIGHTER_SITE_PORT (default 1313)
+#
+# SERVE_ONCE=1 reports what it would run (or what is missing) and exits 0
+# instead of serving or waiting, and DEV_REPO_ROOT overrides the repo root
+# (tests use these).
+set -eu
+
+repo_root="${DEV_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
+cd "${repo_root}"
+game_port="${MECHAFIGHTER_GAME_PORT:-8060}"
+site_port="${MECHAFIGHTER_SITE_PORT:-1313}"
+poll_seconds="${SERVE_POLL_SECONDS:-10}"
+
+# Sets ready to how to serve (task|python|hugo), or to "" with a reason in missing.
+probe_game() {
+  ready=""
+  missing=""
+  tasks="$(task --list-all --json 2>/dev/null || true)"
+  defined="$(printf '%s\n' "${tasks}" | jq -r 'any(.tasks[]?; .name == "serve")' 2>/dev/null || true)"
+  if [ "${defined}" = true ]; then
+    ready=task
+  elif [ ! -f build/web/index.html ]; then
+    missing="no Godot web build yet (build/web/index.html, from task godot:export:web once #17 lands)"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    missing="python3 is not on PATH, so build/web/ can't be served"
+  else
+    ready=python
+  fi
+}
+
+probe_site() {
+  ready=""
+  missing=""
+  if [ ! -d site ]; then
+    missing="no Hugo site yet (site/, from #30)"
+  elif ! command -v hugo >/dev/null 2>&1; then
+    missing="hugo is not on PATH (run task setup once #30 pins it)"
+  else
+    ready=hugo
+  fi
+}
+
+part="${1:-}"
+case "${part}" in
+  game | site) ;;
+  *)
+    printf 'usage: %s game|site\n' "$0" >&2
+    exit 64
+    ;;
+esac
+
+said=""
+while :; do
+  "probe_${part}"
+  if [ -n "${ready}" ]; then
+    printf 'serve %s: serving with %s\n' "${part}" "${ready}"
+    if [ -n "${SERVE_ONCE:-}" ]; then exit 0; fi
+    case "${ready}" in
+      task) exec task serve ;;
+      python) exec python3 -m http.server --bind 127.0.0.1 --directory build/web "${game_port}" ;;
+      hugo) exec hugo server --source site --bind 127.0.0.1 --port "${site_port}" ;;
+      *) exit 1 ;;
+    esac
+  fi
+  if [ "${said}" != "${missing}" ]; then
+    printf 'serve %s: waiting: %s\n' "${part}" "${missing}"
+    said="${missing}"
+  fi
+  if [ -n "${SERVE_ONCE:-}" ]; then exit 0; fi
+  sleep "${poll_seconds}"
+done
