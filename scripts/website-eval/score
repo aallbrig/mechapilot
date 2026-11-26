@@ -1,0 +1,37 @@
+#!/bin/sh
+# Score one collect run: pure jq rules (rules.jq), no network, no browser.
+# Usage: scripts/website-eval/score [--now <YYYY-MM-DDTHH:MM:SSZ>] <raw-dir> >report.json
+# <raw-dir> holds what scripts/website-eval/collect wrote: meta.json,
+# lighthouse.json, html-validate.json, lychee.json, headers.txt and tls.json.
+# The report matches schemas/website-eval.schema.json; the thresholds and the
+# verdict rules live in rules.jq and are copied into every check.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --now)
+      now="${2:?--now needs a timestamp}"
+      shift 2
+      ;;
+    -*)
+      printf 'score: unknown option %s\n' "$1" >&2
+      exit 64
+      ;;
+    *) break ;;
+  esac
+done
+raw="${1:?usage: score [--now <timestamp>] <raw-dir>}"
+for f in meta.json lighthouse.json html-validate.json lychee.json headers.txt tls.json; do
+  [ -f "${raw}/${f}" ] || {
+    printf 'score: missing %s/%s (run scripts/website-eval/collect first)\n' "${raw}" "${f}" >&2
+    exit 1
+  }
+done
+
+jq -n --arg now "${now}" --rawfile headers "${raw}/headers.txt" \
+  --slurpfile meta "${raw}/meta.json" --slurpfile lh "${raw}/lighthouse.json" \
+  --slurpfile hv "${raw}/html-validate.json" --slurpfile ly "${raw}/lychee.json" \
+  --slurpfile tls "${raw}/tls.json" \
+  -f "${here}/rules.jq"

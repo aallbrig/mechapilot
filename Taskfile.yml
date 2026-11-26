@@ -66,7 +66,7 @@ tasks:
   lint:js:
     desc: Syntax-check the Node scripts (strict ES modules)
     cmds:
-      - for f in scripts/*.mjs; do node --check "$f" || exit 1; done
+      - for f in scripts/*.mjs scripts/*/*.mjs; do node --check "$f" || exit 1; done
 
   lint:yaml:
     desc: yamllint (strict)
@@ -110,7 +110,9 @@ tasks:
       # Vendored from html-validate 11.21.1 (dist/schema/config.json, published as https://html-validate.org/schemas/config.json)
       - check-jsonschema --schemafile schemas/html-validate-config.schema.json .htmlvalidate.json
       # Vendored: https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/schema.json
-      - check-jsonschema --schemafile schemas/lychee.schema.json lychee.toml
+      - check-jsonschema --schemafile schemas/lychee.schema.json lychee.toml scripts/website-eval/lychee-online.toml
+      # Authored here: the website-evaluation skill's report (scripts/website-eval/score)
+      - check-jsonschema --check-metaschema schemas/website-eval.schema.json
       # Authored here (no upstream schema exists); pins the Lighthouse budgets
       - check-jsonschema --schemafile schemas/lighthouserc.schema.json lighthouserc.json
       # Authored here: the Marketing Site's home page copy
@@ -249,6 +251,12 @@ tasks:
     desc: Preview the Marketing Site locally with live reload
     cmds:
       - hugo server --source site
+
+  website:eval:
+    desc: "Measure one page and score it (usage: task website:eval -- <site-dir | url>); remote URLs are for humans and the website-evaluation skill, never CI"
+    cmds:
+      - task: site:deps
+      - scripts/website-eval/collect {{.CLI_ARGS}}
 
   ci:fast:
     desc: Pre-push gate (lint + tests)

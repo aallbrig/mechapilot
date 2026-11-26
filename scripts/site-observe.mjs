@@ -40,11 +40,11 @@
 //   SITE_OBSERVE_FAULT=hang              hold every subresource request open
 //                                        forever, as a stuck server would
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
 import { rmSync } from "node:fs";
-import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, relative, resolve, sep } from "node:path";
+import { createStaticServer } from "./lib-static-server.mjs";
 
 const SETTLE_MS = 2500;
 const LOAD_TIMEOUT_MS = Math.min(Number(process.env.SITE_OBSERVE_LOAD_TIMEOUT_MS) || 20000, 20000);
@@ -58,19 +58,6 @@ const XML_VIEWER_ICONS = new Set([
   "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' fill='%23909090' width='10' height='10'><path d='M0 0 L8 0 L4 7 Z'/></svg>",
   "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' fill='%23909090' width='10' height='10'><path d='M0 0 L0 8 L7 4 Z'/></svg>",
 ]);
-const TYPES = {
-  ".html": "text/html; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".xml": "application/xml; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".png": "image/png",
-  ".webp": "image/webp",
-  ".avif": "image/avif",
-  ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8",
-  ".json": "application/json",
-  ".webmanifest": "application/manifest+json",
-};
 
 // ---- fail-closed process state ----
 const servers = new Set();
@@ -119,20 +106,7 @@ async function walk(dir) {
 }
 
 function serve(root) {
-  const server = createServer(async (req, res) => {
-    try {
-      const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
-      let file = resolve(root, "." + path);
-      if (file !== root && !file.startsWith(root + sep)) throw new Error("outside root");
-      if ((await stat(file)).isDirectory()) file = join(file, "index.html");
-      const body = await readFile(file);
-      res.writeHead(200, { "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" });
-      res.end(body);
-    } catch {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("not found");
-    }
-  });
+  const server = createStaticServer(root);
   servers.add(server);
   return new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server)));
 }
