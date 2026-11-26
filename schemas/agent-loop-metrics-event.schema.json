@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/agent-loop-metrics-event.schema.json",
+  "title": "Agent Loop metrics event",
+  "description": "Authored here (#20). One line of .agent-loop/metrics.jsonl, written by scripts/agent-loop-supervisor and summarized by scripts/agent-loop-report. Times are Unix epoch seconds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["at", "event", "machine"],
+  "properties": {
+    "at": { "type": "integer", "minimum": 0 },
+    "event": {
+      "description": "supervisor_start/supervisor_exit: the Supervisor process; session_start: a session was launched; nudge; stall: nudges failed, an agent-loop-stall issue was filed and the session restarted; restart: the context restart (pct set); shutoff: no work, the session was ended; delivered: an issue this machine claimed closed as completed (issue and seconds set); unclaimed: an issue this machine claimed lost its machine label.",
+      "enum": ["supervisor_start", "supervisor_exit", "session_start", "nudge", "stall", "restart", "shutoff", "delivered", "unclaimed"]
+    },
+    "machine": { "type": "string", "pattern": "^m-[0-9a-f]{6}$" },
+    "reason": { "type": "string" },
+    "pct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "issue": { "type": "integer", "minimum": 1 },
+    "seconds": { "description": "delivered: from first seeing the claim to the close.", "type": "integer", "minimum": 0 }
+  },
+  "allOf": [
+    { "if": { "properties": { "event": { "const": "delivered" } } }, "then": { "required": ["issue", "seconds"] } },
+    { "if": { "properties": { "event": { "const": "unclaimed" } } }, "then": { "required": ["issue"] } },
+    { "if": { "properties": { "event": { "const": "restart" } } }, "then": { "required": ["pct"] } }
+  ]
+}

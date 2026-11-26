@@ -1,31 +1,19 @@
 #!/bin/sh
-# The loops window: the Agent Loop Supervisor's pane.
-# Until the Supervisor lands (#20), this prints how to start it once it exists.
-# After that, it shows `task loop:status` every LOOPS_POLL_SECONDS (default 60).
+# The loops window: runs the Agent Loop Supervisor (#20) in this pane.
+# The Supervisor starts a Claude session only when there is work, and exits
+# when `task loop:stop` sets the stop file; `task loop:start` brings it back.
 #
-# LOOPS_ONCE=1 reports once and exits, and DEV_REPO_ROOT overrides the repo
-# root (tests use these).
+# DEV_REPO_ROOT overrides the repo root (tests use it).
 set -eu
 
 repo_root="${DEV_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
 cd "${repo_root}"
-poll_seconds="${LOOPS_POLL_SECONDS:-60}"
-
-tasks="$(task --list-all --json 2>/dev/null || true)"
-defined="$(printf '%s\n' "${tasks}" | jq -r 'any(.tasks[]?; .name == "loop:status")' 2>/dev/null || true)"
-if [ "${defined}" != true ]; then
-  cat <<'EOF'
-loops: the Agent Loop Supervisor is not here yet (issue #20).
-Once #20 lands:
-  task loop:start    start the Supervisor in this pane
-  task loop:status   show the Agent Loop's state
-  task loop:stop     stop it
-EOF
-  exit 0
+supervisor="${repo_root}/scripts/agent-loop-supervisor"
+if [ ! -x "${supervisor}" ]; then
+  printf 'loops: no Supervisor at %s\n' "${supervisor}" >&2
+  exit 1
 fi
-
-while :; do
-  task loop:status || printf 'loops: task loop:status failed\n'
-  if [ -n "${LOOPS_ONCE:-}" ]; then exit 0; fi
-  sleep "${poll_seconds}"
-done
+rc=0
+"${supervisor}" run || rc=$?
+printf 'loops: the Supervisor exited (status %s). task loop:start runs it again; task loop:status shows the state.\n' "${rc}"
+exit "${rc}"

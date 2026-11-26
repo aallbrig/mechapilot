@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/agent-loop-snapshot.schema.json",
+  "title": "Agent Loop Supervisor state snapshot",
+  "description": "Authored here (#20). Everything scripts/agent-loop-lib's agent_loop_decide reads: the Supervisor builds one per tick, and tests feed fixtures. Times are Unix epoch seconds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["now", "machine", "stop_requested", "issues", "prod", "session", "last_activity_at", "context_pct", "nudges", "last_start_at", "config"],
+  "$defs": {
+    "epoch": { "type": "integer", "minimum": 0 },
+    "seconds": { "type": "integer", "minimum": 1 },
+    "percent": { "type": "integer", "minimum": 1, "maximum": 100 }
+  },
+  "properties": {
+    "now": { "$ref": "#/$defs/epoch" },
+    "machine": { "type": "string", "pattern": "^m-[0-9a-f]{6}$" },
+    "stop_requested": { "type": "boolean" },
+    "issues": {
+      "description": "Open issues labelled ready-for-agent.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "labels", "assignees", "blocked_by"],
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "labels": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "assignees": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "blocked_by": { "description": "Open blockers; null when GitHub did not say (counts as blocked).", "type": ["integer", "null"], "minimum": 0 }
+        }
+      }
+    },
+    "prod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "ok", "incident_open"],
+      "properties": {
+        "expected": { "description": "A v* release exists, so Production should be up.", "type": "boolean" },
+        "ok": { "description": "scripts/checks/prod-smoke passed (true when not expected).", "type": "boolean" },
+        "incident_open": { "description": "An open prod-incident issue exists.", "type": "boolean" }
+      }
+    },
+    "session": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "waiting_for", "started_at"],
+          "properties": {
+            "status": { "description": "From claude agents --json; unknown when the pane is alive but the session is not listed.", "enum": ["busy", "waiting", "idle", "unknown"] },
+            "waiting_for": { "type": ["string", "null"] },
+            "started_at": { "$ref": "#/$defs/epoch" }
+          }
+        }
+      ]
+    },
+    "last_activity_at": { "description": "Newest heartbeat or status-line write for this session.", "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/epoch" }] },
+    "context_pct": { "description": "context_window.used_percentage from the status line, for this session.", "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+    "nudges": { "description": "When the Supervisor nudged the current stall.", "type": "array", "items": { "$ref": "#/$defs/epoch" } },
+    "last_start_at": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/epoch" }] },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stall_seconds", "nudge_gap_seconds", "nudge_window_seconds", "max_nudges", "restart_pct", "force_restart_pct", "start_cooldown_seconds"],
+      "properties": {
+        "stall_seconds": { "$ref": "#/$defs/seconds" },
+        "nudge_gap_seconds": { "$ref": "#/$defs/seconds" },
+        "nudge_window_seconds": { "$ref": "#/$defs/seconds" },
+        "max_nudges": { "type": "integer", "minimum": 1 },
+        "restart_pct": { "$ref": "#/$defs/percent" },
+        "force_restart_pct": { "$ref": "#/$defs/percent" },
+        "start_cooldown_seconds": { "$ref": "#/$defs/seconds" }
+      }
+    }
+  }
+}

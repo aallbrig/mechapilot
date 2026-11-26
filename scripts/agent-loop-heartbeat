@@ -1,0 +1,22 @@
+#!/bin/sh
+# Claude Code PostToolUse/PostToolUseFailure hook for the Agent Loop session
+# (#20): record that the session is making progress. Configured only in the
+# settings the Supervisor passes with --settings, and run with "async": true so
+# it never slows a tool call. It spends no tokens.
+#
+# Writes <state-dir>/heartbeat as {"session_id", "at"}. The state dir is
+# AGENT_LOOP_STATE_DIR, else <main checkout>/.agent-loop found from
+# CLAUDE_PROJECT_DIR.
+set -eu
+
+input="$(cat)"
+lib_dir="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=agent-loop-lib
+. "${lib_dir}/agent-loop-lib"
+
+state_dir="$(agent_loop_default_state_dir "${CLAUDE_PROJECT_DIR:-.}")"
+mkdir -p "${state_dir}"
+now="$(date +%s)"
+printf '%s' "${input}" | jq -c --argjson now "${now}" '{session_id: (.session_id // ""), at: $now}' \
+  >"${state_dir}/heartbeat.tmp"
+mv -f "${state_dir}/heartbeat.tmp" "${state_dir}/heartbeat"

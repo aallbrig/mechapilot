@@ -1,0 +1,23 @@
+{
+  "now": 1795700000,
+  "machine": "m-a1b2c3",
+  "stop_requested": false,
+  "issues": [
+    { "number": 101, "labels": ["ready-for-agent", "machine:m-a1b2c3"], "assignees": ["owner"], "blocked_by": 0 }
+  ],
+  "prod": { "expected": true, "ok": true, "incident_open": false },
+  "session": { "status": "busy", "waiting_for": null, "started_at": 1795696000 },
+  "last_activity_at": 1795699700,
+  "context_pct": 20,
+  "nudges": [],
+  "last_start_at": 1795696000,
+  "config": {
+    "stall_seconds": 900,
+    "nudge_gap_seconds": 300,
+    "nudge_window_seconds": 1800,
+    "max_nudges": 2,
+    "restart_pct": 45,
+    "force_restart_pct": 60,
+    "start_cooldown_seconds": 600
+  }
+}

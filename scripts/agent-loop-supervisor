@@ -1,0 +1,553 @@
+#!/bin/sh
+# The Supervisor (#20): starts the Agent Loop session when work exists, nudges
+# it when it stalls, files an agent-loop-stall issue when nudges fail, restarts
+# it at about 45% context and ends it when no work remains. POSIX sh; it spends
+# no inference tokens (only gh, `claude agents --json`, tmux and files).
+#
+# Usage: scripts/agent-loop-supervisor <command>
+#   run       supervise until the stop file is set (the tmux loops pane runs this)
+#   once      gather, decide and act once, then exit
+#   snapshot  print the current state snapshot (schemas/agent-loop-snapshot.schema.json)
+#   start     clear the stop file and make sure a Supervisor runs (task loop:start)
+#   stop      set the stop file: the current issue finishes, then the session
+#             ends and the Supervisor exits (task loop:stop)
+#   status    print the Agent Loop's state (task loop:status)
+#   alias     print this machine's alias, generating it if needed (task setup)
+#
+# Each tick (AGENT_LOOP_TICK_SECONDS, default 60) builds a snapshot and lets
+# agent_loop_decide (scripts/agent-loop-lib) pick one action. GitHub is read at
+# most every AGENT_LOOP_GH_SECONDS (default 300) through scripts/agent-loop-gh,
+# with ETag conditional requests.
+#
+# State lives in AGENT_LOOP_STATE_DIR (default <main checkout>/.agent-loop):
+#   machine, stop, metrics.jsonl, heartbeat, context, supervisor.pid, pane,
+#   nudges, last-start, started-at, claimed, gh/ (cached issues), prod.json
+# The session runs in its own worktree, AGENT_LOOP_WORKTREE (default
+# <main checkout>.agent-loop, a sibling directory), created from origin/main.
+#
+# Tuning (seconds unless noted): AGENT_LOOP_STALL_SECONDS (900),
+# AGENT_LOOP_NUDGE_GAP_SECONDS (300), AGENT_LOOP_NUDGE_WINDOW_SECONDS (1800),
+# AGENT_LOOP_MAX_NUDGES (2), AGENT_LOOP_RESTART_PCT (45),
+# AGENT_LOOP_FORCE_RESTART_PCT (60), AGENT_LOOP_START_COOLDOWN_SECONDS (600).
+# Tests: AGENT_LOOP_NOW fixes the clock, AGENT_LOOP_MAX_TICKS bounds `run`.
+#
+# One-time human steps per machine (Claude Code cannot do them unattended):
+# log in with a claude.ai subscription (/login; Remote Control does not accept
+# API keys), then run `claude` once in the worktree to accept workspace trust
+# and the Remote Control confirmation.
+#
+# The session runs with --permission-mode dontAsk: anything outside the
+# allowlist in .claude/agent-loop-settings.json is denied rather than prompted,
+# so a prompt can never stall the loop.
+set -eu
+
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+repo_root="$(cd "${script_dir}/.." && pwd -P)"
+# shellcheck source=agent-loop-lib
+. "${script_dir}/agent-loop-lib"
+
+state_dir="$(agent_loop_default_state_dir "${repo_root}")"
+main_root="$(dirname "${state_dir}")"
+worktree="${AGENT_LOOP_WORKTREE:-${main_root}.agent-loop}"
+session_name="$(agent_loop_session_name)"
+tick_seconds="${AGENT_LOOP_TICK_SECONDS:-60}"
+gh_seconds="${AGENT_LOOP_GH_SECONDS:-300}"
+mkdir -p "${state_dir}"
+
+log() {
+  stamp="$(date -u +%H:%M:%SZ)"
+  printf '%s supervisor: %s\n' "${stamp}" "$*"
+}
+
+die() {
+  printf 'agent-loop-supervisor: %s\n' "$*" >&2
+  exit 1
+}
+
+now() {
+  if [ -n "${AGENT_LOOP_NOW:-}" ]; then
+    printf '%s\n' "${AGENT_LOOP_NOW}"
+  else
+    date +%s
+  fi
+}
+
+# read_or <file> <default>: the file's first line, or the default.
+read_or() {
+  if [ -s "$1" ]; then head -n 1 "$1"; else printf '%s\n' "$2"; fi
+}
+
+machine() {
+  agent_loop_ensure_alias "${state_dir}"
+}
+
+# metric <event> [<key> <value>]...: append one line to metrics.jsonl
+# (schemas/agent-loop-metrics-event.schema.json). issue, seconds and pct are numbers.
+metric() {
+  event="$1"
+  shift
+  at="$(now)"
+  alias_now="$(machine)"
+  line="$(jq -nc --argjson at "${at}" --arg event "${event}" --arg machine "${alias_now}" \
+    '{at: $at, event: $event, machine: $machine}')"
+  while [ "$#" -ge 2 ]; do
+    case "$1" in
+      issue | seconds | pct) line="$(printf '%s\n' "${line}" | jq -c --arg k "$1" --argjson v "$2" '.[$k] = $v')" ;;
+      *) line="$(printf '%s\n' "${line}" | jq -c --arg k "$1" --arg v "$2" '.[$k] = $v')" ;;
+    esac
+    shift 2
+  done
+  printf '%s\n' "${line}" >>"${state_dir}/metrics.jsonl"
+}
+
+# Refuse values that would break the quoting of the launch script.
+safe_path() {
+  case "$1" in
+    *"'"* | *'
+'*) die "path contains a quote or newline: $1" ;;
+    *) ;;
+  esac
+}
+
+# ---- gathering (the only side effects are reads and caches) ----
+
+# refresh_github: re-read issues and Production every gh_seconds at most.
+refresh_github() {
+  t="$(now)"
+  last="$(read_or "${state_dir}/gh-fetched-at" 0)"
+  [ $((t - last)) -ge "${gh_seconds}" ] || return 0
+  printf '%s\n' "${t}" >"${state_dir}/gh-fetched-at"
+  if "${script_dir}/agent-loop-gh" issues ready-for-agent "${state_dir}/gh" >"${state_dir}/issues.json.tmp"; then
+    mv -f "${state_dir}/issues.json.tmp" "${state_dir}/issues.json"
+  else
+    rm -f "${state_dir}/issues.json.tmp"
+    log "GitHub read failed; keeping the last issue list"
+  fi
+  refresh_prod
+  track_claims
+}
+
+# Production is expected once a v* release exists; only then is it smoke-tested.
+refresh_prod() {
+  git -C "${main_root}" fetch --quiet --tags origin 2>/dev/null || true
+  tags="$(git -C "${main_root}" tag -l 'v*' 2>/dev/null || true)"
+  expected=false ok=true incident=false
+  if [ -n "${tags}" ]; then
+    expected=true
+    if ! "${script_dir}/checks/prod-smoke" >"${state_dir}/prod-smoke.log" 2>&1; then
+      ok=false
+      incidents="$("${script_dir}/agent-loop-gh" issues prod-incident "${state_dir}/gh" 2>/dev/null || printf '[]')"
+      count="$(printf '%s\n' "${incidents}" | jq length)"
+      [ "${count}" -eq 0 ] || incident=true
+    fi
+  fi
+  jq -nc --argjson e "${expected}" --argjson o "${ok}" --argjson i "${incident}" \
+    '{expected: $e, ok: $o, incident_open: $i}' >"${state_dir}/prod.json"
+}
+
+# track_claims: metrics for issues this machine claimed that closed (delivered)
+# or lost the machine label (unclaimed). <state>/claimed holds "<n> <first-seen>".
+track_claims() {
+  [ -f "${state_dir}/issues.json" ] || return 0
+  me="$(machine)"
+  t="$(now)"
+  mine="$(jq -r --arg l "machine:${me}" '.[] | select(.labels | index($l)) | .number' "${state_dir}/issues.json")"
+  listed="$(jq -r '.[].number' "${state_dir}/issues.json")"
+  : >"${state_dir}/claimed.new"
+  if [ -f "${state_dir}/claimed" ]; then
+    while read -r n seen; do
+      if printf '%s\n' "${mine}" | grep -qx "${n}"; then
+        printf '%s %s\n' "${n}" "${seen}" >>"${state_dir}/claimed.new"
+      elif printf '%s\n' "${listed}" | grep -qx "${n}"; then
+        metric unclaimed issue "${n}"
+      else
+        closed_as="$("${script_dir}/agent-loop-gh" issue-state "${n}" </dev/null 2>/dev/null || printf 'unknown')"
+        case "${closed_as}" in
+          completed) metric delivered issue "${n}" seconds "$((t - seen))" ;;
+          open | unknown) printf '%s %s\n' "${n}" "${seen}" >>"${state_dir}/claimed.new" ;;
+          *) metric unclaimed issue "${n}" ;;
+        esac
+      fi
+    done <"${state_dir}/claimed"
+  fi
+  for n in ${mine}; do
+    grep -q "^${n} " "${state_dir}/claimed.new" || printf '%s %s\n' "${n}" "${t}" >>"${state_dir}/claimed.new"
+  done
+  mv -f "${state_dir}/claimed.new" "${state_dir}/claimed"
+}
+
+# session_row: the `claude agents --json` entry for the Agent Loop, or nothing.
+# It matches the session name, or the pid of the session's tmux pane (the
+# launcher execs claude), in case a /clear drops the name.
+session_row() {
+  agents="$(claude agents --json 2>/dev/null)" || agents='[]'
+  pane_pid=0
+  p="$(read_or "${state_dir}/pane" '')"
+  if [ -n "${p}" ]; then
+    pane_pid="$(tmux display-message -p -t "${p}" '#{pane_pid}' 2>/dev/null)" || pane_pid=0
+    case "${pane_pid}" in "" | *[!0-9]*) pane_pid=0 ;; *) ;; esac
+  fi
+  printf '%s\n' "${agents}" | jq -c --arg n "${session_name}" --argjson pp "${pane_pid}" \
+    '[.[]? | select(.pid != null and (.name == $n or ($pp > 0 and .pid == $pp)))][0] // empty' 2>/dev/null || true
+}
+
+# pane: the tmux pane running the session, if it is still alive.
+pane() {
+  p="$(read_or "${state_dir}/pane" '')"
+  [ -n "${p}" ] || return 0
+  dead="$(tmux display-message -p -t "${p}" '#{pane_dead}' 2>/dev/null || printf 'gone')"
+  if [ "${dead}" = 0 ]; then printf '%s\n' "${p}"; fi
+}
+
+# The state file written by the status line or heartbeat, if it belongs to the session.
+fresh_json() {
+  file="$1"
+  sid="$2"
+  [ -s "${file}" ] || return 0
+  jq -c --arg sid "${sid}" 'select($sid == "" or .session_id == "" or .session_id == $sid)' "${file}" 2>/dev/null || true
+}
+
+snapshot() {
+  t="$(now)"
+  me="$(machine)"
+  stop=false
+  [ ! -e "${state_dir}/stop" ] || stop=true
+  issues="$(read_or "${state_dir}/issues.json" '[]')"
+  prod="$(read_or "${state_dir}/prod.json" '{"expected":false,"ok":true,"incident_open":false}')"
+  row="$(session_row)"
+  live_pane="$(pane)"
+  started_at="$(read_or "${state_dir}/started-at" "${t}")"
+  sid=""
+  if [ -n "${row}" ]; then
+    session="$(printf '%s\n' "${row}" | jq -c --argjson fallback "${started_at}" \
+      '{status: (if .status == "busy" or .status == "waiting" or .status == "idle" then .status else "unknown" end),
+        waiting_for: (.waitingFor // null),
+        started_at: (if .startedAt then (.startedAt / 1000 | floor) else $fallback end)}')"
+    sid="$(printf '%s\n' "${row}" | jq -r '.sessionId // ""')"
+  elif [ -n "${live_pane}" ]; then
+    session="$(jq -nc --argjson s "${started_at}" '{status: "unknown", waiting_for: null, started_at: $s}')"
+  else
+    session=null
+  fi
+  heartbeat="$(fresh_json "${state_dir}/heartbeat" "${sid}")"
+  context="$(fresh_json "${state_dir}/context" "${sid}")"
+  nudges="$(if [ -s "${state_dir}/nudges" ]; then jq -sc . "${state_dir}/nudges"; else printf '[]'; fi)"
+  last_start="$(read_or "${state_dir}/last-start" null)"
+  jq -n \
+    --argjson now "${t}" --arg machine "${me}" --argjson stop "${stop}" \
+    --argjson issues "${issues}" --argjson prod "${prod}" --argjson session "${session}" \
+    --argjson heartbeat "${heartbeat:-null}" --argjson context "${context:-null}" \
+    --argjson nudges "${nudges}" --argjson last_start "${last_start}" \
+    --argjson stall "${AGENT_LOOP_STALL_SECONDS:-900}" \
+    --argjson gap "${AGENT_LOOP_NUDGE_GAP_SECONDS:-300}" \
+    --argjson window "${AGENT_LOOP_NUDGE_WINDOW_SECONDS:-1800}" \
+    --argjson max_nudges "${AGENT_LOOP_MAX_NUDGES:-2}" \
+    --argjson restart "${AGENT_LOOP_RESTART_PCT:-45}" \
+    --argjson force "${AGENT_LOOP_FORCE_RESTART_PCT:-60}" \
+    --argjson cooldown "${AGENT_LOOP_START_COOLDOWN_SECONDS:-600}" \
+    '{
+      now: $now, machine: $machine, stop_requested: $stop, issues: $issues, prod: $prod,
+      session: $session,
+      last_activity_at: ([$heartbeat.at?, $context.at?] | map(select(. != null)) | max),
+      context_pct: (if $session == null then null else $context.pct? end),
+      nudges: $nudges, last_start_at: $last_start,
+      config: {stall_seconds: $stall, nudge_gap_seconds: $gap, nudge_window_seconds: $window,
+        max_nudges: $max_nudges, restart_pct: $restart, force_restart_pct: $force,
+        start_cooldown_seconds: $cooldown}
+    }'
+}
+
+# ---- acting ----
+
+ensure_worktree() {
+  safe_path "${worktree}"
+  safe_path "${state_dir}"
+  if [ ! -d "${worktree}" ]; then
+    git -C "${main_root}" fetch --quiet origin main
+    git -C "${main_root}" worktree add --quiet --detach "${worktree}" origin/main
+    log "created the Agent Loop worktree ${worktree}"
+  fi
+  if [ -f "${worktree}/.mise.toml" ] && command -v mise >/dev/null 2>&1; then
+    mise trust --quiet "${worktree}/.mise.toml" || true
+  fi
+}
+
+# session_settings: the --settings file for the session, from the committed
+# .claude/agent-loop-settings.json plus this machine's absolute paths.
+session_settings() {
+  out="${state_dir}/session-settings.json"
+  jq --arg sl "'${worktree}/scripts/claude-statusline'" \
+    --arg hb "'${worktree}/scripts/agent-loop-heartbeat'" \
+    --arg state "${state_dir}" '
+      .statusLine = {type: "command", command: $sl}
+      | .env = ((.env // {}) + {AGENT_LOOP_STATE_DIR: $state})
+      | .hooks = ((.hooks // {}) + {
+          PostToolUse: [{hooks: [{type: "command", command: $hb, async: true}]}],
+          PostToolUseFailure: [{hooks: [{type: "command", command: $hb, async: true}]}]
+        })' "${repo_root}/.claude/agent-loop-settings.json" >"${out}.tmp"
+  mv -f "${out}.tmp" "${out}"
+  printf '%s\n' "${out}"
+}
+
+send() {
+  p="$(pane)"
+  if [ -z "${p}" ]; then
+    log "no live tmux pane for the session; cannot send $*"
+    return 0
+  fi
+  case "$1" in
+    Escape | Enter) tmux send-keys -t "${p}" "$1" ;;
+    *)
+      tmux send-keys -t "${p}" -l "$1"
+      tmux send-keys -t "${p}" Enter
+      ;;
+  esac
+}
+
+# A (re)started session gets a fresh heartbeat (for any session id), so the
+# stall clock starts now rather than when the claude process started.
+reset_session_state() {
+  rm -f "${state_dir}/nudges" "${state_dir}/context"
+  t="$(now)"
+  printf '{"session_id":"","at":%s}\n' "${t}" >"${state_dir}/heartbeat"
+}
+
+do_start() {
+  ensure_worktree
+  settings="$(session_settings)"
+  launcher="${state_dir}/launch"
+  cat >"${launcher}" <<EOF
+#!/bin/sh
+# Written by scripts/agent-loop-supervisor; runs in the session's tmux pane.
+cd '${worktree}' || exit 1
+AGENT_LOOP_STATE_DIR='${state_dir}'
+export AGENT_LOOP_STATE_DIR
+exec claude --name '${session_name}' --remote-control '${session_name}' --permission-mode dontAsk --settings '${settings}'
+EOF
+  chmod +x "${launcher}"
+  if [ -n "${TMUX_PANE:-}" ]; then
+    p="$(tmux split-window -d -P -F '#{pane_id}' -t "${TMUX_PANE}" -c "${worktree}" "'${launcher}'")"
+  else
+    if tmux has-session -t '=agent-loop' 2>/dev/null; then
+      p="$(tmux new-window -d -P -F '#{pane_id}' -t '=agent-loop:' -c "${worktree}" "'${launcher}'")"
+    else
+      p="$(tmux new-session -d -P -F '#{pane_id}' -s agent-loop -c "${worktree}" "'${launcher}'")"
+    fi
+  fi
+  t="$(now)"
+  printf '%s\n' "${p}" >"${state_dir}/pane"
+  printf '%s\n' "${t}" >"${state_dir}/last-start"
+  printf '%s\n' "${t}" >"${state_dir}/started-at"
+  reset_session_state
+  metric session_start reason "$1"
+  # The prompt is typed once the session is listed and idle, so the optional
+  # --remote-control name can never swallow it.
+  i=0
+  while [ "${i}" -lt 45 ]; do
+    row="$(session_row)"
+    status="$(printf '%s\n' "${row}" | jq -r '.status // empty')"
+    if [ "${status}" = idle ]; then
+      send /agent-loop
+      log "started the session in pane ${p}"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 2
+  done
+  log "the session in pane ${p} never became idle (workspace not trusted, or not logged in?); nudges will retry"
+}
+
+do_nudge() {
+  status="$1"
+  if [ "${status}" != idle ]; then send Escape; fi
+  send /agent-loop
+  now >>"${state_dir}/nudges"
+  metric nudge reason "$2"
+}
+
+kill_session() {
+  p="$(pane)"
+  if [ -n "${p}" ]; then
+    tmux kill-pane -t "${p}" 2>/dev/null || true
+  else
+    row="$(session_row)"
+    pid="$(printf '%s\n' "${row}" | jq -r '.pid // empty')"
+    if [ -n "${pid}" ]; then kill -INT "${pid}" 2>/dev/null || true; fi
+  fi
+  rm -f "${state_dir}/pane" "${state_dir}/started-at"
+  reset_session_state
+}
+
+do_escalate() {
+  reason="$2"
+  case "${reason}" in
+    waiting*) title="Agent Loop stalled: session waiting on a prompt" ;;
+    idle*) title="Agent Loop stalled: session idle with work and nudges did not help" ;;
+    *) title="Agent Loop stalled: session busy with no heartbeat" ;;
+  esac
+  body="$(mktemp)"
+  me="$(machine)"
+  pct="unknown"
+  if [ -s "${state_dir}/context" ]; then pct="$(jq -r '.pct // "unknown"' "${state_dir}/context")"; fi
+  cat >"${body}" <<EOF
+The Supervisor nudged the Agent Loop session ${AGENT_LOOP_MAX_NUDGES:-2} times and it is still stalled, so it restarted the session.
+
+- Machine: ${me}
+- Status: $1
+- Reason: ${reason}
+- Context: ${pct}%
+
+Find why the loop stalled (the agent-loop skill, the permission allowlist in .claude/agent-loop-settings.json, or the Supervisor) and fix it so it does not recur.
+EOF
+  if ! "${script_dir}/agent-loop-gh" file-stall "${title}" "${body}"; then
+    log "filing the stall issue failed"
+  fi
+  rm -f "${body}"
+  metric stall reason "${reason}"
+  kill_session
+}
+
+do_restart() {
+  status="$1"
+  pct="$(jq -r '.pct // 0' "${state_dir}/context" 2>/dev/null || printf '0')"
+  if [ "${status}" != idle ]; then
+    send Escape
+    sleep 2
+  fi
+  send /clear
+  sleep 3
+  send /agent-loop
+  reset_session_state
+  metric restart pct "${pct}" reason "$2"
+}
+
+do_stop_session() {
+  send /exit
+  i=0
+  while [ "${i}" -lt 15 ]; do
+    p="$(pane)"
+    [ -n "${p}" ] || break
+    i=$((i + 1))
+    sleep 2
+  done
+  kill_session
+  metric shutoff reason "$1"
+}
+
+# tick: gather, decide, act. Exits the script on the exit action.
+tick() {
+  refresh_github
+  snap="${state_dir}/snapshot.json"
+  snapshot >"${snap}.tmp"
+  mv -f "${snap}.tmp" "${snap}"
+  decision="$(agent_loop_decide "${snap}")"
+  action="$(printf '%s\n' "${decision}" | cut -f 1)"
+  reason="$(printf '%s\n' "${decision}" | cut -f 2-)"
+  status="$(jq -r '.session.status // "none"' "${snap}")"
+  printf '%s\n' "${decision}" >"${state_dir}/last-decision"
+  if [ "${action}" != wait ]; then log "${action}: ${reason}"; fi
+  case "${action}" in
+    wait) ;;
+    start) do_start "${reason}" ;;
+    nudge) do_nudge "${status}" "${reason}" ;;
+    escalate) do_escalate "${status}" "${reason}" ;;
+    restart) do_restart "${status}" "${reason}" ;;
+    stop-session) do_stop_session "${reason}" ;;
+    exit)
+      metric supervisor_exit reason "${reason}"
+      log "stop file set and no session running; exiting (task loop:start resumes)"
+      exit 0
+      ;;
+    *) die "unknown action from agent_loop_decide: ${action}" ;;
+  esac
+}
+
+supervisor_pid() {
+  pid="$(read_or "${state_dir}/supervisor.pid" '')"
+  if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then printf '%s\n' "${pid}"; fi
+}
+
+run() {
+  other="$(supervisor_pid)"
+  [ -z "${other}" ] || die "a Supervisor already runs (pid ${other})"
+  for tool in claude tmux gh jq git; do
+    command -v "${tool}" >/dev/null 2>&1 || die "${tool} is not on PATH (task setup installs the pinned tools)"
+  done
+  printf '%s\n' "$$" >"${state_dir}/supervisor.pid"
+  trap 'rm -f "${state_dir}/supervisor.pid"' EXIT
+  trap 'exit 130' INT TERM
+  me="$(machine)"
+  metric supervisor_start
+  log "machine ${me}, state ${state_dir}, worktree ${worktree}"
+  ticks=0
+  while :; do
+    tick
+    ticks=$((ticks + 1))
+    if [ -n "${AGENT_LOOP_MAX_TICKS:-}" ] && [ "${ticks}" -ge "${AGENT_LOOP_MAX_TICKS}" ]; then return 0; fi
+    sleep "${tick_seconds}"
+  done
+}
+
+start() {
+  rm -f "${state_dir}/stop"
+  pid="$(supervisor_pid)"
+  if [ -n "${pid}" ]; then
+    printf 'loop:start: the Supervisor already runs (pid %s)\n' "${pid}"
+    return 0
+  fi
+  if tmux has-session -t '=mechafighter' 2>/dev/null; then
+    tmux split-window -d -t '=mechafighter:loops' -c "${repo_root}" "'${script_dir}/agent-loop-supervisor' run"
+    printf 'loop:start: the Supervisor starts in the loops window (task dev to watch)\n'
+  else
+    "${repo_root}/scripts/dev/session" start-detached
+    printf 'loop:start: started the dev session; its loops window runs the Supervisor (task dev to watch)\n'
+  fi
+}
+
+status() {
+  me="$(machine)"
+  t="$(now)"
+  pid="$(supervisor_pid)"
+  row="$(session_row)"
+  session_status="not running"
+  if [ -n "${row}" ]; then session_status="$(printf '%s\n' "${row}" | jq -r '.status // "unknown"')"; fi
+  pct="?"
+  if [ -s "${state_dir}/context" ]; then pct="$(jq -r '.pct // "?"' "${state_dir}/context")"; fi
+  last="$(read_or "${state_dir}/last-decision" 'none')"
+  printf 'machine:     %s\n' "${me}"
+  printf 'supervisor:  %s\n' "${pid:+running (pid ${pid})}${pid:-not running}"
+  if [ -e "${state_dir}/stop" ]; then printf 'stop file:   set (task loop:start clears it)\n'; fi
+  printf 'worktree:    %s\n' "${worktree}"
+  printf 'session:     %s\n' "${session_status}"
+  printf 'context:     %s%%\n' "${pct}"
+  if [ -s "${state_dir}/heartbeat" ]; then
+    hb="$(jq -r '.at' "${state_dir}/heartbeat")"
+    printf 'heartbeat:   %ss ago\n' "$((t - hb))"
+  fi
+  printf 'last tick:   %s\n' "${last}" | tr '\t' ' '
+  if [ -s "${state_dir}/metrics.jsonl" ]; then
+    printf 'recent events:\n'
+    tail -n 5 "${state_dir}/metrics.jsonl" | jq -r '"  \(.at | todate) \(.event) \(.reason // .issue // "")"'
+  fi
+}
+
+cmd="${1:-}"
+case "${cmd}" in
+  run) run ;;
+  once) tick ;;
+  snapshot)
+    refresh_github
+    snapshot
+    ;;
+  start) start ;;
+  stop)
+    : >"${state_dir}/stop"
+    printf 'loop:stop: stop file set; the current issue finishes, then the session ends and the Supervisor exits\n'
+    ;;
+  status) status ;;
+  alias) machine ;;
+  *)
+    printf 'usage: %s run|once|snapshot|start|stop|status|alias\n' "$0" >&2
+    exit 64
+    ;;
+esac

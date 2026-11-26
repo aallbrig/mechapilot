@@ -1,0 +1,468 @@
+#!/bin/sh
+# Tests for the Agent Loop (#20): the Supervisor's pure decision functions
+# (scripts/agent-loop-lib), the Supervisor itself with stubbed claude, gh and
+# tmux, the GitHub adapter, the status line, the heartbeat hook, the metrics
+# report, the Production smoke check and the machine alias.
+# Run by scripts/test-shell from the repo root; each test_* function is one case.
+# Nothing here reaches the network or starts a real Claude session.
+
+fixtures=tests/fixtures/agent-loop
+
+# expect <want> <command...>: the command succeeds and prints exactly <want>.
+expect() {
+  want="$1"
+  shift
+  got="$("$@")" || {
+    printf 'command failed: %s\n' "$*"
+    return 1
+  }
+  [ "${got}" = "${want}" ] || {
+    printf 'expected [%s] but got [%s] from: %s\n' "${want}" "${got}" "$*"
+    return 1
+  }
+}
+
+# events <metrics-file>: the event names on one line.
+events() {
+  jq -r '.event' "$1" | tr '\n' ' '
+}
+
+# snap <fixture> <jq-filter>: a temp copy of a fixture snapshot with the filter applied.
+snap() {
+  out="$(mktemp)"
+  jq "$2" "${fixtures}/$1" >"${out}" || return 1
+  printf '%s\n' "${out}"
+}
+
+# decision <snapshot-file>: the action word agent_loop_decide picks.
+decision() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_decide "$1"
+  ) | cut -f 1
+}
+
+classify() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_classify "$1"
+  )
+}
+
+work() {
+  (
+    . scripts/agent-loop-lib
+    agent_loop_work "$1"
+  )
+}
+
+# stubs <dir>: fake claude, gh and tmux in <dir>/bin that record every call in
+# <dir>/calls.
+#   claude agents --json  prints <dir>/agents.json (or [])
+#   gh api --include ...  answers 200 with <dir>/issues.json and an ETag, or
+#                         304 when sent If-None-Match
+#   gh api repos/.../issues/<n> --jq ...  prints <dir>/issue-state (or completed)
+#   tmux split-window/new-session  print %9, mark the pane alive and, if
+#                         <dir>/agents-after-start.json exists, make it the agents list
+#   tmux display-message  prints 0 while <dir>/pane-alive exists
+#   tmux send-keys -l /exit and kill-pane  end the pane
+stubs() {
+  bin="$1/bin"
+  mkdir -p "${bin}"
+  cat >"${bin}/claude" <<EOF
+#!/bin/sh
+printf 'claude %s\n' "\$*" >>"$1/calls"
+if [ "\$1" = agents ]; then
+  if [ -f "$1/agents.json" ]; then cat "$1/agents.json"; else printf '[]\n'; fi
+fi
+EOF
+  cat >"${bin}/gh" <<EOF
+#!/bin/sh
+printf 'gh %s\n' "\$*" >>"$1/calls"
+case "\$*" in
+  *If-None-Match*) printf 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n\r\n'; exit 1 ;;
+  "api --include "*) printf 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\n\r\n'; cat "$1/issues.json" ;;
+  "api repos/"*) if [ -f "$1/issue-state" ]; then cat "$1/issue-state"; else printf 'completed\n'; fi ;;
+  "issue list"*) printf '[]\n' ;;
+  *) ;;
+esac
+EOF
+  cat >"${bin}/tmux" <<EOF
+#!/bin/sh
+printf 'tmux %s\n' "\$*" >>"$1/calls"
+case "\$1" in
+  split-window | new-session | new-window)
+    : >"$1/pane-alive"
+    if [ -f "$1/agents-after-start.json" ]; then cp "$1/agents-after-start.json" "$1/agents.json"; fi
+    printf '%%9\n' ;;
+  display-message) if [ -f "$1/pane-alive" ]; then printf '0\n'; else exit 1; fi ;;
+  send-keys) case "\$*" in *"-l /exit"*) rm -f "$1/pane-alive" "$1/agents.json" ;; *) ;; esac ;;
+  kill-pane) rm -f "$1/pane-alive" "$1/agents.json" ;;
+  has-session) exit 1 ;;
+  *) ;;
+esac
+EOF
+  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux"
+  : >"$1/calls"
+  printf '[]\n' >"$1/issues.json"
+}
+
+# supervisor <dir> <args...>: run the Supervisor against stubs and a private state dir.
+supervisor() {
+  d="$1"
+  shift
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
+    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=1 TMUX_PANE='%1' \
+    scripts/agent-loop-supervisor "$@"
+}
+
+test_supervisor_detects_unclaimed_work() {
+  w="$(work "${fixtures}/snapshot-no-session.json")" || return 1
+  # 102 is blocked, 103 is another machine's, 104 needs info, 105 is assigned
+  # and 106's blockers are unknown: only 101 is free.
+  [ "${w}" = '{"mine":[],"unclaimed":[101],"prod_down":false}' ] || return 1
+  expect start decision "${fixtures}/snapshot-no-session.json" || return 1
+  # Without 101 there is nothing to start.
+  s="$(snap snapshot-no-session.json 'del(.issues[] | select(.number == 101))')" || return 1
+  expect wait decision "${s}" || return 1
+  # A prod-incident is assigned to the owner and still counts while unblocked.
+  s="$(snap snapshot-no-session.json '.issues = [{number: 7, labels: ["ready-for-agent", "prod-incident"], assignees: ["owner"], blocked_by: 0}]')" || return 1
+  expect '{"mine":[],"unclaimed":[7],"prod_down":false}' work "${s}" || return 1
+  # Production down with no incident filed yet is work too.
+  s="$(snap snapshot-no-session.json '.issues = [] | .prod = {expected: true, ok: false, incident_open: false}')" || return 1
+  expect start decision "${s}" || return 1
+  # Inside the start cooldown it waits.
+  s="$(snap snapshot-no-session.json '.last_start_at = .now - 60')" || return 1
+  expect wait decision "${s}"
+}
+
+test_supervisor_ignores_other_machine_work() {
+  only_others='.issues = [
+    {number: 103, labels: ["ready-for-agent", "machine:m-ffffff"], assignees: ["owner"], blocked_by: 0},
+    {number: 107, labels: ["ready-for-agent", "machine:m-000001"], assignees: [], blocked_by: 0},
+    {number: 108, labels: ["ready-for-agent", "prod-incident", "machine:m-ffffff"], assignees: ["owner"], blocked_by: 0}]'
+  s="$(snap snapshot-no-session.json "${only_others}")" || return 1
+  expect '{"mine":[],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect wait decision "${s}" || return 1
+  # The same issues, claimed by this machine instead, are work.
+  s="$(snap snapshot-no-session.json "${only_others} | .issues[0].labels = [\"ready-for-agent\", \"machine:m-a1b2c3\"]")" || return 1
+  expect '{"mine":[103],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect start decision "${s}"
+}
+
+test_supervisor_classifies_stale_heartbeat_as_stall() {
+  expect working classify "${fixtures}/snapshot-busy-session.json" || return 1
+  expect wait decision "${fixtures}/snapshot-busy-session.json" || return 1
+  # Busy with no heartbeat for 901s (stall_seconds is 900): stalled, so nudge.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 901')" || return 1
+  expect stalled classify "${s}" || return 1
+  expect nudge decision "${s}" || return 1
+  # Exactly at the limit it still counts as working.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 900')" || return 1
+  expect working classify "${s}" || return 1
+  # With no heartbeat at all, the session's start is the last sign of life.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = null')" || return 1
+  expect stalled classify "${s}" || return 1
+  # A session the Supervisor cannot see in `claude agents` (status unknown) is judged the same way.
+  s="$(snap snapshot-busy-session.json '.session.status = "unknown" | .last_activity_at = .now - 901')" || return 1
+  expect stalled classify "${s}" || return 1
+  # Waiting on a prompt is a stall too.
+  s="$(snap snapshot-busy-session.json '.session.status = "waiting" | .session.waiting_for = "permission prompt"')" || return 1
+  expect stalled classify "${s}" || return 1
+  expect nudge decision "${s}" || return 1
+  # One nudge 200s ago: wait for the gap. Two nudges in the window: escalate.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 2000 | .nudges = [.now - 200]')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 2000 | .nudges = [.now - 900, .now - 400]')" || return 1
+  expect escalate decision "${s}" || return 1
+  # Nudges older than the 30-minute window do not count.
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 4000 | .nudges = [.now - 3000, .now - 2500]')" || return 1
+  expect nudge decision "${s}"
+}
+
+test_supervisor_restarts_at_context_threshold() {
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .context_pct = 45')" || return 1
+  expect restart decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .context_pct = 44.9 | .last_activity_at = .now - 60')" || return 1
+  expect wait decision "${s}" || return 1
+  # Busy: not at 45%, only at 60% (the interrupt threshold).
+  s="$(snap snapshot-busy-session.json '.context_pct = 59')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.context_pct = 60')" || return 1
+  expect restart decision "${s}" || return 1
+  # The Supervisor carries it out: /clear, then /agent-loop, and a restart metric.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  jq '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' \
+    -n >"${d}/issues.json"
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '{"session_id":"s1","pct":47,"at":1795699000}\n' >"${d}/state/context"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 -l /clear' "${d}/calls" || return 1
+  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  ! grep -q 'Escape' "${d}/calls" || return 1
+  expect '[47,"m-a1b2c3"]' jq -c 'select(.event == "restart") | [.pct, .machine]' "${d}/state/metrics.jsonl" || return 1
+  # The context reading belonged to the cleared conversation.
+  [ ! -e "${d}/state/context" ]
+}
+
+test_supervisor_shuts_off_when_no_work() {
+  s="$(snap snapshot-busy-session.json '.issues = [] | .session.status = "idle"')" || return 1
+  expect stop-session decision "${s}" || return 1
+  # Busy with no work: let the turn finish first.
+  s="$(snap snapshot-busy-session.json '.issues = []')" || return 1
+  expect wait decision "${s}" || return 1
+  # Idle with work is not a shut-off.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 600')" || return 1
+  expect nudge decision "${s}" || return 1
+  # The Supervisor sends /exit and records the shut-off.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 -l /exit' "${d}/calls" || return 1
+  expect 'no work' jq -r 'select(.event == "shutoff") | .reason' "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/pane" ]
+}
+
+test_supervisor_honours_stop_file() {
+  # A session working on this machine's issue keeps going.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true')" || return 1
+  expect wait decision "${s}" || return 1
+  # Idle with the issue still claimed: nudged to finish it.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true | .session.status = "idle" | .last_activity_at = .now - 600')" || return 1
+  expect nudge decision "${s}" || return 1
+  # Once the current issue is done, unclaimed work no longer counts: shut off.
+  s="$(snap snapshot-busy-session.json '.stop_requested = true | .session.status = "idle"
+    | .issues = [{number: 109, labels: ["ready-for-agent"], assignees: [], blocked_by: 0}]')" || return 1
+  expect stop-session decision "${s}" || return 1
+  # With no session, it exits instead of starting new work.
+  s="$(snap snapshot-no-session.json '.stop_requested = true')" || return 1
+  expect exit decision "${s}" || return 1
+  # The real loop exits on its own, starts nothing and says why.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  supervisor "${d}" stop >/dev/null || return 1
+  [ -e "${d}/state/stop" ] || return 1
+  out="$(AGENT_LOOP_MAX_TICKS=3 supervisor "${d}" run)" || return 1
+  printf '%s\n' "${out}" | grep -q 'stop file set and no session running; exiting' || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  expect 'supervisor_start supervisor_exit ' events "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/supervisor.pid" ]
+}
+
+test_supervisor_starts_a_named_session_in_its_worktree() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree/scripts" "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}},
+    {number: 102, title: "a PR", labels: [], assignees: [], pull_request: {}}]' >"${d}/issues.json"
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q "^tmux split-window -d -P -F #{pane_id} -t %1 -c ${d}/worktree " "${d}/calls" || return 1
+  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  launcher="${d}/state/launch"
+  grep -qx "exec claude --name 'mechafighter.com dev loop' --remote-control 'mechafighter.com dev loop' --permission-mode dontAsk --settings '${d}/state/session-settings.json'" "${launcher}" || return 1
+  sh -n "${launcher}" || return 1
+  # The session's settings are valid Claude Code settings with the status line,
+  # the heartbeat hooks and the committed allowlist.
+  check-jsonschema --schemafile schemas/claude-code-settings.schema.json "${d}/state/session-settings.json" >/dev/null || return 1
+  settings="${d}/state/session-settings.json"
+  expect "'${d}/worktree/scripts/claude-statusline'" jq -r '.statusLine.command' "${settings}" || return 1
+  expect true jq -r '.hooks.PostToolUse[0].hooks[0].async' "${settings}" || return 1
+  expect "${d}/state" jq -r '.env.AGENT_LOOP_STATE_DIR' "${settings}" || return 1
+  jq -e '.permissions.deny | index("Bash(gh pr merge *)")' "${settings}" >/dev/null || return 1
+  expect '"m-a1b2c3"' jq -c 'select(.event == "session_start") | .machine' "${d}/state/metrics.jsonl" || return 1
+  # The snapshot it decided from matches its schema, with the PR dropped.
+  check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${d}/state/snapshot.json" >/dev/null || return 1
+  expect '[101]' jq -c '[.issues[].number]' "${d}/state/snapshot.json"
+}
+
+test_supervisor_files_a_stall_issue_after_failed_nudges() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":4242,"status":"busy","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '{"session_id":"s1","at":1795698000}\n' >"${d}/state/heartbeat"
+  # First tick: a nudge (Escape, then /agent-loop).
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 Escape' "${d}/calls" || return 1
+  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  # Two nudges already in the window: file the issue and kill the session.
+  printf '1795699000\n1795699500\n' >"${d}/state/nudges"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q '^gh issue create --title Agent Loop stalled: session busy with no heartbeat --body-file .* --label agent-loop-stall --label ready-for-agent$' "${d}/calls" || return 1
+  grep -qx 'tmux kill-pane -t %9' "${d}/calls" || return 1
+  expect 'busy, no heartbeat for 2000s' jq -r 'select(.event == "stall") | .reason' "${d}/state/metrics.jsonl" || return 1
+  [ ! -e "${d}/state/nudges" ]
+}
+
+test_supervisor_records_delivered_issues() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '101 1795696400\n' >"${d}/state/claimed"
+  # 101 is gone from the open list and GitHub says it was completed.
+  supervisor "${d}" snapshot >/dev/null || return 1
+  expect '[101,3600]' jq -c 'select(.event == "delivered") | [.issue, .seconds]' "${d}/state/metrics.jsonl" || return 1
+  [ ! -s "${d}/state/claimed" ]
+}
+
+test_gh_adapter_uses_conditional_requests() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  jq -n '[{number: 5, labels: [{name: "ready-for-agent"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 2}},
+    {number: 6, labels: [], assignees: [], pull_request: {}}]' >"${d}/issues.json"
+  first="$(PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache")" || return 1
+  [ "${first}" = '[{"number":5,"labels":["ready-for-agent"],"assignees":["owner"],"blocked_by":2}]' ] || return 1
+  expect 'W/"abc"' cat "${d}/cache/ready-for-agent.etag" || return 1
+  # The second read sends the ETag, gets 304 and answers from the cache.
+  printf 'not json\n' >"${d}/issues.json"
+  second="$(PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache")" || return 1
+  [ "${second}" = "${first}" ] || return 1
+  grep -q 'If-None-Match: W/"abc"' "${d}/calls" || return 1
+  # Anything other than 200 or 304 is an error.
+  printf '#!/bin/sh\nprintf "HTTP/2.0 500 Internal Server Error\\r\\n\\r\\n"\n' >"${d}/bin/gh"
+  rm -f "${d}/cache/ready-for-agent.etag"
+  ! PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache" 2>/dev/null
+}
+
+test_loop_report_summarizes_metrics() {
+  out="$(scripts/agent-loop-report "${fixtures}/metrics.jsonl")" || return 1
+  expected='delivered: 3
+delivered per day (UTC):
+  2026-11-26  2
+  2026-11-27  1
+median time to merge: 1h 00m
+stalls: 1
+restarts: 1
+nudges: 3 (1 succeeded, 33%)'
+  [ "${out}" = "${expected}" ] || {
+    printf 'got:\n%s\n' "${out}"
+    return 1
+  }
+  # An even count takes the mean of the middle two; no metrics is not an error.
+  f="$(mktemp)"
+  printf '{"at":1795651200,"event":"delivered","machine":"m-a1b2c3","issue":1,"seconds":600}\n{"at":1795651300,"event":"delivered","machine":"m-a1b2c3","issue":2,"seconds":1800}\n' >"${f}"
+  scripts/agent-loop-report "${f}" | grep -qx 'median time to merge: 20m' || return 1
+  scripts/agent-loop-report /nonexistent/metrics.jsonl | grep -q 'no metrics yet'
+}
+
+# prod_smoke_stubs <dir> <http-code> <cert-ok:0|1>
+prod_smoke_stubs() {
+  mkdir -p "$1/bin"
+  printf '#!/bin/sh\nprintf "%s"\n' "$2" >"$1/bin/curl"
+  cat >"$1/bin/openssl" <<EOF
+#!/bin/sh
+if [ "\$1" = x509 ]; then exit $3; fi
+printf 'CERT\n'
+EOF
+  chmod +x "$1/bin/curl" "$1/bin/openssl"
+}
+
+test_prod_smoke_fails_on_bad_status() {
+  d="$(mktemp -d)"
+  prod_smoke_stubs "${d}" 503 0
+  out="$(PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://mechafighter.com/: HTTP 503' || return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://game.mechafighter.com/: HTTP 503' || return 1
+  printf '%s\n' "${out}" | grep -qx 'prod-smoke: FAILED' || return 1
+  # 200 everywhere with good certificates passes, for QA too.
+  prod_smoke_stubs "${d}" 200 0
+  PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke | grep -qx 'prod-smoke: ok' || return 1
+  out="$(PATH="${d}/bin:${PATH}" MECHAFIGHTER_QA_URL=https://example.test/qa/ scripts/checks/prod-smoke --qa)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'PASS  https://example.test/qa/game/: HTTP 200' || return 1
+  # A certificate expiring within 14 days fails even with 200s.
+  prod_smoke_stubs "${d}" 200 1
+  out="$(PATH="${d}/bin:${PATH}" scripts/checks/prod-smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  mechafighter.com: certificate missing or expires within 14 days'
+}
+
+test_machine_alias_is_not_hostname() {
+  d="$(mktemp -d)"
+  # Even with a hostname that looks like an alias, the alias never derives from it.
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nprintf "m-abcdef\\n"\n' >"${d}/bin/hostname"
+  printf '#!/bin/sh\nprintf "m-abcdef\\n"\n' >"${d}/bin/uname"
+  chmod +x "${d}/bin/hostname" "${d}/bin/uname"
+  a="$(PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias)" || return 1
+  b="$(PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/two" scripts/agent-loop-supervisor alias)" || return 1
+  for alias in "${a}" "${b}"; do
+    printf '%s\n' "${alias}" | grep -Eqx 'm-[0-9a-f]{6}' || return 1
+    [ "${alias}" != m-abcdef ] || return 1
+  done
+  [ "${a}" != "${b}" ] || return 1
+  real_host="$(command hostname 2>/dev/null || uname -n)"
+  short_host="${real_host%%.*}"
+  [ -z "${short_host}" ] || ! printf '%s\n' "${a}" | grep -qiF -- "${short_host}" || return 1
+  # Stable once stored; a malformed stored alias is replaced.
+  expect "${a}" env AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias || return 1
+  printf 'my-laptop\n' >"${d}/one/machine"
+  c="$(AGENT_LOOP_STATE_DIR="${d}/one" scripts/agent-loop-supervisor alias)" || return 1
+  printf '%s\n' "${c}" | grep -Eqx 'm-[0-9a-f]{6}' || return 1
+  # The generator reads only /dev/urandom.
+  sed -n '/^agent_loop_new_alias()/,/^}/p' scripts/agent-loop-lib >"${d}/generator" || return 1
+  grep -q /dev/urandom "${d}/generator" || return 1
+  ! grep -nE 'hostname|uname|whoami|USER|HOME|scutil|git' "${d}/generator"
+}
+
+test_statusline_reports_context_for_the_supervisor() {
+  d="$(mktemp -d)"
+  printf 'm-a1b2c3\n' >"${d}/machine"
+  out="$(printf '{"session_id":"s1","session_name":"mechafighter.com dev loop","context_window":{"used_percentage":46.7},"workspace":{"project_dir":"/nowhere"}}' |
+    AGENT_LOOP_STATE_DIR="${d}" scripts/claude-statusline)" || return 1
+  [ "${out}" = 'mechafighter.com dev loop | ctx 46% | m-a1b2c3' ] || return 1
+  expect '["s1",46.7]' jq -c '[.session_id, .pct]' "${d}/context" || return 1
+  # Early in a session the percentage may be null; the line still prints.
+  out="$(printf '{"session_id":"s2","context_window":{"used_percentage":null}}' | AGENT_LOOP_STATE_DIR="${d}" scripts/claude-statusline)" || return 1
+  [ "${out}" = 'agent loop | ctx 0% | m-a1b2c3' ]
+}
+
+test_heartbeat_hook_records_progress() {
+  d="$(mktemp -d)"
+  printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash"}' |
+    AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat || return 1
+  expect s1 jq -r '.session_id' "${d}/heartbeat" || return 1
+  now="$(date +%s)"
+  at="$(jq -r '.at' "${d}/heartbeat")"
+  [ $((now - at)) -le 5 ]
+}
+
+test_loops_window_runs_the_supervisor() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts"
+  printf '#!/bin/sh\nprintf "supervisor %%s\\n" "$*"\n' >"${d}/scripts/agent-loop-supervisor"
+  chmod +x "${d}/scripts/agent-loop-supervisor"
+  out="$(DEV_REPO_ROOT="${d}" scripts/dev/loops)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'supervisor run' || return 1
+  printf '%s\n' "${out}" | grep -q 'task loop:start runs it again' || return 1
+  grep -q 'supervisor: scripts/dev/loops' .tmuxinator.yml
+}
+
+test_agent_loop_skill_check_rejects_reordered_passes() {
+  scripts/checks/agent-loop-skill >/dev/null || return 1
+  d="$(mktemp -d)"
+  # Claim before Resume: rejected.
+  sed -e 's/^## 2\. Resume$/## 2. TMP/' -e 's/^## 3\. Claim$/## 2. Resume/' -e 's/^## 2\. TMP$/## 3. Claim/' \
+    .claude/skills/agent-loop/SKILL.md >"${d}/swapped.md" || return 1
+  ! scripts/checks/agent-loop-skill "${d}/swapped.md" >/dev/null || return 1
+  # Losing the merge gate instruction: rejected.
+  grep -vF 'task merge-gate' .claude/skills/agent-loop/SKILL.md >"${d}/no-gate.md"
+  out="$(scripts/checks/agent-loop-skill "${d}/no-gate.md")" && return 1
+  printf '%s\n' "${out}" | grep -qF 'missing: task merge-gate -- <pr> --merge'
+}

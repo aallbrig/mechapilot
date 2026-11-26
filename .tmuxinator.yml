@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=schemas/tmuxinator.schema.json
 # The Mecha Fighter dev session. Start or attach with `task dev`, stop with
 # `task dev:stop`, validate with `task dev:check`. Every pane tolerates missing
-# parts (no Godot project, web build, Hugo site or Agent Loop yet).
+# parts (no Godot project, web build or Hugo site yet). The last window runs
+# the Agent Loop Supervisor, which starts a Claude session only when there is work.
 name: mechafighter
 root: .
 startup_window: editor
