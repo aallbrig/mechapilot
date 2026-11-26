@@ -97,7 +97,9 @@ case "\$*" in
     exclude='[]'; bypass='[]'
     if [ -e "$1/ruleset-excludes" ]; then exclude='["refs/tags/v9*"]'; fi
     if [ -e "$1/ruleset-role-bypass" ]; then bypass='[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]'; fi
-    printf '{"enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":%s}},"rules":[{"type":"creation"}],"bypass_actors":%s}\n' "\${exclude}" "\${bypass}" ;;
+    rules='[{"type":"creation"},{"type":"update"},{"type":"deletion"}]'
+    if [ -e "$1/ruleset-no-update" ]; then rules='[{"type":"creation"},{"type":"deletion"}]'; fi
+    printf '{"enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":%s}},"rules":%s,"bypass_actors":%s}\n' "\${exclude}" "\${rules}" "\${bypass}" ;;
   "api repos/{owner}/{repo}/environments/production")
     admins=false; self=true
     if [ -e "$1/prod-admin-bypass" ]; then admins=true; fi
@@ -430,10 +432,10 @@ test_preflight_requires_the_human_steps() {
   printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read Actions secrets (no Secrets permission)' || return 1
   rm -f "${d}/token-is-admin"
   # No tag ruleset, or one with an exclusion or a role bypass, fails.
-  for variant in no-ruleset ruleset-excludes ruleset-role-bypass; do
+  for variant in no-ruleset ruleset-excludes ruleset-role-bypass ruleset-no-update; do
     : >"${d}/${variant}"
     out="$(supervisor "${d}" preflight)" && return 1
-    printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating v\* tags' || return 1
+    printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating, updating and deleting v\* tags' || return 1
     rm -f "${d}/${variant}"
   done
   # Production that admins can bypass, or that allows self-review, fails.
@@ -796,6 +798,7 @@ test_supervisor_exports_only_the_pinned_runtime() {
 }
 
 test_supervisor_refuses_symlinks_in_the_checkout() {
+  # A planted node_modules link: nothing is written through it, no session starts.
   d="$(mktemp -d)"
   stubs "${d}"
   mkdir -p "${d}/worktree" "${d}/state" "${d}/elsewhere"
@@ -804,9 +807,40 @@ test_supervisor_refuses_symlinks_in_the_checkout() {
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
   out="$(supervisor "${d}" once 2>&1)" && return 1
   printf '%s\n' "${out}" | grep -q 'refusing to provision node_modules: a symbolic link is on its path' || return 1
-  # Nothing was written through the link, and no session started.
   [ -f "${d}/elsewhere/keep" ] && [ ! -e "${d}/elsewhere/.package-lock.json" ] || return 1
-  ! grep -q '^tmux split-window' "${d}/calls"
+  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+
+  # The reported attack: .agent-loop itself is a link to a directory outside
+  # the checkout. Nothing is created or written there, and no session starts.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state" "${d}/outside"
+  printf 'original\n' >"${d}/outside/ci-deps-pin"
+  ln -s "${d}/outside" "${d}/worktree/.agent-loop"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  out="$(supervisor "${d}" once 2>&1)" && return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to write into the checkout: .agent-loop is a symbolic link' || return 1
+  expect original cat "${d}/outside/ci-deps-pin" || return 1
+  expect 'ci-deps-pin' ls "${d}/outside" || return 1
+  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+
+  # The marker the reviewer redirected (.agent-loop/ci-deps-pin -> a victim
+  # file) is no longer written at all: the record lives in the state dir.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree/.agent-loop" "${d}/state"
+  printf 'victim\n' >"${d}/victim"
+  ln -s "${d}/victim" "${d}/worktree/.agent-loop/ci-deps-pin"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  expect victim cat "${d}/victim" || return 1
+  [ -L "${d}/worktree/.agent-loop/ci-deps-pin" ] || return 1
+  grep -q "^[0-9a-f]\{40\} ${d}/worktree$" "${d}/state/ci-deps/provisioned" || return 1
+  # Provisioning replaced node_modules by rename; nothing was left staged.
+  [ -f "${d}/worktree/node_modules/.package-lock.json" ] || return 1
+  for left in "${d}"/state/stage.* "${d}"/state/trash.*; do
+    [ ! -e "${left}" ] || return 1
+  done
 }
 
 # skill_doc <file> <step line>: a minimal skill with one step and a Human-only

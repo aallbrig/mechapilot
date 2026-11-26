@@ -23,7 +23,7 @@ The Agent Loop (#20) is an unattended Claude Code session that the Supervisor (`
    - Workflows matters most. A token that can push `.github/workflows/*` can add a workflow that runs on push with the repository's secrets and its OIDC deploy role. That workflow could release, deploy or leak secrets with no review at all.
 2. **Tag ruleset** (per repository). Create an active ruleset that:
    - targets tags, with `refs/tags/v*` included and **nothing excluded**;
-   - restricts creation;
+   - restricts creation, update (moving a tag) and deletion;
    - has **no role or user bypass**. Only a deploy key or a GitHub App may be on the bypass list.
 
    The loop's token acts as you, with your repository role, so a bypass for your role or account would let the loop tag a release. To release, push the tag with a deploy key or a release App, or deliberately switch the ruleset off and back on. Contents-write tokens can push tags, and the `production` environment admits any `v*` tag, so this ruleset is what keeps releases human-only.
@@ -40,6 +40,8 @@ The Agent Loop (#20) is an unattended Claude Code session that the Supervisor (`
    - `task loop:pin -- <sha>` moves the pin to another commit on `origin/main`.
 
    Review what changed in `scripts/agent-loop-*`, `scripts/claude-statusline`, `.claude/agent-loop-settings.json`, `.claude/skills/agent-loop/` and the lockfiles before you move it.
+
+   **Pinning a commit trusts it with your full user access.** The Supervisor runs the pinned commit's hooks and status line, plus its `scripts/site-chrome`, `npm ci --ignore-scripts` (from its `package-lock.json`) and `tofu init` (from its `infra/` lockfiles), all outside the sandbox. So review `scripts/site-chrome`, `package.json`, `package-lock.json` and `infra/**/.terraform.lock.hcl` too.
 5. **Sandbox dependencies** (per machine). macOS ships `sandbox-exec`. On Linux, install `bubblewrap` and `socat`. The session runs with `sandbox.failIfUnavailable: true`, so it exits instead of running unsandboxed.
 6. **Claude Code login and trust** (per machine).
    - Log in with a claude.ai subscription (`/login`); Remote Control does not accept API keys.
@@ -66,7 +68,7 @@ Because the session runs with `--restricted` and the sandbox protects tool-confi
 | - | - | - |
 | Claude Code sandbox on every Bash command (`allowUnsandboxedCommands: false`, `failIfUnavailable: true`) | Writes outside the checkout and the temp directory. Writes to `.claude` settings, skills and hooks, and to `.git/hooks` and `.git/config`, even inside the checkout. The checkout is a separate clone, so the main repository's `.git` is out of reach. Reads of `~/.aws`, `~/.ssh`, `~/.gnupg`, `~/.config/gh`, the token's directory and other credential files. Any network host outside the allowlist, and SSH or other non-proxied traffic. All unix sockets, tmux included (`allowAllUnixSockets: false`, `allowUnixSockets: []`). | `.claude/agent-loop-settings.json` `sandbox` |
 | Human-pinned runtime | Hooks and the status line run *outside* the sandbox with full access. They, the settings and the skill come from `git archive <pin>` in `<state>/runtime`: read-only, outside the sandbox's write scope, and only from a commit a human pinned. A PR the session gets merged changes nothing that runs unsandboxed until a human pins it. | `refresh_runtime`, `task loop:pin` |
-| Pre-provisioned tools | npm packages (`npm ci --ignore-scripts` from the pinned `package-lock.json`), the pinned Chrome for Testing and OpenTofu providers are installed outside the sandbox from the pinned commit, then copied into the checkout. Copying refuses any path with a symbolic link. The session runs npm with `npm_config_offline=true`. | `provision_ci` |
+| Pre-provisioned tools | npm packages (`npm ci --ignore-scripts` from the pinned `package-lock.json`), the pinned Chrome for Testing and OpenTofu providers are installed outside the sandbox from the pinned commit, then copied into the checkout. Every Supervisor write into the checkout goes through one helper. That helper refuses a symbolic link on any path component, stages the copy in the state dir and renames it into place. The record of what was provisioned lives in the state dir. Before provisioning, the previous session's whole process tree is stopped. The session runs npm with `npm_config_offline=true`. | `provision_ci` |
 | `--restricted --strict-mcp-config` | No user, project or local settings files: none of the owner's allow rules, no project hooks such as `scripts/claude-post-edit`, and no MCP servers or claude.ai connectors (`disableClaudeAiConnectors` too). | the launcher |
 | Least-privilege token, empty `GH_CONFIG_DIR`, git over HTTPS with only that token, `TMUX` unset | No Workflows, Environments, Variables, Secrets, Deployments or Administration permission. The owner's `gh` login and SSH keys are never reachable. | the launcher; preflight |
 | Branch protection, the tag ruleset, the production reviewer | No direct push to `main`, no release tag, no production deploy without a second human. | GitHub settings (human) |
