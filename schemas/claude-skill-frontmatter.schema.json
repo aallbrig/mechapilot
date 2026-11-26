@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/claude-skill-frontmatter.schema.json",
+  "title": "Claude Code skill frontmatter",
+  "description": "YAML frontmatter of .claude/skills/*/SKILL.md, per https://code.claude.com/docs/en/skills (frontmatter reference) and the Agent Skills spec (name: lowercase letters, digits and hyphens, at most 64 characters; description at most 1024). Unknown keys are rejected so typos fail lint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description"],
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "when_to_use": { "type": "string" },
+    "argument-hint": { "type": "string" },
+    "disable-model-invocation": { "type": "boolean" },
+    "user-invocable": { "type": "boolean" },
+    "allowed-tools": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "model": { "type": "string" },
+    "effort": { "enum": ["low", "medium", "high", "xhigh", "max"] },
+    "context": { "enum": ["fork"] },
+    "agent": { "type": "string" },
+    "paths": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "shell": { "enum": ["bash", "powershell"] },
+    "hooks": { "type": "object" },
+    "license": { "type": "string" },
+    "version": { "type": "string" },
+    "metadata": { "type": "object" }
+  }
+}

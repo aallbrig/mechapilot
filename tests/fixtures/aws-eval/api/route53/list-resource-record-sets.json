@@ -1,0 +1,12 @@
+{
+  "ResourceRecordSets": [
+    {
+      "Name": "mechafighter.com.",
+      "Type": "A",
+      "AliasTarget": {
+        "DNSName": "d111111abcdef8.cloudfront.net.",
+        "HostedZoneId": "Z2FDTNDATAQYW2"
+      }
+    }
+  ]
+}

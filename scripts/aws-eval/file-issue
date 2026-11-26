@@ -1,0 +1,54 @@
+#!/bin/sh
+# File one finding as a GitHub issue labelled needs-triage, only if it is clean.
+# Usage: scripts/aws-eval/file-issue <title> <body-file> [inventory.json]
+# Copies the body into a private temp dir, runs scripts/aws-eval/redact --check
+# over the title and that copy (with the inventory's resource names as literals;
+# default .scratch/aws-eval/inventory.json), and posts exactly the checked copy.
+# Refuses, without filing, if any identifier is left or the inventory names
+# nothing. When an open issue already has this exact title it files nothing
+# and prints that issue's number.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+title="${1:?usage: file-issue <title> <body-file> [inventory.json]}"
+body="${2:?usage: file-issue <title> <body-file> [inventory.json]}"
+inventory="${3:-.scratch/aws-eval/inventory.json}"
+
+if [ ! -f "${body}" ]; then
+  printf 'file-issue: no body file %s\n' "${body}" >&2
+  exit 64
+fi
+if [ ! -s "${inventory}" ]; then
+  printf 'file-issue: no inventory at %s; its resource names are needed for the check\n' "${inventory}" >&2
+  exit 64
+fi
+names="$(jq '[.buckets[]?, .oidc_roles[]?, .distributions[]?, .hosted_zones[]?, .log_groups[]?, .certificates[]?] | length' "${inventory}")"
+if [ "${names}" -eq 0 ]; then
+  printf 'file-issue: the inventory names no resources; refusing to check against nothing\n' >&2
+  exit 64
+fi
+
+# mktemp -d is private to this user, so the checked copy cannot change before gh reads it.
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+cp "${body}" "${work}/body.md"
+{
+  printf '%s\n' "${title}"
+  cat "${work}/body.md"
+} >"${work}/all.txt"
+
+status=0
+"${here}/redact" --check --known "${inventory}" <"${work}/all.txt" || status=$?
+if [ "${status}" -ne 0 ]; then
+  printf 'file-issue: REFUSED: the title or body still holds identifiers; pipe it through scripts/aws-eval/redact\n' >&2
+  exit 1
+fi
+
+gh issue list --state open --search "${title} in:title" --json number,title --limit 100 >"${work}/open.json"
+existing="$(jq -r --arg t "${title}" '[.[] | select(.title == $t) | .number][0] // empty' "${work}/open.json")"
+if [ -n "${existing}" ]; then
+  printf 'file-issue: already open as #%s; filed nothing\n' "${existing}"
+  exit 0
+fi
+
+gh issue create --title "${title}" --body-file "${work}/body.md" --label needs-triage

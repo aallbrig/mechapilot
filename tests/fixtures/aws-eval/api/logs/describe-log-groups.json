@@ -1,0 +1,11 @@
+{
+  "logGroups": [
+    {
+      "logGroupName": "/fake/app"
+    },
+    {
+      "logGroupName": "/fake/kept",
+      "retentionInDays": 90
+    }
+  ]
+}

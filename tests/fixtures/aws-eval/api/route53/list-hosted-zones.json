@@ -1,0 +1,11 @@
+{
+  "HostedZones": [
+    {
+      "Id": "/hostedzone/Z0FAKEZONE00001",
+      "Name": "mechafighter.com.",
+      "Config": {
+        "PrivateZone": false
+      }
+    }
+  ]
+}

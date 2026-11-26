@@ -10,6 +10,8 @@ yq = "4.54.3"
 jq = "1.8.2"
 uv = "0.13.10"
 watchexec = "2.8.0"
+# trivy config scans infra/ for the aws-security-evaluation skill.
+trivy = "0.76.1"
 "pipx:check-jsonschema" = "0.39.0"
 "pipx:yamllint" = "1.38.0"
 "pipx:gdtoolkit" = "4.5.0"

@@ -1,0 +1,140 @@
+#!/bin/sh
+# Redact identifiers so a report can go into an issue on a public repo.
+# Usage:
+#   scripts/aws-eval/redact (--known <inventory.json> | --no-known) [--domain <d>] <in >out
+#   scripts/aws-eval/redact --check [--known <inventory.json>] [--domain <d>] <in
+# Replaces account IDs (also as 1234-5678-9012), ARNs, resource IDs (CloudFront, Route 53, IAM
+# unique IDs, UUIDs), IPv4/IPv6 addresses, emails and hostnames outside the public domain with stable
+# placeholders ([account-1], [host-2], ...). --known adds every resource name in
+# a collected inventory (bucket, role and log group names) as an exact literal.
+# Fails closed: if the output still matches any pattern, nothing is printed and
+# the exit status is 1. --check only scans (exit 1 if anything would be redacted).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+here="$(cd "$(dirname "$0")" && pwd)"
+domain="${AWS_EVAL_DOMAIN:-mechafighter.com}"
+known=""
+known_set=0
+mode="redact"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --known)
+      known="${2:?--known needs a file}"
+      known_set=1
+      shift 2
+      ;;
+    --no-known)
+      known_set=1
+      shift
+      ;;
+    --domain)
+      domain="${2:?--domain needs a value}"
+      shift 2
+      ;;
+    --check)
+      mode="check"
+      shift
+      ;;
+    *)
+      printf 'redact: unknown argument %s\n' "$1" >&2
+      exit 64
+      ;;
+  esac
+done
+# The public domain must be a registrable name, never a bare TLD such as "com",
+# which would exempt every host under it.
+domain="$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')"
+if ! printf '%s\n' "${domain}" | grep -qxE '[a-z0-9-]+([.][a-z0-9-]+)+'; then
+  printf 'redact: the public domain must have at least two labels (got "%s")\n' "${domain}" >&2
+  exit 64
+fi
+# Nor a shared or public suffix, under which other people's hosts live.
+case "${domain}" in
+  github.io | gitlab.io | githubusercontent.com | cloudfront.net | *.cloudfront.net | amazonaws.com | *.amazonaws.com | \
+    awsapps.com | amplifyapp.com | elasticbeanstalk.com | herokuapp.com | netlify.app | vercel.app | pages.dev | \
+    workers.dev | web.app | firebaseapp.com | appspot.com | blogspot.com | azurewebsites.net | \
+    co.?? | com.?? | net.?? | org.?? | gov.?? | ac.?? | edu.?? | ne.?? | or.??)
+    printf 'redact: the public domain "%s" is a shared suffix; pass the registrable domain the sites live under\n' "${domain}" >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+if [ "${mode}" = "redact" ] && [ "${known_set}" -eq 0 ]; then
+  printf 'redact: pass --known <inventory.json> (or --no-known when there is no inventory)\n' >&2
+  exit 64
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+literals="${work}/literals.tsv"
+: >"${literals}"
+if [ -n "${known}" ]; then
+  # Every named resource in the inventory, except names inside the public domain,
+  # longest first so a name that contains another is replaced whole.
+  jq -r --arg domain "${domain}" '
+    def public: ascii_downcase as $v | ($v == $domain or ($v | endswith("." + $domain)));
+    [ (.buckets[]?.name | ["bucket", .]),
+      (.oidc_roles[]? | (["role", .name], ["arn", .arn])),
+      (.distributions[]?.id | ["resource-id", .]),
+      (.hosted_zones[]?.id | (["resource-id", .], ["resource-id", sub("^/hostedzone/"; "")])),
+      (.log_groups[]?.name | ["log-group", .]),
+      (.certificates[]?.CertificateArn | ["arn", .]) ]
+    | map(select((.[1] | length) >= 3 and (.[1] | public | not)))
+    | unique | sort_by(-(.[1] | length)) | .[] | @tsv' "${known}" >"${literals}"
+fi
+
+# The independent second scan: fixed patterns with grep, then hosts and literals
+# with the awk scanner in check mode. Prints residual kinds only, never values.
+# Sets residual=1 when anything is left.
+check() {
+  residual=0
+  # kind:flags:regex. The rescan is deliberately broader than the awk pass
+  # (arn and email ignore case), so a near miss fails closed instead of leaking.
+  for pattern in \
+    'account::[0-9]{12}' \
+    'account::[0-9]{4}[-. _/][0-9]{4}[-. _/][0-9]{4}' \
+    'arn:i:arn:aws[-a-z]*:' \
+    'email:i:[a-z0-9._%+-]+@[a-z0-9-]+[.][a-z]' \
+    'iam-id::(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]{16}' \
+    'resource-id::(^|[^A-Z0-9])E[A-Z0-9]{12,13}([^A-Z0-9]|$)' \
+    'resource-id::(^|[^A-Z0-9])Z[A-Z0-9]{9,31}([^A-Z0-9]|$)' \
+    'resource-id::[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+    'ip::[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+' \
+    'ip::[0-9A-Fa-f]::|::[0-9A-Fa-f]|([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}'; do
+    kind="${pattern%%:*}"
+    rest="${pattern#*:}"
+    flags="${rest%%:*}"
+    regex="${rest#*:}"
+    found=0
+    if [ "${flags}" = "i" ]; then
+      grep -qiE "${regex}" "$1" && found=1
+    else
+      grep -qE "${regex}" "$1" && found=1
+    fi
+    if [ "${found}" -eq 1 ]; then
+      printf 'redact: residual %s\n' "${kind}" >&2
+      residual=1
+    fi
+  done
+  awk -v mode=check -v domain="${domain}" -v literals="${literals}" -f "${here}/redact.awk" "$1" || residual=1
+}
+
+input="${work}/input"
+cat >"${input}"
+
+if [ "${mode}" = "check" ]; then
+  check "${input}"
+  exit "${residual}"
+fi
+
+output="${work}/output"
+awk -v mode=redact -v domain="${domain}" -v literals="${literals}" -f "${here}/redact.awk" "${input}" >"${output}"
+check "${output}"
+if [ "${residual}" -ne 0 ]; then
+  printf 'redact: FAILED CLOSED: a pattern survived redaction; nothing was printed\n' >&2
+  exit 1
+fi
+cat "${output}"

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/aws-eval-report.schema.json",
+  "title": "aws-eval report",
+  "description": "What scripts/aws-eval/score emits (and, after scripts/aws-eval/redact, what may be published).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "domain", "score", "counts", "evaluated", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "domain": { "type": "string" },
+    "score": {
+      "description": "100 minus 40 per critical, 15 per high, 5 per medium and 1 per low finding, floored at 0.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["critical", "high", "medium", "low"],
+      "properties": {
+        "critical": { "type": "integer", "minimum": 0 },
+        "high": { "type": "integer", "minimum": 0 },
+        "medium": { "type": "integer", "minimum": 0 },
+        "low": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buckets", "distributions", "certificates", "oidc_roles", "hosted_zones", "log_groups", "trivy"],
+      "properties": {
+        "buckets": { "type": "integer", "minimum": 0 },
+        "distributions": { "type": "integer", "minimum": 0 },
+        "certificates": { "type": "integer", "minimum": 0 },
+        "oidc_roles": { "type": "integer", "minimum": 0 },
+        "hosted_zones": { "type": "integer", "minimum": 0 },
+        "log_groups": { "type": "integer", "minimum": 0 },
+        "trivy": { "type": "boolean" }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "title", "resource", "detail", "remediation"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "title": { "type": "string", "minLength": 1 },
+          "resource": { "type": "string", "minLength": 1 },
+          "detail": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}
