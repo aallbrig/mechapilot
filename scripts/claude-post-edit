@@ -1,0 +1,57 @@
+#!/bin/sh
+# Claude Code PostToolUse hook (Edit|Write|MultiEdit): format, then lint, the edited file.
+# Formatting is silent. Lint failures exit 2 so Claude sees them immediately.
+set -eu
+
+input="$(cat)"
+file="$(printf '%s' "${input}" | jq -r '.tool_input.file_path // empty')"
+[ -n "${file}" ] && [ -f "${file}" ] || exit 0
+
+root="$(git rev-parse --show-toplevel)"
+case "${file}" in
+  "${root}"/*) rel="${file#"${root}"/}" ;;
+  *) exit 0 ;;
+esac
+cd "${root}"
+
+out="$(mktemp)"
+trap 'rm -f "${out}"' EXIT
+status=0
+
+case "${rel}" in
+  unity/*) exit 0 ;;
+  *.gd)
+    gdformat "${rel}" >/dev/null 2>&1 || true
+    gdlint "${rel}" >"${out}" 2>&1 || status=$?
+    ;;
+  .github/workflows/*.yml | .github/workflows/*.yaml)
+    yamllint -s "${rel}" >"${out}" 2>&1 || status=$?
+    actionlint "${rel}" >>"${out}" 2>&1 || status=$?
+    task lint:schema >>"${out}" 2>&1 || status=$?
+    ;;
+  *.yml | *.yaml)
+    yamllint -s "${rel}" >"${out}" 2>&1 || status=$?
+    task lint:schema >>"${out}" 2>&1 || status=$?
+    ;;
+  *.json)
+    jq empty "${rel}" >"${out}" 2>&1 || status=$?
+    task lint:schema >>"${out}" 2>&1 || status=$?
+    ;;
+  *)
+    first_line="$(head -n 1 "${rel}")"
+    case "${first_line}" in
+      '#!/bin/sh'* | '#!/usr/bin/env sh'*)
+        shfmt -w "${rel}" >/dev/null 2>&1 || true
+        shellcheck "${rel}" >"${out}" 2>&1 || status=$?
+        ;;
+      *) ;;
+    esac
+    ;;
+esac
+
+if [ "${status}" -ne 0 ]; then
+  printf 'Lint failed for %s. Fix before continuing:\n' "${rel}" >&2
+  cat "${out}" >&2
+  exit 2
+fi
+exit 0

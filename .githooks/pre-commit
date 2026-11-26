@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fast, staged-only checks. Bypass is not allowed by policy; fix the finding.
+set -eu
+
+staged="$(mktemp)"
+trap 'rm -f "${staged}"' EXIT
+git diff --cached --name-only --diff-filter=ACMR >"${staged}"
+[ -s "${staged}" ] || exit 0
+
+printf 'pre-commit: secrets\n'
+gitleaks git --staged --no-banner --redact
+
+printf 'pre-commit: forbidden paths and large files\n'
+xargs scripts/checks/forbidden-paths <"${staged}"
+xargs scripts/checks/large-files <"${staged}"
+
+printf 'pre-commit: lint\n'
+task lint

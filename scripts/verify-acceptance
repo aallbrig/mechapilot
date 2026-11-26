@@ -1,0 +1,84 @@
+#!/bin/sh
+# Prove an issue's acceptance criteria with evidence (the Provably Complete gate).
+#
+# Usage: scripts/verify-acceptance <issue-number> [junit-dir]
+#
+# Each line under "## Acceptance criteria" in the issue must end with exactly one
+# backticked check reference:
+#   `task:<target>`   -> `task <target>` must exit 0
+#   `check:<script>`  -> scripts/checks/<script> must exit 0
+#   `test:<name>`     -> a passing <testcase name="<name>"> in <junit-dir>/*.xml
+#   `e2e:<name>`      -> same as test:, for browser smoke tests
+set -eu
+
+issue="${1:?usage: verify-acceptance <issue-number> [junit-dir]}"
+junit_dir="${2:-build/test-results}"
+
+body="$(mktemp)"
+criteria="$(mktemp)"
+trap 'rm -f "${body}" "${criteria}"' EXIT
+
+if [ -n "${VERIFY_ACCEPTANCE_BODY_FILE:-}" ]; then
+  tr -d '\r' <"${VERIFY_ACCEPTANCE_BODY_FILE}" >"${body}"
+else
+  gh issue view "${issue}" --json body --jq .body | tr -d '\r' >"${body}"
+fi
+
+awk '
+  /^##[[:space:]]+Acceptance criteria/ { inside = 1; next }
+  /^##[[:space:]]/ { inside = 0 }
+  inside && /^[[:space:]]*- \[[ xX]\]/ { print }
+' "${body}" >"${criteria}"
+
+if [ ! -s "${criteria}" ]; then
+  printf 'verify-acceptance: issue #%s has no "## Acceptance criteria" checklist\n' "${issue}" >&2
+  exit 1
+fi
+
+# Prints "pass" if a self-closing <testcase name="$1"> (no failure/error/skipped
+# child) exists in any JUnit file, otherwise "fail". Always returns 0.
+junit_result() {
+  result=fail
+  if [ -d "${junit_dir}" ]; then
+    for xml in "${junit_dir}"/*.xml; do
+      [ -f "${xml}" ] || continue
+      if grep -Eq "<testcase[^>]*name=\"$1\"[^>]*/>" "${xml}"; then result=pass; fi
+    done
+  fi
+  printf '%s\n' "${result}"
+}
+
+bt="$(printf '\140')" # a backtick, kept out of quoted literals
+
+failures=0
+total=0
+while IFS= read -r line; do
+  total=$((total + 1))
+  ref="$(printf '%s\n' "${line}" | sed -n "s/.*${bt}\([a-z0-9]*:[^${bt}]*\)${bt}[[:space:]]*\$/\1/p")"
+  if [ -z "${ref}" ]; then
+    printf 'FAIL  (no check reference) %s\n' "${line}"
+    failures=$((failures + 1))
+    continue
+  fi
+  kind="${ref%%:*}"
+  name="${ref#*:}"
+  ok=1
+  case "${kind}" in
+    task) task "${name}" >/dev/null 2>&1 || ok=0 ;;
+    check) "scripts/checks/${name}" >/dev/null 2>&1 || ok=0 ;;
+    test | e2e)
+      verdict="$(junit_result "${name}")"
+      [ "${verdict}" = pass ] || ok=0
+      ;;
+    *) ok=0 ;;
+  esac
+  if [ "${ok}" -eq 1 ]; then
+    printf 'PASS  %s\n' "${ref}"
+  else
+    printf 'FAIL  %s\n' "${ref}"
+    failures=$((failures + 1))
+  fi
+done <"${criteria}"
+
+printf 'verify-acceptance: issue #%s: %s/%s criteria proven\n' "${issue}" "$((total - failures))" "${total}"
+[ "${failures}" -eq 0 ]

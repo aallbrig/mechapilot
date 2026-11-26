@@ -1,0 +1,46 @@
+#!/bin/sh
+# Run POSIX shell tests in tests/shell/test_* and write JUnit XML.
+# Each test file is a sh script; each function named test_* is one test case.
+set -eu
+
+out_dir="${1:-build/test-results}"
+mkdir -p "${out_dir}"
+xml="${out_dir}/shell.xml"
+cases="$(mktemp)"
+trap 'rm -f "${cases}"' EXIT
+
+total=0
+failed=0
+for file in tests/shell/test_*; do
+  [ -f "${file}" ] || continue
+  names="$(sed -n 's/^\(test_[a-z0-9_]*\)()[[:space:]]*{.*/\1/p' "${file}")"
+  for name in ${names}; do
+    total=$((total + 1))
+    log="$(mktemp)"
+    if sh -c ". \"\$1\"; \"\$2\"" sh "${file}" "${name}" >"${log}" 2>&1; then
+      printf '  <testcase classname="%s" name="%s"/>\n' "${file}" "${name}" >>"${cases}"
+      printf 'PASS  %s\n' "${name}"
+    else
+      failed=$((failed + 1))
+      msg="$(sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' "${log}")"
+      {
+        printf '  <testcase classname="%s" name="%s">\n' "${file}" "${name}"
+        printf '    <failure message="failed">%s</failure>\n' "${msg}"
+        printf '  </testcase>\n'
+      } >>"${cases}"
+      printf 'FAIL  %s\n' "${name}"
+      cat "${log}"
+    fi
+    rm -f "${log}"
+  done
+done
+
+{
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+  printf '<testsuite name="shell" tests="%s" failures="%s">\n' "${total}" "${failed}"
+  cat "${cases}"
+  printf '</testsuite>\n'
+} >"${xml}"
+
+printf 'test-shell: %s/%s passed\n' "$((total - failed))" "${total}"
+[ "${failed}" -eq 0 ]

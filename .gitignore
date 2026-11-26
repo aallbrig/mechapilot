@@ -1,7 +1,27 @@
-.idea
+# OS / editor
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Agent and local runtime state
+.claude/worktrees/
+.claude/settings.local.json
+.agent-loop/
+.scratch/
+build/
+*.log
+
+# Secrets (never commit)
+.env
+.env.*
+*.pem
+*.key
+
+# Legacy docker static site output
 docker/nginx/webgl/Build
 docker/nginx/webgl/StreamingAssets
 docker/nginx/webgl/TemplateData
 docker/nginx/webgl/index.html
-

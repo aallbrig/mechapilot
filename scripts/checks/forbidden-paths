@@ -1,0 +1,28 @@
+#!/bin/sh
+# Fail if any given path (default: all tracked files) is generated output,
+# an editor cache, or a likely secret file that must never be committed.
+set -eu
+
+status=0
+
+check() {
+  case "$1" in
+    .godot/* | */.godot/* | build/* | */.import/* | .env | .env.* | */.env | */.env.* | *.pem | *.key | .agent-loop/*)
+      printf 'forbidden-paths: %s must not be committed\n' "$1" >&2
+      status=1
+      ;;
+    *) ;;
+  esac
+  return 0
+}
+
+if [ "$#" -gt 0 ]; then
+  for f in "$@"; do check "${f}"; done
+else
+  tmp="$(mktemp)"
+  git ls-files >"${tmp}"
+  while IFS= read -r f; do check "${f}"; done <"${tmp}"
+  rm -f "${tmp}"
+fi
+
+exit "${status}"

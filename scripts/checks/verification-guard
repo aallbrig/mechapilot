@@ -1,0 +1,39 @@
+#!/bin/sh
+# List changes on this branch that touch the verification stack.
+# Prints each matching path; exits 0 always (it classifies, it does not gate).
+# With --label <pr-number> and GH_TOKEN set, labels the PR `verification-change`.
+set -eu
+
+base="${VERIFICATION_GUARD_BASE:-origin/main}"
+pr=""
+if [ "${1:-}" = "--label" ]; then
+  pr="${2:?--label needs a PR number}"
+fi
+
+matches="$(mktemp)"
+git diff --name-status "${base}...HEAD" | while IFS="$(printf '\t')" read -r change path rest; do
+  : "${rest:=}"
+  case "${path}" in
+    .githooks/* | .github/workflows/* | Taskfile.yml | .mise.toml | .shellcheckrc | .yamllint.yml | \
+      .editorconfig | .gitleaks.toml | schemas/* | scripts/checks/* | scripts/verify-acceptance | \
+      .claude/settings.json | godot/project.godot | */gdlintrc | gdlintrc)
+      printf '%s\t%s\n' "${change}" "${path}"
+      ;;
+    *test*)
+      if [ "${change}" = "D" ]; then printf '%s\t%s\n' "${change}" "${path}"; fi
+      ;;
+    *) ;;
+  esac
+done >"${matches}"
+
+if [ -s "${matches}" ]; then
+  printf 'verification-guard: this change touches the verification stack:\n'
+  cat "${matches}"
+  if [ -n "${pr}" ]; then
+    gh pr edit "${pr}" --add-label verification-change >/dev/null
+    printf 'verification-guard: labelled PR #%s verification-change\n' "${pr}"
+  fi
+else
+  printf 'verification-guard: no verification-stack changes\n'
+fi
+rm -f "${matches}"

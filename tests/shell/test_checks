@@ -1,0 +1,30 @@
+#!/bin/sh
+# Tests for scripts/checks/* (run by scripts/test-shell).
+
+test_forbidden_paths_rejects_godot_cache() {
+  ! scripts/checks/forbidden-paths godot/.godot/imported/x.ctex
+}
+
+test_forbidden_paths_rejects_env_file() {
+  ! scripts/checks/forbidden-paths site/.env.production
+}
+
+test_forbidden_paths_allows_source() {
+  scripts/checks/forbidden-paths godot/project.godot scripts/test-shell
+}
+
+test_large_files_rejects_oversized_file() {
+  f="$(mktemp)"
+  printf '0123456789' >"${f}"
+  ! LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${f}"
+}
+
+test_large_files_allows_small_file() {
+  f="$(mktemp)"
+  printf '0123' >"${f}"
+  LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${f}"
+}
+
+test_list_files_finds_posix_scripts() {
+  scripts/list-files sh | grep -qx 'scripts/verify-acceptance'
+}
