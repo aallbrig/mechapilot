@@ -29,4 +29,5 @@ You change nothing in AWS. Fixes are **human-applied** through the OpenTofu stac
 ## Gotchas
 
 - `redact` replaces names it knows only from the inventory: pass `--known` with the inventory of the same run, every time.
+- `aws-ro` controls the call, not the machine: the human's `HTTPS_PROXY`, `AWS_CA_BUNDLE` and any `credential_process` in their AWS config still apply. Before step 1, ask the human to confirm those point only at what they trust.
 - `aws-ro` refuses anything outside its allowlist. A rule that needs a new read gets a new allowlist entry, a fake-API fixture and a test in `tests/shell/test_aws_eval`, in a PR.

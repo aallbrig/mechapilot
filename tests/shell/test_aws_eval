@@ -75,6 +75,50 @@ test_aws_eval_redact_keeps_file_paths_but_not_hosts_like_them() {
   [ "${out}" = 'see infra/main.tf, docs/a.md, scripts/aws-eval/redact.awk and https://[host-1]/x' ]
 }
 
+test_aws_eval_redact_hosts_with_file_like_tlds_in_paths() {
+  # Only a two-label name after a single "/" is a file; three or more labels
+  # ending in a TLD-like extension are hosts wherever they appear.
+  out="$(printf 'a/b.evil.sh staging/build.corp.md mirror/vpn.acme.gd logs/syslog.host.log https://x.example.org/wiki.corp.sh\n' |
+    scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = 'a/[host-1] staging/[host-2] mirror/[host-3] logs/[host-4] https://[host-5]/[host-6]' ] || return 1
+  out="$(printf 'keep infra/main.tf docs/SKILL.md config/a.b.json\n' | scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = 'keep infra/main.tf docs/SKILL.md config/a.b.json' ] || return 1
+  # And the rescan agrees: none of them pass --check.
+  for leaked in a/b.evil.sh staging/build.corp.md mirror/vpn.acme.gd logs/syslog.host.log https://x.example.org/wiki.corp.sh; do
+    if printf '%s\n' "${leaked}" | scripts/aws-eval/redact --check 2>/dev/null; then
+      printf 'passed --check: %s\n' "${leaked}"
+      return 1
+    fi
+  done
+}
+
+test_aws_eval_redact_accounts_with_any_separator() {
+  out="$(printf '111122223333 1111.2222.3333 1111_2222_3333 1111/2222/3333\n' | scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = '[account-1] [account-1] [account-1] [account-1]' ] || return 1
+  for sep in . _ /; do
+    if printf '1111%s2222%s3333\n' "${sep}" "${sep}" | scripts/aws-eval/redact --check 2>/dev/null; then
+      printf 'passed --check with separator %s\n' "${sep}"
+      return 1
+    fi
+  done
+}
+
+test_aws_eval_redact_session_name_after_unique_id() {
+  id="AROA$(printf 'FAKE%.0s' 1 2 3 4)9"
+  out="$(printf 'UserId %s:jdoe-laptop\n' "${id}" | scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = 'UserId [iam-id-1]' ]
+}
+
+test_aws_eval_redact_rejects_shared_suffix_domains() {
+  for d in github.io gitlab.io cloudfront.net amazonaws.com s3.amazonaws.com co.uk com.au; do
+    if printf 'x\n' | scripts/aws-eval/redact --no-known --domain "${d}" >/dev/null 2>&1; then
+      printf 'accepted shared suffix %s\n' "${d}"
+      return 1
+    fi
+  done
+  printf 'x\n' | scripts/aws-eval/redact --no-known --domain mechafighter.com >/dev/null
+}
+
 test_aws_eval_redact_keeps_timestamps() {
   in='generated_at 2026-11-26T12:00:00Z, 10:30:00 and TLSv1.2_2021 with jq 1.8.2'
   out="$(printf '%s\n' "${in}" | scripts/aws-eval/redact --no-known)" || return 1

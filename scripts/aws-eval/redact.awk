@@ -34,8 +34,16 @@ function classify(kind, tok, before,    n, lower, last, parts, prefix, digits, p
     if ((index(tok, "::") > 0 && length(tok) > 2) || n == 7) return ph("ip", tolower(tok))
     return ""
   }
+  if (kind == "iam-session") {
+    # AROA...:<session-name> from a caller identity: the session name is often a
+    # username, so the ID and the name go together.
+    return ph("iam-id", tok)
+  }
   if (kind == "account-sep") {
-    # 1234-5678-9012 and 1234 5678 9012, as the console and bills print them.
+    # 1234-5678-9012 and 1234 5678 9012 as the console and bills print them,
+    # and the same with ".", "_" or "/". Runs of 12+ digits were replaced first;
+    # a group glued to a digit before it is left for the rescan to refuse.
+    if (substr(before, length(before), 1) ~ /[0-9]/) return ""
     digits = tok
     gsub(/[^0-9]/, "", digits)
     return ph("account", digits)
@@ -65,12 +73,13 @@ function classify(kind, tok, before,    n, lower, last, parts, prefix, digits, p
     if (length(last) < 2 || (last !~ /^[a-z]+$/ && last !~ /^xn--[a-z0-9-]+$/)) return ""
     if (lower == domain || substr(lower, length(lower) - length(domain)) == "." domain) return ""
     if (lower in safe_host) return ""
-    # File names, decided by context: a path component (after "/", but not the
-    # "//" of a URL) keeps any extension; elsewhere only extensions that are not
-    # also TLDs (report.json stays; SKILL.md or build.corp.sh is redacted).
-    path = substr(before, length(before), 1) == "/" && substr(before, length(before) - 1, 1) != "/"
-    if (path && (last in file_ext || last in tld_ext)) return ""
+    # Extensions that are not TLDs are never hosts (report.json, a.b.yml).
     if (last in file_ext) return ""
+    # Extensions that are also TLDs: a file name only with exactly two labels
+    # and only as a path component (after "/", but not the "//" of a URL), as
+    # in infra/main.tf. a/b.evil.sh, build.corp.md and bare SKILL.md are redacted.
+    path = substr(before, length(before), 1) == "/" && substr(before, length(before) - 1, 1) != "/"
+    if (path && n == 2 && (last in tld_ext)) return ""
     return ph("host", lower)
   }
   return ""
@@ -129,7 +138,8 @@ BEGIN {
   h = "[0-9A-Fa-f]"
   d = "[0-9]"
   re_uuid = rep(h, 8) "-" rep(h, 4) "-" rep(h, 4) "-" rep(h, 4) "-" rep(h, 12)
-  re_account_sep = rep(d, 4) "[- ]" rep(d, 4) "[- ]" rep(d, 4)
+  re_account_sep = rep(d, 4) "[-. _/]" rep(d, 4) "[-. _/]" rep(d, 4)
+  re_iam_session = "(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]+:[^ \t\"'`,<>(){}|]+"
   re_arn = "arn:aws[-a-z]*:[^ \t\"'`,<>(){}|]*"
   re_email = "[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+"
   re_ipv4 = "[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+"
@@ -142,12 +152,13 @@ BEGIN {
   s = scan(s, re_arn, "arn")
   s = scan(s, re_email, "email")
   s = scan(s, re_uuid, "uuid")
+  s = scan(s, re_iam_session, "iam-session")
   s = scan(s, re_ipv4, "ipv4")
   s = scan(s, re_ipv6, "ipv6")
+  s = scan(s, "[0-9]+", "digits")
   s = scan(s, re_account_sep, "account-sep")
   s = scan(s, re_host, "host")
   s = scan(s, "[A-Z0-9]+", "upper")
-  s = scan(s, "[0-9]+", "digits")
   if (mode != "check") print s
 }
 

@@ -51,6 +51,17 @@ if ! printf '%s\n' "${domain}" | grep -qxE '[a-z0-9-]+([.][a-z0-9-]+)+'; then
   printf 'redact: the public domain must have at least two labels (got "%s")\n' "${domain}" >&2
   exit 64
 fi
+# Nor a shared or public suffix, under which other people's hosts live.
+case "${domain}" in
+  github.io | gitlab.io | githubusercontent.com | cloudfront.net | *.cloudfront.net | amazonaws.com | *.amazonaws.com | \
+    awsapps.com | amplifyapp.com | elasticbeanstalk.com | herokuapp.com | netlify.app | vercel.app | pages.dev | \
+    workers.dev | web.app | firebaseapp.com | appspot.com | blogspot.com | azurewebsites.net | \
+    co.?? | com.?? | net.?? | org.?? | gov.?? | ac.?? | edu.?? | ne.?? | or.??)
+    printf 'redact: the public domain "%s" is a shared suffix; pass the registrable domain the sites live under\n' "${domain}" >&2
+    exit 64
+    ;;
+  *) ;;
+esac
 if [ "${mode}" = "redact" ] && [ "${known_set}" -eq 0 ]; then
   printf 'redact: pass --known <inventory.json> (or --no-known when there is no inventory)\n' >&2
   exit 64
@@ -84,7 +95,7 @@ check() {
   # (arn and email ignore case), so a near miss fails closed instead of leaking.
   for pattern in \
     'account::[0-9]{12}' \
-    'account::[0-9]{4}[- ][0-9]{4}[- ][0-9]{4}' \
+    'account::[0-9]{4}[-. _/][0-9]{4}[-. _/][0-9]{4}' \
     'arn:i:arn:aws[-a-z]*:' \
     'email:i:[a-z0-9._%+-]+@[a-z0-9-]+[.][a-z]' \
     'iam-id::(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]{16}' \
