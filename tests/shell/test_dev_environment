@@ -138,6 +138,12 @@ test_autostart_install_and_uninstall_are_idempotent() {
     Linux) grep -qx 'systemctl --user enable mechafighter-dev.service' "${d}/calls" || return 1 ;;
     *) grep -qx 'launchctl enable gui/501/com.mechafighter.dev-session' "${d}/calls" || return 1 ;;
     esac
+    # A transient failure re-enabling an existing install leaves its file alone.
+    : >"${d}/fail-enable"
+    ! run install >/dev/null || return 1
+    [ -f "${target}" ] || return 1
+    run status | grep -q '^autostart: installed' || return 1
+    rm -f "${d}/fail-enable"
     run uninstall >/dev/null || return 1
   done
 }
@@ -217,8 +223,24 @@ test_godot_window_uses_task_godot_editor_or_explains() {
   [ "${out}" = 'godot: task godot:editor' ]
 }
 
+# Stub tmux and tmuxinator that only record their calls, so these tests can
+# never start or touch a real session, and a running one can't change results.
+# has-session reports a session while <dir>/running exists.
+stub_tmux() {
+  mkdir -p "$1/stub"
+  for tool in tmux tmuxinator; do
+    cat >"$1/stub/${tool}" <<EOF
+#!/bin/sh
+printf '%s %s\n' ${tool} "\$*" >>"$1/tmux-calls"
+[ "\$1" != has-session ] || [ -e "$1/running" ]
+EOF
+    chmod +x "$1/stub/${tool}"
+  done
+}
+
 test_erb_in_tmuxinator_config_is_rejected_before_ruby_runs() {
   d="$(mktemp -d)"
+  stub_tmux "${d}"
   marker="${d}/erb-ran"
   {
     printf '# <%% File.write("%s", "ran") %%>\n' "${marker}"
@@ -227,9 +249,46 @@ test_erb_in_tmuxinator_config_is_rejected_before_ruby_runs() {
   # The schema can't see comments, which is why the raw-file check exists.
   check-jsonschema --schemafile schemas/tmuxinator.schema.json "${d}/evil.yml" >/dev/null || return 1
   ! scripts/checks/no-erb "${d}/evil.yml" 2>/dev/null || return 1
-  err="$(DEV_SESSION_CONFIG="${d}/evil.yml" scripts/dev/session check 2>&1)" && return 1
+  session() { PATH="${d}/stub:${PATH}" DEV_SESSION_CONFIG="${d}/evil.yml" scripts/dev/session "$@"; }
+  err="$(session check 2>&1)" && return 1
   printf '%s\n' "${err}" | grep -q 'refusing to run tmuxinator' || return 1
-  ! DEV_SESSION_CONFIG="${d}/evil.yml" scripts/dev/session start-detached >/dev/null 2>&1 || return 1
+  # Refused whether or not a session is already running.
+  for running in no yes; do
+    if [ "${running}" = yes ]; then : >"${d}/running"; fi
+    err="$(session start-detached 2>&1)" && return 1
+    printf '%s\n' "${err}" | grep -q 'refusing to run tmuxinator' || return 1
+    err="$(session start 2>&1)" && return 1
+    printf '%s\n' "${err}" | grep -q 'refusing to run tmuxinator' || return 1
+  done
+  # Neither tmux nor tmuxinator was ever called, so no Ruby ran.
+  [ ! -e "${d}/tmux-calls" ] || return 1
   [ ! -e "${marker}" ] || return 1
   scripts/checks/no-erb .tmuxinator.yml
+}
+
+test_dev_session_resolves_a_relative_config_once() {
+  d="$(mktemp -d)"
+  root="$(pwd)"
+  cp .tmuxinator.yml "${d}/ok.yml"
+  printf '# <%% %%>\n' >"${d}/evil.yml"
+  cat .tmuxinator.yml >>"${d}/evil.yml"
+  # Relative to the caller's directory for both the guard and tmuxinator
+  # (which runs from the repo root, where ok.yml does not exist).
+  out="$(cd "${d}" && DEV_SESSION_CONFIG=ok.yml "${root}/scripts/dev/session" check)" || return 1
+  printf '%s\n' "${out}" | grep -q 'ok.yml renders a valid session' || return 1
+  ! (cd "${d}" && DEV_SESSION_CONFIG=evil.yml "${root}/scripts/dev/session" check >/dev/null 2>&1) || return 1
+  ! (cd "${d}" && DEV_SESSION_CONFIG=missing.yml "${root}/scripts/dev/session" check >/dev/null 2>&1)
+}
+
+# dev:check must give the same answer while the dev session runs (tmuxinator
+# otherwise renders an attach-only script). The session here lives on a
+# private tmux server, so the developer's server is never touched.
+test_dev_check_ignores_a_running_session() {
+  d="$(mktemp -d)"
+  # env -u TMUX: inside tmux, $TMUX would point at the developer's server.
+  env -u TMUX TMUX_TMPDIR="${d}" tmux new-session -d -s mechafighter || return 1
+  rc=0
+  env -u TMUX TMUX_TMPDIR="${d}" scripts/dev/session check >/dev/null || rc=$?
+  env -u TMUX TMUX_TMPDIR="${d}" tmux kill-server || true
+  [ "${rc}" -eq 0 ]
 }

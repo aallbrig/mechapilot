@@ -13,6 +13,12 @@ set -eu
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 config="${DEV_SESSION_CONFIG:-${repo_root}/.tmuxinator.yml}"
+# Resolve against the caller's directory now: tmuxinator runs after
+# `cd repo_root`, and the ERB guard and tmuxinator must read the same file.
+case "${config}" in
+  /*) ;;
+  *) config="$(pwd -P)/${config}" ;;
+esac
 session="mechafighter"
 # tmuxinator writes its script for $SHELL; launchd and systemd may not set it.
 SHELL="${SHELL:-/bin/sh}"
@@ -50,7 +56,16 @@ check() {
   work="$(mktemp -d)"
   trap 'rm -rf "${work}"' EXIT
   rc=0
-  (cd "${repo_root}" && tmuxinator debug -p "${config}") >"${work}/script" 2>"${work}/err" || rc=$?
+  # tmuxinator renders an attach-only script when the session already runs,
+  # so render against a private, empty tmux server: the result then never
+  # depends on (or touches) the developer's sessions.
+  (
+    cd "${repo_root}"
+    unset TMUX
+    TMUX_TMPDIR="${work}"
+    export TMUX_TMPDIR
+    tmuxinator debug -p "${config}"
+  ) >"${work}/script" 2>"${work}/err" || rc=$?
   err="$(cat "${work}/err")"
   [ "${rc}" -eq 0 ] || die "tmuxinator debug failed (exit ${rc}): ${err}"
   [ -z "${err}" ] || die "tmuxinator debug wrote errors: ${err}"
@@ -74,19 +89,20 @@ check() {
 cmd="${1:-}"
 case "${cmd}" in
   start)
+    # The config is checked even when the session already runs.
+    guard_erb
     probe
     if [ "${state}" = running ]; then attach; fi
-    guard_erb
     cd "${repo_root}"
     exec tmuxinator start -p "${config}"
     ;;
   start-detached)
+    guard_erb
     probe
     if [ "${state}" = running ]; then
       printf 'dev session: %s is already running\n' "${session}"
       exit 0
     fi
-    guard_erb
     cd "${repo_root}"
     tmuxinator start --no-attach -p "${config}"
     ;;

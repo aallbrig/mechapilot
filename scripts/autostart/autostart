@@ -107,6 +107,8 @@ install_it() {
     plutil -lint -s "${staged}" || die "the rendered plist failed plutil -lint"
   fi
   mkdir -p "${target%/*}"
+  created=0
+  [ -e "${target}" ] || created=1
   if [ -f "${target}" ] && cmp -s "${staged}" "${target}"; then
     printf 'autostart: %s is already up to date\n' "${target}"
   else
@@ -126,9 +128,14 @@ install_it() {
     *) ;;
   esac
   if [ "${enabled}" -ne 1 ]; then
-    # Don't leave a file behind that status would report as installed.
-    rm -f "${target}"
-    die "enabling ${platform} failed; removed ${target}"
+    # Don't leave a file this run created for status to report as installed;
+    # a file that was already in place stays, so a transient failure can't
+    # break a working install.
+    if [ "${created}" -eq 1 ]; then
+      rm -f "${target}"
+      die "enabling ${platform} failed; removed ${target}"
+    fi
+    die "enabling ${platform} failed; left the existing ${target} in place"
   fi
   printf 'autostart: the dev session will start detached at your next login (task dev attaches)\n'
   warn_branch
