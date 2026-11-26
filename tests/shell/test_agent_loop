@@ -67,8 +67,8 @@ work() {
 #                         v* tag ruleset (absent with <dir>/no-ruleset); a
 #                         production reviewer
 #   tmux split-window/new-session  print %9, mark the pane alive and, if
-#                         <dir>/agents-after-start.json exists, make it the
-#                         agents list; fail while <dir>/tmux-broken exists
+#                         agents list from <dir>/agents-after-start.json (or a
+#                         default idle session, so no start waits for one); fail while <dir>/tmux-broken exists
 #   tmux display-message  prints 0 while <dir>/pane-alive exists
 #   tmux send-keys -l /exit and kill-pane  end the pane
 stubs() {
@@ -117,7 +117,11 @@ case "\$1" in
   split-window | new-session | new-window)
     [ ! -e "$1/tmux-broken" ] || exit 1
     : >"$1/pane-alive"
-    if [ -f "$1/agents-after-start.json" ]; then cp "$1/agents-after-start.json" "$1/agents.json"; fi
+    if [ -f "$1/agents-after-start.json" ]; then
+      cp "$1/agents-after-start.json" "$1/agents.json"
+    else
+      printf '[{"pid":99999999,"status":"idle","name":"mechafighter.com dev loop","startedAt":1795700000000}]\n' >"$1/agents.json"
+    fi
     printf '%%9\n' ;;
   display-message) if [ -f "$1/pane-alive" ]; then printf '0\n'; else exit 1; fi ;;
   send-keys) case "\$*" in *"-l /exit"*) rm -f "$1/pane-alive" "$1/agents.json" ;; *) ;; esac ;;
@@ -284,7 +288,7 @@ test_supervisor_restarts_at_context_threshold() {
   : >"${d}/pane-alive"
   jq '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' \
     -n >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
   printf '{"session_id":"s1","pct":47,"at":1795699000}\n' >"${d}/state/context"
   supervisor "${d}" once >/dev/null || return 1
   grep -qx 'tmux send-keys -t %9 -l /clear' "${d}/calls" || return 1
@@ -310,7 +314,7 @@ test_supervisor_shuts_off_when_no_work() {
   mkdir -p "${d}/state"
   printf '%%9\n' >"${d}/state/pane"
   : >"${d}/pane-alive"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
   supervisor "${d}" once >/dev/null || return 1
   grep -qx 'tmux send-keys -t %9 -l /exit' "${d}/calls" || return 1
   expect 'no work' jq -r 'select(.event == "shutoff") | .reason' "${d}/state/metrics.jsonl" || return 1
@@ -352,7 +356,7 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
   printf 'm-a1b2c3\n' >"${d}/state/machine"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}},
     {number: 102, title: "a PR", labels: [], assignees: [], pull_request: {}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
     >"${d}/agents-after-start.json"
   supervisor "${d}" once >/dev/null || return 1
   grep -q "^tmux split-window -d -P -F #{pane_id} -t %1 -c ${d}/worktree " "${d}/calls" || return 1
@@ -507,7 +511,7 @@ test_supervisor_files_a_stall_issue_after_failed_nudges() {
   printf '%%9\n' >"${d}/state/pane"
   : >"${d}/pane-alive"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"busy","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '[{"pid":99999999,"status":"busy","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
   printf '{"session_id":"s1","at":1795698000}\n' >"${d}/state/heartbeat"
   # First tick: a nudge (Escape, then /agent-loop).
   supervisor "${d}" once >/dev/null || return 1
@@ -523,7 +527,7 @@ test_supervisor_files_a_stall_issue_after_failed_nudges() {
   # A heartbeat after the nudges means they worked: nudge again, never escalate.
   printf '%%9\n' >"${d}/state/pane"
   : >"${d}/pane-alive"
-  printf '[{"pid":4242,"status":"busy","sessionId":"s2","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '[{"pid":99999999,"status":"busy","sessionId":"s2","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
   printf '1795698000\n1795698500\n' >"${d}/state/nudges"
   printf '{"session_id":"s2","at":1795698900,"phase":"post"}\n' >"${d}/state/heartbeat"
   : >"${d}/calls"
@@ -792,7 +796,7 @@ test_supervisor_exports_only_the_pinned_runtime() {
   side="${rest#* }"
   printf '%s\n' "${first}" >"${d}/state/runtime-pin"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
     >"${d}/agents-after-start.json"
   AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once >/dev/null || return 1
   # origin/main is newer, but only the pinned commit is exported.
@@ -846,7 +850,7 @@ test_supervisor_never_writes_into_the_checkout() {
   mkdir -p "${d}/worktree/.agent-loop" "${d}/worktree/infra/stacks/prod" "${d}/state"
   printf 'x\n' >"${d}/worktree/infra/stacks/prod/main.tf"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
     >"${d}/agents-after-start.json"
   before="$(tree_state "${d}/worktree")"
   chmod -R a-w "${d}/worktree"
@@ -868,7 +872,7 @@ test_supervisor_ignores_links_swapped_in_during_a_tick() {
   mkdir -p "${d}/worktree/.agent-loop/cache" "${d}/worktree/infra" "${d}/state" "${d}/outside/cache/npm"
   printf 'victim\n' >"${d}/outside/cache/npm/victim"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
     >"${d}/agents-after-start.json"
   before="$(tree_state "${d}/outside")"
   (
@@ -983,7 +987,7 @@ test_supervisor_runs_no_git_hooks() {
   git -C "${d}" -c core.hooksPath=/dev/null fetch -q origin
   rm -f "${d}"/marker-*
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+  printf '[{"pid":99999999,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
     >"${d}/agents-after-start.json"
   # The checkout does not exist yet: this tick creates the clone (first start).
   supervisor "${d}" once >/dev/null 2>&1 || return 1
