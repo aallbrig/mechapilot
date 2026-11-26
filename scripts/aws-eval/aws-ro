@@ -1,0 +1,54 @@
+#!/bin/sh
+# Run one read-only AWS CLI call, refusing anything outside an explicit allowlist.
+# Usage: scripts/aws-eval/aws-ro <service> <operation> [args...]
+# Exit 2 = refused (aws is never invoked). Otherwise aws's own exit status.
+set -eu
+
+if [ "$#" -lt 2 ]; then
+  printf 'usage: aws-ro <service> <operation> [args...]\n' >&2
+  exit 2
+fi
+service="$1"
+operation="$2"
+shift 2
+
+# Belt and braces: even an allowlisted name must look like a read.
+case "${operation}" in
+  get-* | list-* | describe-*) ;;
+  *)
+    printf 'aws-ro: refused %s %s (not a read operation)\n' "${service}" "${operation}" >&2
+    exit 2
+    ;;
+esac
+
+# The allowlist. Every entry is a get-/list-/describe- call; nothing here mutates.
+case "${service} ${operation}" in
+  "sts get-caller-identity" | \
+    "iam list-roles" | "iam get-role" | \
+    "iam list-attached-role-policies" | "iam list-role-policies" | \
+    "iam list-attached-user-policies" | "iam list-user-policies" | "iam list-groups-for-user" | \
+    "iam list-attached-group-policies" | "iam list-group-policies" | \
+    "s3api list-buckets" | "s3api get-public-access-block" | "s3api get-bucket-policy-status" | \
+    "s3api get-bucket-encryption" | "s3api get-bucket-versioning" | "s3api get-bucket-logging" | \
+    "cloudfront list-distributions" | "cloudfront get-distribution-config" | \
+    "cloudfront get-response-headers-policy" | \
+    "acm list-certificates" | "acm describe-certificate" | \
+    "route53 list-hosted-zones" | "route53 list-resource-record-sets" | \
+    "logs describe-log-groups") ;;
+  *)
+    printf 'aws-ro: refused %s %s (not in the read-only allowlist)\n' "${service}" "${operation}" >&2
+    exit 2
+    ;;
+esac
+# Options that could redirect the call or swap in other input are refused too.
+for arg in "$@"; do
+  case "${arg}" in
+    --endpoint-url* | --cli-input-json* | --cli-input-yaml* | --generate-cli-skeleton* | --debug)
+      printf 'aws-ro: refused option %s\n' "${arg%%=*}" >&2
+      exit 2
+      ;;
+    *) ;;
+  esac
+done
+
+exec aws --no-cli-pager --output json "${service}" "${operation}" "$@"

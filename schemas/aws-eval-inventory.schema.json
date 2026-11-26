@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/aws-eval-inventory.schema.json",
+  "title": "aws-eval inventory",
+  "description": "What scripts/aws-eval/collect writes to .scratch/aws-eval/inventory.json and scripts/aws-eval/score reads. AWS objects keep their native AWS CLI shapes; only the fields the rules read are constrained.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "collected_at",
+    "domain",
+    "repo",
+    "buckets",
+    "distributions",
+    "certificates",
+    "oidc_roles",
+    "hosted_zones",
+    "log_groups",
+    "trivy"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "collected_at": { "type": "string", "format": "date-time" },
+    "domain": { "type": "string", "pattern": "^[a-z0-9-]+([.][a-z0-9-]+)+$" },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "buckets": { "type": "array", "items": { "$ref": "#/$defs/bucket" } },
+    "distributions": { "type": "array", "items": { "$ref": "#/$defs/distribution" } },
+    "certificates": { "type": "array", "items": { "$ref": "#/$defs/certificate" } },
+    "oidc_roles": { "type": "array", "items": { "$ref": "#/$defs/oidc_role" } },
+    "hosted_zones": { "type": "array", "items": { "$ref": "#/$defs/hosted_zone" } },
+    "log_groups": { "type": "array", "items": { "$ref": "#/$defs/log_group" } },
+    "trivy": {
+      "description": "trivy config --format json output for infra/, or null when infra/ does not exist.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/trivy" }]
+    }
+  },
+  "$defs": {
+    "nullable_object": { "oneOf": [{ "type": "null" }, { "type": "object" }] },
+    "bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "public_access_block", "policy_status", "encryption", "versioning", "logging"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "public_access_block": {
+          "description": "PublicAccessBlockConfiguration, or null when none is set.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "properties": {
+                "BlockPublicAcls": { "type": "boolean" },
+                "IgnorePublicAcls": { "type": "boolean" },
+                "BlockPublicPolicy": { "type": "boolean" },
+                "RestrictPublicBuckets": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "policy_status": {
+          "description": "PolicyStatus, or null when the bucket has no policy.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "required": ["IsPublic"], "properties": { "IsPublic": { "type": "boolean" } } }
+          ]
+        },
+        "encryption": {
+          "description": "ServerSideEncryptionConfiguration, or null when none is set.",
+          "$ref": "#/$defs/nullable_object"
+        },
+        "versioning": { "type": "object", "properties": { "Status": { "enum": ["Enabled", "Suspended"] } } },
+        "logging": { "type": "object", "properties": { "LoggingEnabled": { "type": "object" } } }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "config", "response_headers_policies"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "config": {
+          "description": "DistributionConfig from cloudfront get-distribution-config.",
+          "type": "object",
+          "required": ["Origins", "DefaultCacheBehavior", "ViewerCertificate"],
+          "properties": {
+            "Origins": {
+              "type": "object",
+              "properties": {
+                "Items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["Id", "DomainName"],
+                    "properties": {
+                      "Id": { "type": "string" },
+                      "DomainName": { "type": "string" },
+                      "OriginAccessControlId": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            },
+            "DefaultCacheBehavior": { "$ref": "#/$defs/cache_behavior" },
+            "CacheBehaviors": {
+              "type": "object",
+              "properties": { "Items": { "type": "array", "items": { "$ref": "#/$defs/cache_behavior" } } }
+            },
+            "ViewerCertificate": {
+              "type": "object",
+              "properties": {
+                "CloudFrontDefaultCertificate": { "type": "boolean" },
+                "MinimumProtocolVersion": { "type": "string" }
+              }
+            },
+            "Logging": { "type": "object", "properties": { "Enabled": { "type": "boolean" } } }
+          }
+        },
+        "response_headers_policies": {
+          "description": "ResponseHeadersPolicyConfig of every policy the distribution's behaviors attach.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "SecurityHeadersConfig": { "type": "object" } }
+          }
+        }
+      }
+    },
+    "cache_behavior": {
+      "type": "object",
+      "required": ["ViewerProtocolPolicy"],
+      "properties": {
+        "ViewerProtocolPolicy": { "enum": ["allow-all", "https-only", "redirect-to-https"] },
+        "ResponseHeadersPolicyId": { "type": "string" }
+      }
+    },
+    "certificate": {
+      "description": "Certificate from acm describe-certificate.",
+      "type": "object",
+      "required": ["CertificateArn", "Status"],
+      "properties": {
+        "CertificateArn": { "type": "string", "pattern": "^arn:aws[a-z-]*:acm:" },
+        "Status": { "type": "string" },
+        "NotAfter": { "type": ["string", "number"] }
+      }
+    },
+    "oidc_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arn", "trust_policy"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "arn": { "type": "string", "pattern": "^arn:aws[a-z-]*:iam::" },
+        "trust_policy": {
+          "type": "object",
+          "required": ["Statement"],
+          "properties": {
+            "Statement": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "Effect": { "enum": ["Allow", "Deny"] },
+                  "Principal": { "type": ["object", "string"] },
+                  "Condition": { "type": "object" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "hosted_zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "private", "records"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "private": { "type": "boolean" },
+        "records": { "type": "array", "items": { "type": "object", "required": ["Name", "Type"] } }
+      }
+    },
+    "log_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "retention_days"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "retention_days": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "trivy": {
+      "type": "object",
+      "properties": {
+        "Results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["Target"],
+            "properties": {
+              "Target": { "type": "string" },
+              "Misconfigurations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["ID", "Title", "Message", "Severity", "Status"],
+                  "properties": {
+                    "ID": { "type": "string" },
+                    "Title": { "type": "string" },
+                    "Message": { "type": "string" },
+                    "Resolution": { "type": "string" },
+                    "Severity": { "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"] },
+                    "Status": { "enum": ["PASS", "FAIL", "EXCEPTION"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

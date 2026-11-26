@@ -1,0 +1,107 @@
+#!/bin/sh
+# Redact identifiers so a report can go into an issue on a public repo.
+# Usage:
+#   scripts/aws-eval/redact (--known <inventory.json> | --no-known) [--domain <d>] <in >out
+#   scripts/aws-eval/redact --check [--known <inventory.json>] [--domain <d>] <in
+# Replaces 12-digit account IDs, ARNs, resource IDs (CloudFront, Route 53, IAM
+# unique IDs, UUIDs), emails and hostnames outside the public domain with stable
+# placeholders ([account-1], [host-2], ...). --known adds every resource name in
+# a collected inventory (bucket, role and log group names) as an exact literal.
+# Fails closed: if the output still matches any pattern, nothing is printed and
+# the exit status is 1. --check only scans (exit 1 if anything would be redacted).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+here="$(cd "$(dirname "$0")" && pwd)"
+domain="${AWS_EVAL_DOMAIN:-mechafighter.com}"
+known=""
+known_set=0
+mode="redact"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --known)
+      known="${2:?--known needs a file}"
+      known_set=1
+      shift 2
+      ;;
+    --no-known)
+      known_set=1
+      shift
+      ;;
+    --domain)
+      domain="${2:?--domain needs a value}"
+      shift 2
+      ;;
+    --check)
+      mode="check"
+      shift
+      ;;
+    *)
+      printf 'redact: unknown argument %s\n' "$1" >&2
+      exit 64
+      ;;
+  esac
+done
+if [ "${mode}" = "redact" ] && [ "${known_set}" -eq 0 ]; then
+  printf 'redact: pass --known <inventory.json> (or --no-known when there is no inventory)\n' >&2
+  exit 64
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+literals="${work}/literals.tsv"
+: >"${literals}"
+if [ -n "${known}" ]; then
+  # Every named resource in the inventory, except names inside the public domain,
+  # longest first so a name that contains another is replaced whole.
+  jq -r --arg domain "${domain}" '
+    def public: ascii_downcase as $v | ($v == $domain or ($v | endswith("." + $domain)));
+    [ (.buckets[]?.name | ["bucket", .]),
+      (.oidc_roles[]? | (["role", .name], ["arn", .arn])),
+      (.distributions[]?.id | ["resource-id", .]),
+      (.hosted_zones[]?.id | (["resource-id", .], ["resource-id", sub("^/hostedzone/"; "")])),
+      (.log_groups[]?.name | ["log-group", .]),
+      (.certificates[]?.CertificateArn | ["arn", .]) ]
+    | map(select((.[1] | length) >= 3 and (.[1] | public | not)))
+    | unique | sort_by(-(.[1] | length)) | .[] | @tsv' "${known}" >"${literals}"
+fi
+
+# The independent second scan: fixed patterns with grep, then hosts and literals
+# with the awk scanner in check mode. Prints residual kinds only, never values.
+# Sets residual=1 when anything is left.
+check() {
+  residual=0
+  for pattern in \
+    'account:[0-9]{12}' \
+    'arn:arn:aws[-a-z]*:' \
+    'email:[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+[.][A-Za-z]' \
+    'iam-id:(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]{16}' \
+    'resource-id:(^|[^A-Z0-9])E[A-Z0-9]{12,13}([^A-Z0-9]|$)' \
+    'resource-id:(^|[^A-Z0-9])Z[A-Z0-9]{9,31}([^A-Z0-9]|$)' \
+    'resource-id:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'; do
+    if grep -qE "${pattern#*:}" "$1"; then
+      printf 'redact: residual %s\n' "${pattern%%:*}" >&2
+      residual=1
+    fi
+  done
+  awk -v mode=check -v domain="${domain}" -v literals="${literals}" -f "${here}/redact.awk" "$1" || residual=1
+}
+
+input="${work}/input"
+cat >"${input}"
+
+if [ "${mode}" = "check" ]; then
+  check "${input}"
+  exit "${residual}"
+fi
+
+output="${work}/output"
+awk -v mode=redact -v domain="${domain}" -v literals="${literals}" -f "${here}/redact.awk" "${input}" >"${output}"
+check "${output}"
+if [ "${residual}" -ne 0 ]; then
+  printf 'redact: FAILED CLOSED: a pattern survived redaction; nothing was printed\n' >&2
+  exit 1
+fi
+cat "${output}"

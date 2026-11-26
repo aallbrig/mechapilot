@@ -1,0 +1,30 @@
+#!/bin/sh
+# Score a collected inventory: pure jq rules (rules.jq), no AWS calls.
+# Usage: scripts/aws-eval/score [--now <YYYY-MM-DDTHH:MM:SSZ>] [inventory.json] >report.json
+# Default inventory: .scratch/aws-eval/inventory.json. The report matches
+# schemas/aws-eval-report.schema.json. Score = 100 minus 40 per critical,
+# 15 per high, 5 per medium and 1 per low finding, floored at 0.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --now)
+      now="${2:?--now needs a timestamp}"
+      shift 2
+      ;;
+    -*)
+      printf 'score: unknown option %s\n' "$1" >&2
+      exit 64
+      ;;
+    *) break ;;
+  esac
+done
+inventory="${1:-.scratch/aws-eval/inventory.json}"
+[ -f "${inventory}" ] || {
+  printf 'score: no inventory at %s (run scripts/aws-eval/collect first)\n' "${inventory}" >&2
+  exit 1
+}
+
+jq --arg now "${now}" -f "${here}/rules.jq" "${inventory}"
