@@ -10,8 +10,12 @@
 #              exit action; `run` runs each tick this way)
 #   snapshot   print the current state snapshot (schemas/agent-loop-snapshot.schema.json)
 #   preflight  check the human-only prerequisites (docs/agent-loop.md); exit 1 if any fails
-#   start      run preflight, clear the stop file and any held stall episode, and
+#   start      pin the runtime to origin/main if nothing is pinned yet, run
+#              preflight, clear the stop file and any held stall episode, and
 #              make sure a Supervisor runs (task loop:start)
+#   pin <sha>  pin the session's runtime to a commit a human chose (task loop:pin)
+#   confirm-token  record the human's confirmation of the token permissions
+#              preflight cannot probe (task loop:confirm-token)
 #   stop       set the stop file: the current issue finishes, then the session
 #              ends and the Supervisor exits (task loop:stop)
 #   status     print the Agent Loop's state (task loop:status)
@@ -25,10 +29,16 @@
 #
 # The boundary (docs/agent-loop.md): the session runs with Claude Code's
 # sandbox, only the settings below, and a least-privilege GitHub token.
-#   - The settings, status line and hooks come from a read-only export of
-#     AGENT_LOOP_RUNTIME_REF (default origin/main) in <state>/runtime, outside
-#     the session's worktree and outside its sandbox write scope, so editing
-#     the worktree never changes what runs unsandboxed.
+#   - The settings, status line, hooks and skill come from a read-only export
+#     of the commit in <state>/runtime-pin, which only a human sets (task
+#     loop:start records origin/main once; task loop:pin -- <sha> moves it).
+#     Never a newer origin/main: a PR the session got merged cannot change
+#     what runs unsandboxed until a human pins it.
+#   - Tools task ci needs from the network (npm packages, the pinned Chrome,
+#     OpenTofu providers) are installed by the Supervisor, outside the
+#     sandbox, from the pinned commit's lockfiles, then copied into the
+#     session's checkout. The sandbox's network allowlist stays GitHub, QA and
+#     Production only.
 #   - claude runs with --restricted (no user, project or local settings files),
 #     --strict-mcp-config (no MCP servers) and --permission-mode dontAsk.
 #   - GH_TOKEN comes from AGENT_LOOP_TOKEN_FILE (default
@@ -38,8 +48,9 @@
 #
 # State lives in AGENT_LOOP_STATE_DIR (default <main checkout>/.agent-loop):
 #   machine, stop, metrics.jsonl, heartbeat, context, supervisor.pid, pane,
-#   nudges, stall-episode, last-start, started-at, claimed, gh/, prod.json,
-#   runtime/ (read-only settings, status line and hooks), launch
+#   nudges, episode-nudges, stall-episode, last-start, started-at, claimed,
+#   gh/, prod.json, prod-history.jsonl, prod-smoke.log, runtime-pin,
+#   runtime/ (read-only, pinned), ci-deps/, token-confirmed, launch
 # The session runs in its own checkout, AGENT_LOOP_WORKTREE (default
 # <main checkout>.agent-loop, a sibling directory): a separate clone at
 # origin/main, so its .git sits inside the sandbox's write scope.
@@ -47,10 +58,12 @@
 # Tuning (seconds unless noted): AGENT_LOOP_STALL_SECONDS (900),
 # AGENT_LOOP_TOOL_TIMEOUT_SECONDS (600, the Bash tool's maximum timeout),
 # AGENT_LOOP_NUDGE_GAP_SECONDS (300), AGENT_LOOP_NUDGE_WINDOW_SECONDS (1800),
-# AGENT_LOOP_MAX_NUDGES (2), AGENT_LOOP_MAX_ESCALATIONS (2),
+# AGENT_LOOP_MAX_NUDGES (2), AGENT_LOOP_MAX_EPISODE_NUDGES (6),
+# AGENT_LOOP_MAX_ESCALATIONS (2),
 # AGENT_LOOP_RESTART_PCT (45), AGENT_LOOP_FORCE_RESTART_PCT (60),
 # AGENT_LOOP_START_COOLDOWN_SECONDS (600).
 # Tests: AGENT_LOOP_NOW fixes the clock, AGENT_LOOP_MAX_TICKS bounds `run`,
+# AGENT_LOOP_RUNTIME_REPO is the repository the pinned runtime is read from,
 # AGENT_LOOP_RETRY_SECONDS (5) is the pause between retries.
 set -eu
 
@@ -66,8 +79,9 @@ session_name="$(agent_loop_session_name)"
 tick_seconds="${AGENT_LOOP_TICK_SECONDS:-60}"
 gh_seconds="${AGENT_LOOP_GH_SECONDS:-300}"
 token_file="${AGENT_LOOP_TOKEN_FILE:-${HOME}/.config/mechafighter-agent-loop/gh-token}"
-runtime_ref="${AGENT_LOOP_RUNTIME_REF:-origin/main}"
+runtime_repo="${AGENT_LOOP_RUNTIME_REPO:-${repo_root}}"
 runtime_dir="${state_dir}/runtime"
+pin_file="${state_dir}/runtime-pin"
 # Exit status of a tick that ends the Supervisor (the exit action).
 exit_tick=10
 mkdir -p "${state_dir}"
@@ -162,6 +176,8 @@ refresh_github() {
 }
 
 # Production is expected once a v* release exists; only then is it smoke-tested.
+# The Supervisor runs prod-smoke outside the sandbox and records the result
+# (prod.json, prod-history.jsonl, prod-smoke.log) for the session to read.
 refresh_prod() {
   git -C "${main_root}" fetch --quiet --tags origin 2>/dev/null || true
   tags="$(git -C "${main_root}" tag -l 'v*' 2>/dev/null || true)"
@@ -175,8 +191,14 @@ refresh_prod() {
       [ "${count}" -eq 0 ] || incident=true
     fi
   fi
+  t="$(now)"
   jq -nc --argjson e "${expected}" --argjson o "${ok}" --argjson i "${incident}" \
     '{expected: $e, ok: $o, incident_open: $i}' >"${state_dir}/prod.json"
+  # The session reads this history: it cannot run prod-smoke itself, because
+  # the TLS check needs a direct connection the sandbox does not allow.
+  if [ "${expected}" = true ]; then
+    jq -nc --argjson at "${t}" --argjson o "${ok}" '{at: $at, ok: $o}' >>"${state_dir}/prod-history.jsonl"
+  fi
 }
 
 # track_claims: metrics for issues this machine claimed that closed (delivered)
@@ -199,7 +221,7 @@ track_claims() {
         case "${closed_as}" in
           completed)
             metric delivered issue "${n}" seconds "$((t - seen))"
-            rm -f "${state_dir}/stall-episode"
+            rm -f "${state_dir}/stall-episode" "${state_dir}/episode-nudges"
             ;;
           open | unknown) printf '%s %s\n' "${n}" "${seen}" >>"${state_dir}/claimed.new" ;;
           *) metric unclaimed issue "${n}" ;;
@@ -269,6 +291,8 @@ snapshot() {
   fi
   heartbeat="$(fresh_json "${state_dir}/heartbeat")"
   context="$(fresh_json "${state_dir}/context")"
+  episode_nudges="$(read_or "${state_dir}/episode-nudges" 0)"
+  case "${episode_nudges}" in "" | *[!0-9]*) episode_nudges=0 ;; *) ;; esac
   escalations="$(read_or "${state_dir}/stall-episode" 0)"
   case "${escalations}" in "" | *[!0-9]*) escalations=0 ;; *) ;; esac
   nudges="$(if [ -s "${state_dir}/nudges" ]; then jq -sc . "${state_dir}/nudges"; else printf '[]'; fi)"
@@ -278,7 +302,8 @@ snapshot() {
     --argjson issues "${issues}" --argjson prod "${prod}" --argjson session "${session}" \
     --argjson heartbeat "${heartbeat:-null}" --argjson context "${context:-null}" \
     --argjson nudges "${nudges}" --argjson last_start "${last_start}" \
-    --argjson escalations "${escalations}" \
+    --argjson escalations "${escalations}" --argjson episode_nudges "${episode_nudges}" \
+    --argjson max_episode_nudges "${AGENT_LOOP_MAX_EPISODE_NUDGES:-6}" \
     --argjson stall "${AGENT_LOOP_STALL_SECONDS:-900}" \
     --argjson tool_timeout "${AGENT_LOOP_TOOL_TIMEOUT_SECONDS:-600}" \
     --argjson max_escalations "${AGENT_LOOP_MAX_ESCALATIONS:-2}" \
@@ -294,10 +319,10 @@ snapshot() {
       tool_running: ($heartbeat.phase? == "pre"),
       last_activity_at: ([$heartbeat.at?, $context.at?] | map(select(. != null)) | max),
       context_pct: (if $session == null then null else $context.pct? end),
-      nudges: $nudges, escalations: $escalations, last_start_at: $last_start,
+      nudges: $nudges, escalations: $escalations, episode_nudges: $episode_nudges, last_start_at: $last_start,
       config: {stall_seconds: $stall, tool_timeout_seconds: $tool_timeout,
         nudge_gap_seconds: $gap, nudge_window_seconds: $window,
-        max_nudges: $max_nudges, max_escalations: $max_escalations,
+        max_nudges: $max_nudges, max_escalations: $max_escalations, max_episode_nudges: $max_episode_nudges,
         restart_pct: $restart, force_restart_pct: $force,
         start_cooldown_seconds: $cooldown}
     }'
@@ -338,33 +363,68 @@ token_state() {
   if [ -n "${found}" ] && [ "${found}" = "${token_file}" ]; then printf 'ok\n'; else printf 'missing\n'; fi
 }
 
-# refresh_runtime: export the session's settings, status line and hooks from
-# runtime_ref into <state>/runtime, read-only, and write the session settings
-# there. The session's worktree is never read for anything that runs unsandboxed.
+# pinned_sha: the commit in <state>/runtime-pin, if it is a full SHA.
+pinned_sha() {
+  pin="$(read_or "${pin_file}" '')"
+  case "${pin}" in
+    [0-9a-f]*)
+      others="$(printf '%s' "${pin}" | tr -d '0-9a-f')"
+      if [ "${#pin}" -eq 40 ] && [ -z "${others}" ]; then printf '%s\n' "${pin}"; fi
+      ;;
+    *) ;;
+  esac
+}
+
+# runtime_paths <sha>: the runtime and provisioning files that exist at <sha>.
+runtime_paths() {
+  git -C "${runtime_repo}" ls-tree -r --name-only "$1" -- \
+    scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
+    .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md \
+    package.json package-lock.json scripts/site-chrome infra
+}
+
+# refresh_runtime: export the pinned commit's settings, status line, hooks,
+# skill and lockfiles into <state>/runtime, read-only, and write the session
+# settings there. Nothing newer than the pin, and nothing from the session's
+# checkout, is ever exported.
 refresh_runtime() {
-  if [ "${runtime_ref}" = origin/main ]; then
-    retry 3 git -C "${repo_root}" fetch --quiet origin main
+  pin="$(pinned_sha)"
+  [ -n "${pin}" ] || return 1
+  current="$(read_or "${runtime_dir}/PIN" '')"
+  if [ "${current}" = "${pin}" ] && [ -s "${runtime_dir}/session-settings.json" ]; then return 0; fi
+  if ! git -C "${runtime_repo}" cat-file -e "${pin}^{commit}" 2>/dev/null; then
+    retry 3 git -C "${runtime_repo}" fetch --quiet origin
   fi
   new="${state_dir}/runtime.new"
   if [ -d "${new}" ]; then chmod -R u+w "${new}" && rm -rf "${new}"; fi
   mkdir -p "${new}"
-  git -C "${repo_root}" archive --format=tar -o "${new}.tar" "${runtime_ref}" -- \
-    scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib .claude/agent-loop-settings.json
+  paths="$(runtime_paths "${pin}")"
+  printf '%s\n' "${paths}" | grep -qx '.claude/agent-loop-settings.json' || return 1
+  printf '%s\n' "${paths}" >"${new}.paths"
+  git -C "${runtime_repo}" archive --format=tar -o "${new}.tar" "${pin}" -- .claude/agent-loop-settings.json
   tar -x -f "${new}.tar" -C "${new}"
-  rm -f "${new}.tar"
+  while IFS= read -r path; do
+    git -C "${runtime_repo}" archive --format=tar -o "${new}.tar" "${pin}" -- "${path}"
+    tar -x -f "${new}.tar" -C "${new}"
+  done <"${new}.paths"
+  rm -f "${new}.tar" "${new}.paths"
+  printf '%s\n' "${pin}" >"${new}/PIN"
   token_parent="$(dirname "${token_file}")"
   token_dir="${token_parent}"
   if [ -d "${token_parent}" ]; then token_dir="$(cd "${token_parent}" && pwd -P)"; fi
   me="$(machine)"
+  # Absolute paths are given in both the single-slash and the double-slash form,
+  # so they hold whichever form the sandbox reads as absolute.
   jq --arg sl "'${runtime_dir}/scripts/claude-statusline'" \
     --arg pre "'${runtime_dir}/scripts/agent-loop-heartbeat' pre" \
     --arg post "'${runtime_dir}/scripts/agent-loop-heartbeat' post" \
     --arg state "${state_dir}" --arg machine "${me}" \
-    --arg token_dir "/${token_dir}" --arg token_read "Read(/${token_dir}/**)" '
+    --arg token_dir "${token_dir}" --arg runtime "${runtime_dir}" '
       .statusLine = {type: "command", command: $sl}
       | .env = ((.env // {}) + {AGENT_LOOP_STATE_DIR: $state, AGENT_LOOP_MACHINE: $machine})
-      | .sandbox.filesystem.denyRead = ((.sandbox.filesystem.denyRead // []) + [$token_dir] | unique)
-      | .permissions.deny = ((.permissions.deny // []) + [$token_read] | unique)
+      | .sandbox.filesystem.denyRead = ((.sandbox.filesystem.denyRead // []) + [$token_dir, "/" + $token_dir] | unique)
+      | .permissions.deny = ((.permissions.deny // []) + ["Read(/" + $token_dir + "/**)"] | unique)
+      | .permissions.allow = ((.permissions.allow // []) + ["Read(/" + $runtime + "/**)"] | unique)
       | .hooks = {
           PreToolUse: [{hooks: [{type: "command", command: $pre, async: true}]}],
           PostToolUse: [{hooks: [{type: "command", command: $post, async: true}]}],
@@ -373,6 +433,84 @@ refresh_runtime() {
   if [ -d "${runtime_dir}" ]; then chmod -R u+w "${runtime_dir}" && rm -rf "${runtime_dir}"; fi
   mv "${new}" "${runtime_dir}"
   chmod -R a-w "${runtime_dir}"
+}
+
+# path_kind <base> <relative path>: "link" when any component of the path
+# below <base> is a symbolic link, else "plain" (missing components are fine).
+path_kind() {
+  here="$1"
+  rest="$2"
+  kind="plain"
+  while [ -n "${rest}" ]; do
+    part="${rest%%/*}"
+    if [ "${part}" = "${rest}" ]; then rest=""; else rest="${rest#*/}"; fi
+    here="${here}/${part}"
+    if [ -L "${here}" ]; then kind="link"; fi
+  done
+  printf '%s\n' "${kind}"
+}
+
+# place <source> <base> <relative destination>: replace the destination in the
+# session's checkout with a copy of <source>, refusing any symbolic link on the
+# way, so the session can never redirect an unsandboxed write.
+place() {
+  for part in "$3" "$(dirname "$3")"; do
+    [ "${part}" = . ] && continue
+    kind="$(path_kind "$2" "${part}")"
+    if [ "${kind}" != plain ]; then
+      log "refusing to provision $3: a symbolic link is on its path"
+      return 1
+    fi
+  done
+  mkdir -p "$2/$(dirname "$3")"
+  rm -rf "${2:?}/$3"
+  cp -RP "$1" "$2/$3"
+}
+
+# provision_ci: install what task ci downloads (npm packages from the pinned
+# package-lock.json with --ignore-scripts, the Chrome for Testing that
+# scripts/site-chrome pins, OpenTofu providers from the pinned lockfiles) once
+# per pin, outside the sandbox, then copy them into the session's checkout.
+provision_ci() {
+  pin="$(pinned_sha)"
+  deps="${state_dir}/ci-deps/${pin}"
+  if [ ! -e "${deps}/.done" ]; then
+    rm -rf "${deps}"
+    mkdir -p "${deps}"
+    cp -RP "${runtime_dir}/." "${deps}/"
+    chmod -R u+w "${deps}"
+    if [ -f "${deps}/package-lock.json" ]; then
+      (cd "${deps}" && npm_config_cache="${deps}/npm-cache" npm ci --ignore-scripts --no-audit --no-fund >/dev/null)
+    fi
+    if [ -x "${deps}/scripts/site-chrome" ]; then
+      (cd "${deps}" && scripts/site-chrome >/dev/null)
+    fi
+    if [ -d "${deps}/infra" ]; then
+      for tf_dir in $(find "${deps}/infra" -name .terraform -prune -o -type f -name '*.tf' -print | sed 's|/[^/]*$||' | sort -u); do
+        TF_CLI_CONFIG_FILE=/dev/null tofu -chdir="${tf_dir}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+      done
+    fi
+    : >"${deps}/.done"
+  fi
+  marker="${worktree}/.agent-loop/ci-deps-pin"
+  provisioned="$(read_or "${marker}" '')"
+  if [ "${provisioned}" = "${pin}" ]; then return 0; fi
+  if [ -d "${deps}/node_modules" ]; then place "${deps}/node_modules" "${worktree}" node_modules; fi
+  if [ -d "${deps}/npm-cache" ]; then place "${deps}/npm-cache" "${worktree}" .agent-loop/cache/npm; fi
+  if [ -d "${deps}/build/browsers" ]; then place "${deps}/build/browsers" "${worktree}" build/browsers; fi
+  if [ -d "${deps}/infra" ]; then
+    for tf in $(cd "${deps}" && find infra -type d -name .terraform -prune -print); do
+      if [ -d "${worktree}/$(dirname "${tf}")" ]; then place "${deps}/${tf}" "${worktree}" "${tf}"; fi
+    done
+  fi
+  printf '%s\n' "${pin}" >"${marker}"
+}
+
+# loop_prompt: what the Supervisor types to start or nudge a pass. It points at
+# the pinned copy of the skill, so the instructions the session follows are the
+# ones a human pinned, whatever its checkout or the skill loader holds.
+loop_prompt() {
+  printf "Run the Agent Loop: run cat '%s/.claude/skills/agent-loop/SKILL.md' and follow it exactly.\n" "${runtime_dir}"
 }
 
 send() {
@@ -414,7 +552,7 @@ if command -v mise >/dev/null 2>&1; then
   toolchain="\$(mise env -C '${main_root}' --shell bash)" || exit 1
   eval "\${toolchain}"
 fi
-unset SSH_AUTH_SOCK AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GITHUB_TOKEN
+unset SSH_AUTH_SOCK AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GITHUB_TOKEN TMUX TMUX_PANE
 GH_TOKEN="\$(cat '${token_file}')" || exit 1
 GH_CONFIG_DIR='${worktree}/.agent-loop/gh-config'
 GH_NO_UPDATE_NOTIFIER=1
@@ -430,12 +568,13 @@ GIT_CONFIG_KEY_3=core.sshCommand
 GIT_CONFIG_VALUE_3=false
 XDG_CACHE_HOME='${worktree}/.agent-loop/cache'
 npm_config_cache='${worktree}/.agent-loop/cache/npm'
+npm_config_offline=true
 HUGO_CACHEDIR='${worktree}/.agent-loop/cache/hugo'
 AGENT_LOOP_STATE_DIR='${state_dir}'
 AGENT_LOOP_MACHINE='${me}'
 export GH_TOKEN GH_CONFIG_DIR GH_NO_UPDATE_NOTIFIER GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \\
   GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \\
-  GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 XDG_CACHE_HOME npm_config_cache HUGO_CACHEDIR AGENT_LOOP_STATE_DIR AGENT_LOOP_MACHINE
+  GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 XDG_CACHE_HOME npm_config_cache npm_config_offline HUGO_CACHEDIR AGENT_LOOP_STATE_DIR AGENT_LOOP_MACHINE
 exec claude --name '${session_name}' --remote-control '${session_name}' --permission-mode dontAsk \\
   --restricted --strict-mcp-config --tools 'Bash,Read,Edit,Write,Glob,Grep,Agent,WebFetch,Skill' \\
   --settings '${runtime_dir}/session-settings.json'
@@ -449,9 +588,15 @@ do_start() {
     log "refusing to start a session: no least-privilege token at ${token_file} (mode 0600); see docs/agent-loop.md"
     return 0
   fi
+  pin="$(pinned_sha)"
+  if [ -z "${pin}" ]; then
+    log "refusing to start a session: no runtime pin (a human runs task loop:start or task loop:pin -- <sha>)"
+    return 0
+  fi
   # A failure in any step below ends this tick; the next tick tries again.
   ensure_worktree
   refresh_runtime
+  provision_ci
   write_launcher
   if [ -n "${TMUX_PANE:-}" ]; then
     p="$(retry 2 tmux split-window -d -P -F '#{pane_id}' -t "${TMUX_PANE}" -c "${worktree}" "'${launcher}'")"
@@ -464,6 +609,7 @@ do_start() {
   printf '%s\n' "${p}" >"${state_dir}/pane"
   printf '%s\n' "${t}" >"${state_dir}/last-start"
   printf '%s\n' "${t}" >"${state_dir}/started-at"
+  rm -f "${state_dir}/episode-nudges"
   reset_session_state
   metric session_start reason "$1"
   # The prompt is typed once the session is listed and idle, so the optional
@@ -473,7 +619,8 @@ do_start() {
     row="$(session_row)"
     status="$(printf '%s\n' "${row}" | jq -r '.status // empty')"
     if [ "${status}" = idle ]; then
-      send /agent-loop
+      prompt="$(loop_prompt)"
+      send "${prompt}"
       log "started the session in pane ${p}"
       return 0
     fi
@@ -486,8 +633,12 @@ do_start() {
 do_nudge() {
   status="$1"
   if [ "${status}" != idle ]; then send Escape; fi
-  send /agent-loop
+  prompt="$(loop_prompt)"
+  send "${prompt}"
   now >>"${state_dir}/nudges"
+  count="$(read_or "${state_dir}/episode-nudges" 0)"
+  case "${count}" in "" | *[!0-9]*) count=0 ;; *) ;; esac
+  printf '%s\n' "$((count + 1))" >"${state_dir}/episode-nudges"
   metric nudge reason "$2"
 }
 
@@ -500,7 +651,7 @@ kill_session() {
     pid="$(printf '%s\n' "${row}" | jq -r '.pid // empty')"
     if [ -n "${pid}" ]; then kill -INT "${pid}" 2>/dev/null || true; fi
   fi
-  rm -f "${state_dir}/pane" "${state_dir}/started-at"
+  rm -f "${state_dir}/pane" "${state_dir}/started-at" "${state_dir}/episode-nudges"
   reset_session_state
 }
 
@@ -553,7 +704,8 @@ do_restart() {
   fi
   send /clear
   sleep 3
-  send /agent-loop
+  prompt="$(loop_prompt)"
+  send "${prompt}"
   reset_session_state
   metric restart pct "${pct}" reason "$2"
 }
@@ -628,24 +780,93 @@ token_lacks_secrets() {
   fi
 }
 
-# With the owner's gh login: an active tag ruleset that restricts creating v* tags.
+# With the owner's gh login: an active tag ruleset that restricts creating
+# v* tags, excludes nothing, and lets no role or user bypass it (the loop's
+# token acts as a user with a repository role). Only a deploy key or a GitHub
+# App may bypass, so a human releases with one of those, or by deliberately
+# turning the ruleset off and on again.
 tag_ruleset_protects_releases() {
   list="$(cd "${repo_root}" && gh api 'repos/{owner}/{repo}/rulesets?targets=tag')"
   ids="$(printf '%s\n' "${list}" | jq -r '.[]? | select(.target == "tag" and .enforcement == "active") | .id')"
   for id in ${ids}; do
     detail="$(cd "${repo_root}" && gh api "repos/{owner}/{repo}/rulesets/${id}" || true)"
     if printf '%s\n' "${detail}" | jq -e '
-        ((.conditions.ref_name.include // []) | any(. == "~ALL" or . == "refs/tags/v*" or . == "refs/tags/v**"))
-        and ((.rules // []) | any(.type == "creation"))' >/dev/null 2>&1; then
+        .enforcement == "active"
+        and ((.conditions.ref_name.include // []) | any(. == "~ALL" or . == "refs/tags/v*" or . == "refs/tags/v**"))
+        and ((.conditions.ref_name.exclude // []) | length == 0)
+        and ((.rules // []) | any(.type == "creation"))
+        and ((.bypass_actors // []) | all(.actor_type == "DeployKey" or .actor_type == "Integration"))' >/dev/null 2>&1; then
       return 0
     fi
   done
   return 1
 }
 
+# production requires a reviewer, admins cannot bypass it, and nobody approves
+# a deployment they triggered.
 production_needs_reviewer() {
   env_json="$(cd "${repo_root}" && gh api 'repos/{owner}/{repo}/environments/production')"
-  printf '%s\n' "${env_json}" | jq -e '[.protection_rules[]? | select(.type == "required_reviewers")] | length > 0'
+  printf '%s\n' "${env_json}" | jq -e '
+    (.can_admins_bypass == false)
+    and ([.protection_rules[]? | select(.type == "required_reviewers" and .prevent_self_review == true)] | length > 0)'
+}
+
+# token_fingerprint: a SHA-256 of the token file (never the token itself).
+token_fingerprint() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum <"${token_file}" | cut -d ' ' -f 1
+  else
+    shasum -a 256 <"${token_file}" | cut -d ' ' -f 1
+  fi
+}
+
+token_confirmed() {
+  [ -s "${state_dir}/token-confirmed" ] || return 1
+  want="$(token_fingerprint)"
+  have="$(cat "${state_dir}/token-confirmed")"
+  [ "${want}" = "${have}" ]
+}
+
+runtime_pinned() {
+  pin="$(pinned_sha)"
+  [ -n "${pin}" ] && git -C "${runtime_repo}" cat-file -e "${pin}^{commit}"
+}
+
+# The token permissions preflight cannot probe without using them.
+unprobed_permissions='Workflows, Environments, Variables, Secrets, Deployments, Administration'
+
+confirm_token() {
+  ts="$(token_state)"
+  [ "${ts}" = ok ] || die "no token file at ${token_file} (mode 0600); create it first (docs/agent-loop.md)"
+  cat <<EOF
+Confirm, from the token's settings page on GitHub, that the Agent Loop token has
+NONE of these permissions: ${unprobed_permissions}.
+
+Workflows matters most: a token that can push .github/workflows/* can add a
+workflow that runs on push with the repository's secrets and its OIDC deploy
+role, so it could release, deploy or leak secrets without any review.
+
+Type exactly "I confirm" to record this for the current token file:
+EOF
+  IFS= read -r answer || answer=""
+  [ "${answer}" = "I confirm" ] || die "not confirmed"
+  token_fingerprint >"${state_dir}/token-confirmed"
+  printf 'confirm-token: recorded for the current token (a new token needs a new confirmation)\n'
+}
+
+pin_runtime() {
+  sha="${1:-}"
+  case "${sha}" in
+    "" | *[!0-9a-f]*) die "usage: task loop:pin -- <40-character commit SHA>" ;;
+    *) ;;
+  esac
+  [ "${#sha}" -eq 40 ] || die "usage: task loop:pin -- <40-character commit SHA>"
+  git -C "${runtime_repo}" cat-file -e "${sha}^{commit}" 2>/dev/null || die "${sha} is not a commit here (git fetch first)"
+  if git -C "${runtime_repo}" rev-parse --verify --quiet origin/main >/dev/null; then
+    git -C "${runtime_repo}" merge-base --is-ancestor "${sha}" origin/main || die "${sha} is not on origin/main"
+  fi
+  printf '%s\n' "${sha}" >"${pin_file}"
+  printf 'loop:pin: the session runtime is pinned to %s (takes effect at the next session start)\n' "${sha}"
 }
 
 sandbox_available() {
@@ -676,9 +897,11 @@ preflight() {
     check "the token cannot read Actions secrets (no Secrets permission)" token_lacks_secrets
     rm -rf "${empty_gh}"
     loop_token=""
+    check "you confirmed the token has none of: ${unprobed_permissions} (task loop:confirm-token)" token_confirmed
   fi
+  check "the runtime is pinned to a commit a human chose (task loop:start or task loop:pin)" runtime_pinned
   check "an active tag ruleset restricts creating v* tags" tag_ruleset_protects_releases
-  check "the production environment requires a reviewer" production_needs_reviewer
+  check "production requires a reviewer, admins cannot bypass, no self-review" production_needs_reviewer
   check "Claude Code's sandbox is available (sandbox-exec, or bwrap and socat)" sandbox_available
   printf 'preflight: %s failed\n' "${preflight_failures}"
 }
@@ -719,6 +942,13 @@ run() {
 }
 
 start() {
+  pin="$(pinned_sha)"
+  if [ -z "${pin}" ]; then
+    retry 3 git -C "${runtime_repo}" fetch --quiet origin main
+    head="$(git -C "${runtime_repo}" rev-parse origin/main)"
+    printf '%s\n' "${head}" >"${pin_file}"
+    printf 'loop:start: pinned the session runtime to origin/main %s (task loop:pin -- <sha> moves it)\n' "${head}"
+  fi
   preflight
   [ "${preflight_failures}" -eq 0 ] || die "preflight failed: finish the human steps in docs/agent-loop.md, then run task loop:start again"
   rm -f "${state_dir}/stop" "${state_dir}/stall-episode"
@@ -750,6 +980,8 @@ status() {
   printf 'supervisor:  %s\n' "${pid:+running (pid ${pid})}${pid:-not running}"
   if [ -e "${state_dir}/stop" ]; then printf 'stop file:   set (task loop:start clears it)\n'; fi
   printf 'worktree:    %s\n' "${worktree}"
+  pinned="$(read_or "${pin_file}" 'none (task loop:start pins origin/main)')"
+  printf 'runtime pin: %s\n' "${pinned}"
   printf 'session:     %s\n' "${session_status}"
   printf 'context:     %s%%\n' "${pct}"
   if [ -s "${state_dir}/heartbeat" ]; then
@@ -782,8 +1014,10 @@ case "${cmd}" in
     ;;
   status) status ;;
   alias) machine ;;
+  pin) pin_runtime "${2:-}" ;;
+  confirm-token) confirm_token ;;
   *)
-    printf 'usage: %s run|once|snapshot|preflight|start|stop|status|alias\n' "$0" >&2
+    printf 'usage: %s run|once|snapshot|preflight|start|stop|status|alias|pin <sha>|confirm-token\n' "$0" >&2
     exit 64
     ;;
 esac

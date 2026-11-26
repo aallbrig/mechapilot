@@ -5,7 +5,7 @@
   "description": "Authored here (#20). Everything scripts/agent-loop-lib's agent_loop_decide reads: the Supervisor builds one per tick, and tests feed fixtures. Times are Unix epoch seconds.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["now", "machine", "stop_requested", "issues", "prod", "session", "tool_running", "last_activity_at", "context_pct", "nudges", "escalations", "last_start_at", "config"],
+  "required": ["now", "machine", "stop_requested", "issues", "prod", "session", "tool_running", "last_activity_at", "context_pct", "nudges", "escalations", "episode_nudges", "last_start_at", "config"],
   "$defs": {
     "epoch": { "type": "integer", "minimum": 0 },
     "seconds": { "type": "integer", "minimum": 1 },
@@ -60,11 +60,12 @@
     "context_pct": { "description": "context_window.used_percentage from the status line, for this session.", "type": ["number", "null"], "minimum": 0, "maximum": 100 },
     "nudges": { "description": "When the Supervisor nudged the current stall.", "type": "array", "items": { "$ref": "#/$defs/epoch" } },
     "escalations": { "description": "Escalations in the current stall episode (cleared by a delivered issue or task loop:start).", "type": "integer", "minimum": 0 },
+    "episode_nudges": { "description": "Nudges since the session started or an issue was delivered, whether or not they worked.", "type": "integer", "minimum": 0 },
     "last_start_at": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/epoch" }] },
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stall_seconds", "tool_timeout_seconds", "nudge_gap_seconds", "nudge_window_seconds", "max_nudges", "max_escalations", "restart_pct", "force_restart_pct", "start_cooldown_seconds"],
+      "required": ["stall_seconds", "tool_timeout_seconds", "nudge_gap_seconds", "nudge_window_seconds", "max_nudges", "max_escalations", "max_episode_nudges", "restart_pct", "force_restart_pct", "start_cooldown_seconds"],
       "properties": {
         "stall_seconds": { "$ref": "#/$defs/seconds" },
         "tool_timeout_seconds": { "$ref": "#/$defs/seconds" },
@@ -72,6 +73,7 @@
         "nudge_window_seconds": { "$ref": "#/$defs/seconds" },
         "max_nudges": { "type": "integer", "minimum": 1 },
         "max_escalations": { "type": "integer", "minimum": 1 },
+        "max_episode_nudges": { "type": "integer", "minimum": 1 },
         "restart_pct": { "$ref": "#/$defs/percent" },
         "force_restart_pct": { "$ref": "#/$defs/percent" },
         "start_cooldown_seconds": { "$ref": "#/$defs/seconds" }

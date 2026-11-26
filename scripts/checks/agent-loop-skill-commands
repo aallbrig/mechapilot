@@ -1,0 +1,76 @@
+#!/bin/sh
+# Every command the Agent Loop skill tells the session to run is allowed by,
+# and not denied by, the session's permission rules (#20). This stops the skill
+# and .claude/agent-loop-settings.json from drifting apart: under dontAsk a
+# command the rules do not allow is refused, and the loop would stall on it.
+#
+# Usage: scripts/checks/agent-loop-skill-commands [SKILL.md] [settings.json]
+#
+# A command is a backticked span, outside the Human-only reference section,
+# whose first word runs a program: git, gh, task, test, cat, tail, head, jq,
+# ls, grep, or a repo script (scripts/...). Placeholders such as <n> or
+# <head SHA> are filled with sample values.
+#
+# Matching follows Claude Code's Bash rules (code.claude.com/docs/en/permissions):
+#   - Bash(<pattern>) where * matches any characters, so "Bash(git log *)"
+#     matches "git log -1" but not "git log" alone;
+#   - a compound command (&&, ||, ;, |) needs every part allowed;
+#   - deny rules win over allow rules.
+set -eu
+
+skill="${1:-.claude/skills/agent-loop/SKILL.md}"
+settings="${2:-.claude/agent-loop-settings.json}"
+for f in "${skill}" "${settings}"; do
+  [ -f "${f}" ] || {
+    printf 'agent-loop-skill-commands: no %s\n' "${f}" >&2
+    exit 1
+  }
+done
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+# Backticked spans, one per line, outside "## Human-only".
+awk '
+  /^## / { skip = ($0 ~ /^## Human-only/) }
+  skip { next }
+  {
+    line = $0
+    while (match(line, /`[^`]+`/)) {
+      print substr(line, RSTART + 1, RLENGTH - 2)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "${skill}" |
+  grep -E '^(git|gh|task|test|cat|tail|head|jq|ls|grep|scripts/[A-Za-z0-9_./-]+)( |$)' |
+  sed -e 's/<head SHA>/0123456789abcdef0123456789abcdef01234567/g' -e 's/<[^>]*>/x1/g' |
+  sort -u >"${work}/commands"
+
+if [ ! -s "${work}/commands" ]; then
+  printf 'agent-loop-skill-commands: no commands found in %s\n' "${skill}" >&2
+  exit 1
+fi
+
+jq -R . "${work}/commands" | jq -s . >"${work}/commands.json"
+jq -r --slurpfile cmds "${work}/commands.json" -f /dev/stdin "${settings}" >"${work}/report" <<'JQ'
+def rx: "^" + (gsub("(?<c>[.+?^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*")) + "$";
+def bash_patterns($list): [$list[]? | select(startswith("Bash(") and endswith(")")) | .[5:-1] | rx];
+def parts: [splits("\\s*(&&|\\|\\||;|\\|)\\s*")] | map(select(length > 0));
+bash_patterns(.permissions.allow) as $allow
+| bash_patterns(.permissions.deny) as $deny
+| $cmds[0][]
+| . as $cmd
+| [parts[] | . as $p
+    | if any($deny[]; . as $r | $p | test($r)) then "denied: \($p)"
+      elif any($allow[]; . as $r | $p | test($r)) then empty
+      else "not allowed: \($p)" end] as $problems
+| if ($problems | length) == 0 then "PASS  \($cmd)" else "FAIL  \($cmd)  (\($problems | join("; ")))" end
+JQ
+
+cat "${work}/report"
+total="$(grep -c . "${work}/report")"
+if grep -q '^FAIL' "${work}/report"; then
+  printf 'agent-loop-skill-commands: some skill commands do not match the allowlist\n'
+  exit 1
+fi
+printf 'agent-loop-skill-commands: ok (%s commands allowed)\n' "${total}"

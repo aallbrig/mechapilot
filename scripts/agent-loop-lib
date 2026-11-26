@@ -80,8 +80,10 @@ agent_loop_classify() {
 #                 the current stall episode)
 #   nudge         stalled, or idle with work; config.nudge_gap_seconds apart
 #   escalate      still stalled after config.max_nudges nudges within
-#                 config.nudge_window_seconds: file an agent-loop-stall issue
-#                 and restart the session
+#                 config.nudge_window_seconds (only nudges after the last sign
+#                 of life count), or config.max_episode_nudges nudges in this
+#                 episode even if the session kept replying: file an
+#                 agent-loop-stall issue and restart the session
 #   restart       /clear then /agent-loop: idle at config.restart_pct or more,
 #                 or busy at config.force_restart_pct or more (interrupt first)
 #   stop-session  idle and no work remains (with the stop file: the current
@@ -110,6 +112,7 @@ agent_loop_decide() {
     if $last_nudge != null and ($s.now - $last_nudge) < $c.nudge_gap_seconds then
       ["wait", "nudged \($s.now - $last_nudge)s ago (\($why))"]
     elif ($recent | length) >= $c.max_nudges then ["escalate", $why]
+    elif $s.episode_nudges >= $c.max_episode_nudges then ["escalate", "\($why); nudge cap: \($s.episode_nudges) nudges this episode"]
     else ["nudge", $why] end;
 if $class == "none" then
   if $s.stop_requested then ["exit", "stop file set"]

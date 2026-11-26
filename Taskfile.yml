@@ -149,6 +149,7 @@ tasks:
       - scripts/checks/infra-no-suppressions
       - scripts/checks/no-symlinks
       - scripts/checks/agent-loop-skill
+      - scripts/checks/agent-loop-skill-commands
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
@@ -316,9 +317,20 @@ tasks:
   # ---- Agent Loop (#20): the Supervisor, its metrics and the session ----
 
   loop:start:
-    desc: Clear the stop file and start the Agent Loop Supervisor in the dev session's loops window
+    desc: "Human only: pin the runtime if unpinned, run preflight, clear the stop file and start the Supervisor in the loops window"
     cmds:
       - scripts/agent-loop-supervisor start
+
+  loop:pin:
+    desc: "Human only: pin the Agent Loop session's runtime (settings, hooks, status line, skill) to a commit on origin/main (usage: task loop:pin -- <sha>)"
+    cmds:
+      - scripts/agent-loop-supervisor pin {{.CLI_ARGS}}
+
+  loop:confirm-token:
+    desc: "Human only: confirm the loop's token has no Workflows, Environments, Variables, Secrets, Deployments or Administration permission"
+    interactive: true
+    cmds:
+      - scripts/agent-loop-supervisor confirm-token
 
   loop:stop:
     desc: Ask the Supervisor to stop after the current issue (sets the stop file)

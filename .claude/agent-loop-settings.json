@@ -22,15 +22,15 @@
     },
     "network": {
       "strictAllowlist": true,
+      "allowAllUnixSockets": false,
+      "allowUnixSockets": [],
+      "allowLocalBinding": true,
       "allowedDomains": [
         "github.com",
         "api.github.com",
         "aallbrig.github.io",
         "mechafighter.com",
-        "game.mechafighter.com",
-        "registry.npmjs.org",
-        "storage.googleapis.com",
-        "googlechromelabs.github.io"
+        "game.mechafighter.com"
       ]
     }
   },
@@ -87,6 +87,7 @@
       "Bash(gh issue create *)",
       "Bash(gh issue comment *)",
       "Bash(gh issue edit *)",
+      "Bash(gh issue close *)",
       "Bash(gh pr create *)",
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
@@ -198,7 +199,13 @@
       "Read(~/.claude/.credentials.json)",
       "Read(~/.netrc)",
       "Read(**/.env)",
-      "Read(**/.env.*)"
+      "Read(**/.env.*)",
+      "Bash(task loop:pin*)",
+      "Bash(task loop:confirm-token*)",
+      "Bash(scripts/checks/prod-smoke*)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(tmux *)"
     ]
   }
 }

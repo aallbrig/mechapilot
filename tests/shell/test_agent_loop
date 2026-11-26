@@ -93,8 +93,16 @@ case "\$*" in
     printf '{}\n' ;;
   "api repos/{owner}/{repo}/rulesets?targets=tag")
     if [ -e "$1/no-ruleset" ]; then printf '[]\n'; else printf '[{"id":1,"target":"tag","enforcement":"active"}]\n'; fi ;;
-  "api repos/{owner}/{repo}/rulesets/1") printf '{"conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}\n' ;;
-  "api repos/{owner}/{repo}/environments/production") printf '{"protection_rules":[{"type":"required_reviewers"}]}\n' ;;
+  "api repos/{owner}/{repo}/rulesets/1")
+    exclude='[]'; bypass='[]'
+    if [ -e "$1/ruleset-excludes" ]; then exclude='["refs/tags/v9*"]'; fi
+    if [ -e "$1/ruleset-role-bypass" ]; then bypass='[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]'; fi
+    printf '{"enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":%s}},"rules":[{"type":"creation"}],"bypass_actors":%s}\n' "\${exclude}" "\${bypass}" ;;
+  "api repos/{owner}/{repo}/environments/production")
+    admins=false; self=true
+    if [ -e "$1/prod-admin-bypass" ]; then admins=true; fi
+    if [ -e "$1/prod-self-review" ]; then self=false; fi
+    printf '{"can_admins_bypass":%s,"protection_rules":[{"type":"required_reviewers","prevent_self_review":%s}]}\n' "\${admins}" "\${self}" ;;
   "api repos/"*) if [ -f "$1/issue-state" ]; then cat "$1/issue-state"; else printf 'completed\n'; fi ;;
   "issue list"*) printf '[]\n' ;;
   *) ;;
@@ -119,7 +127,36 @@ EOF
   for tool in sandbox-exec bwrap socat; do
     printf '#!/bin/sh\nexit 0\n' >"${bin}/${tool}"
   done
-  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux" "${bin}/sandbox-exec" "${bin}/bwrap" "${bin}/socat"
+  # Provisioning stubs: npm ci fills node_modules and the cache, npx installs a
+  # fake Chrome where --path says, tofu init creates .terraform.
+  cat >"${bin}/npm" <<EOF
+#!/bin/sh
+printf 'npm %s\n' "\$*" >>"$1/calls"
+mkdir -p node_modules "\${npm_config_cache:?}"
+: >node_modules/.package-lock.json
+: >"\${npm_config_cache}/index"
+EOF
+  cat >"${bin}/npx" <<EOF
+#!/bin/sh
+printf 'npx %s\n' "\$*" >>"$1/calls"
+path=""
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = --path ]; then path="\$2"; fi
+  shift
+done
+mkdir -p "\${path}/chrome"
+printf '#!/bin/sh\n' >"\${path}/chrome/chrome"
+chmod +x "\${path}/chrome/chrome"
+printf '%s\n' "\${path}/chrome/chrome"
+EOF
+  cat >"${bin}/tofu" <<EOF
+#!/bin/sh
+printf 'tofu %s\n' "\$*" >>"$1/calls"
+dir="\${1#-chdir=}"
+mkdir -p "\${dir}/.terraform/providers"
+EOF
+  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux" "${bin}/sandbox-exec" "${bin}/bwrap" "${bin}/socat" \
+    "${bin}/npm" "${bin}/npx" "${bin}/tofu"
   : >"$1/calls"
   printf '[]\n' >"$1/issues.json"
   printf 'fake-token\n' >"$1/token"
@@ -127,13 +164,15 @@ EOF
 }
 
 # supervisor <dir> <args...>: run the Supervisor against stubs and a private
-# state dir. The session's runtime files come from HEAD (not origin/main, so
-# nothing is fetched).
+# state dir. Unless the test pinned something else, the runtime is pinned to
+# this repository's HEAD (so nothing is fetched).
 supervisor() {
   d="$1"
   shift
+  mkdir -p "${d}/state"
+  if [ ! -e "${d}/state/runtime-pin" ]; then git rev-parse HEAD >"${d}/state/runtime-pin"; fi
   PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
-    AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RUNTIME_REF=HEAD AGENT_LOOP_RETRY_SECONDS=0 \
+    AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RETRY_SECONDS=0 \
     AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=0 TMUX_PANE='%1' \
     scripts/agent-loop-supervisor "$@"
 }
@@ -208,6 +247,11 @@ test_supervisor_classifies_stale_heartbeat_as_stall() {
   expect nudge decision "${s}" || return 1
   s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 950 | .nudges = [.now - 1750, .now - 1000, .now - 600]')" || return 1
   expect nudge decision "${s}" || return 1
+  # Even when the session keeps replying, 6 nudges in one episode escalate.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500] | .episode_nudges = 6')" || return 1
+  expect escalate decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500] | .episode_nudges = 5')" || return 1
+  expect nudge decision "${s}" || return 1
   # Nudges older than the 30-minute window do not count.
   s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 4000 | .nudges = [.now - 3000, .now - 2500]')" || return 1
   expect nudge decision "${s}"
@@ -236,7 +280,7 @@ test_supervisor_restarts_at_context_threshold() {
   printf '{"session_id":"s1","pct":47,"at":1795699000}\n' >"${d}/state/context"
   supervisor "${d}" once >/dev/null || return 1
   grep -qx 'tmux send-keys -t %9 -l /clear' "${d}/calls" || return 1
-  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
   ! grep -q 'Escape' "${d}/calls" || return 1
   expect '[47,"m-a1b2c3"]' jq -c 'select(.event == "restart") | [.pct, .machine]' "${d}/state/metrics.jsonl" || return 1
   # The context reading belonged to the cleared conversation.
@@ -303,7 +347,7 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
     >"${d}/agents-after-start.json"
   supervisor "${d}" once >/dev/null || return 1
   grep -q "^tmux split-window -d -P -F #{pane_id} -t %1 -c ${d}/worktree " "${d}/calls" || return 1
-  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
   launcher="${d}/state/launch"
   rt="${d}/state/runtime"
   sh -n "${launcher}" || return 1
@@ -325,9 +369,22 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
   expect m-a1b2c3 jq -r '.env.AGENT_LOOP_MACHINE' "${settings}" || return 1
   expect true jq -r '.sandbox.enabled and (.sandbox.allowUnsandboxedCommands == false) and .sandbox.failIfUnavailable' "${settings}" || return 1
   real_dir="$(cd "${d}" && pwd -P)"
+  jq -e --arg t "${real_dir}" '.sandbox.filesystem.denyRead | index($t)' "${settings}" >/dev/null || return 1
   jq -e --arg t "/${real_dir}" '.sandbox.filesystem.denyRead | index($t)' "${settings}" >/dev/null || return 1
   ! grep -q '/worktree/' "${settings}" || return 1
   expect '"m-a1b2c3"' jq -c 'select(.event == "session_start") | .machine' "${d}/state/metrics.jsonl" || return 1
+  # The runtime is the pinned commit, including the skill the prompt points at.
+  head="$(git rev-parse HEAD)"
+  expect "${head}" cat "${rt}/PIN" || return 1
+  cmp -s .claude/skills/agent-loop/SKILL.md "${rt}/.claude/skills/agent-loop/SKILL.md" || return 1
+  jq -e --arg r "Read(/${rt}/**)" '.permissions.allow | index($r)' "${settings}" >/dev/null || return 1
+  # What task ci would download was installed outside the sandbox and copied in.
+  [ -f "${d}/worktree/node_modules/.package-lock.json" ] || return 1
+  [ -x "${d}/worktree/build/browsers/chrome/chrome" ] || return 1
+  [ -f "${d}/worktree/.agent-loop/cache/npm/index" ] || return 1
+  grep -q '^npm ci --ignore-scripts --no-audit --no-fund$' "${d}/calls" || return 1
+  grep -qx 'npm_config_offline=true' "${launcher}" || return 1
+  grep -q '^unset .* TMUX TMUX_PANE$' "${launcher}" || return 1
   # The snapshot it decided from matches its schema, with the PR dropped.
   check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${d}/state/snapshot.json" >/dev/null || return 1
   expect '[101]' jq -c '[.issues[].number]' "${d}/state/snapshot.json"
@@ -352,6 +409,12 @@ test_supervisor_refuses_to_start_without_the_token() {
 test_preflight_requires_the_human_steps() {
   d="$(mktemp -d)"
   stubs "${d}"
+  # Not yet confirmed: the unprobed permissions need a human's word.
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  you confirmed the token has none of: Workflows, Environments, Variables, Secrets, Deployments, Administration' || return 1
+  ! printf 'yes\n' | supervisor "${d}" confirm-token >/dev/null 2>&1 || return 1
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  ! grep -q fake-token "${d}/state/token-confirmed" || return 1
   out="$(supervisor "${d}" preflight)" || {
     printf '%s\n' "${out}"
     return 1
@@ -365,11 +428,30 @@ test_preflight_requires_the_human_steps() {
   printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read branch protection (no Administration permission)' || return 1
   printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read Actions secrets (no Secrets permission)' || return 1
   rm -f "${d}/token-is-admin"
-  # No tag ruleset fails.
-  : >"${d}/no-ruleset"
+  # No tag ruleset, or one with an exclusion or a role bypass, fails.
+  for variant in no-ruleset ruleset-excludes ruleset-role-bypass; do
+    : >"${d}/${variant}"
+    out="$(supervisor "${d}" preflight)" && return 1
+    printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating v\* tags' || return 1
+    rm -f "${d}/${variant}"
+  done
+  # Production that admins can bypass, or that allows self-review, fails.
+  for variant in prod-admin-bypass prod-self-review; do
+    : >"${d}/${variant}"
+    out="$(supervisor "${d}" preflight)" && return 1
+    printf '%s\n' "${out}" | grep -qx 'FAIL  production requires a reviewer, admins cannot bypass, no self-review' || return 1
+    rm -f "${d}/${variant}"
+  done
+  # A new token needs a new confirmation.
+  printf 'other-token\n' >"${d}/token"
   out="$(supervisor "${d}" preflight)" && return 1
-  printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating v\* tags' || return 1
-  rm -f "${d}/no-ruleset"
+  printf 'fake-token\n' >"${d}/token"
+  # No pin fails.
+  rm -f "${d}/state/runtime-pin"
+  printf 'not-a-sha\n' >"${d}/state/runtime-pin"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  the runtime is pinned' || return 1
+  rm -f "${d}/state/runtime-pin"
   # No token fails, and the Supervisor will not run.
   rm -f "${d}/token"
   out="$(supervisor "${d}" preflight)" && return 1
@@ -410,7 +492,7 @@ test_supervisor_files_a_stall_issue_after_failed_nudges() {
   # First tick: a nudge (Escape, then /agent-loop).
   supervisor "${d}" once >/dev/null || return 1
   grep -qx 'tmux send-keys -t %9 Escape' "${d}/calls" || return 1
-  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
   # Two nudges already in the window: file the issue and kill the session.
   printf '1795699000\n1795699500\n' >"${d}/state/nudges"
   supervisor "${d}" once >/dev/null || return 1
@@ -426,7 +508,7 @@ test_supervisor_files_a_stall_issue_after_failed_nudges() {
   printf '{"session_id":"s2","at":1795698900,"phase":"post"}\n' >"${d}/state/heartbeat"
   : >"${d}/calls"
   supervisor "${d}" once >/dev/null || return 1
-  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  grep -qx "tmux send-keys -t %9 -l Run the Agent Loop: run cat '${d}/state/runtime/.claude/skills/agent-loop/SKILL.md' and follow it exactly." "${d}/calls" || return 1
   ! grep -q '^gh issue' "${d}/calls" || return 1
   # A second escalation in the same episode writes nothing to GitHub.
   printf '1795699000\n1795699500\n' >"${d}/state/nudges"
@@ -626,12 +708,14 @@ test_agent_loop_settings_sandbox_the_session() {
   for p in "${home}/.aws" "${home}/.ssh" "${home}/.config/gh" "${home}/.config/mechafighter-agent-loop" "${home}/.claude/.credentials.json"; do
     jq -e --arg p "${p}" '.sandbox.filesystem.denyRead | index($p)' "${f}" >/dev/null || return 1
   done
-  expect '["aallbrig.github.io","api.github.com","game.mechafighter.com","github.com","googlechromelabs.github.io","mechafighter.com","registry.npmjs.org","storage.googleapis.com"]' \
+  expect '["aallbrig.github.io","api.github.com","game.mechafighter.com","github.com","mechafighter.com"]' \
     jq -c '.sandbox.network.allowedDomains | sort' "${f}" || return 1
+  expect true jq '(.sandbox.network.allowAllUnixSockets == false) and (.sandbox.network.allowUnixSockets == [])' "${f}" || return 1
   for rule in 'Bash(git push *)' 'Bash(gh api *)' 'Bash(gh pr merge *)' 'Bash(git commit -n*)' 'Bash(git commit *--no-verify*)' \
     'Bash(mise *)' 'Bash(curl *)' 'Bash(*--upload-pack*)' 'Bash(*--exec*)' 'Bash(find *-exec*)' 'Bash(git rebase *)' \
     'Bash(git config *)' 'Bash(git -c *)' 'Bash(task loop:start*)' 'Bash(task loop:stop*)' 'Bash(task infra:*)' \
-    'Bash(gh workflow *)' 'Bash(scripts/agent-loop-supervisor *)' 'Read(~/.config/gh/**)'; do
+    'Bash(gh workflow *)' 'Bash(scripts/agent-loop-supervisor *)' 'Read(~/.config/gh/**)' \
+    'Bash(task loop:pin*)' 'Bash(task loop:confirm-token*)' 'Bash(scripts/checks/prod-smoke*)' 'Bash(tmux *)'; do
     jq -e --arg r "${rule}" '.permissions.deny | index($r)' "${f}" >/dev/null || {
       printf 'missing deny rule: %s\n' "${rule}"
       return 1
@@ -641,4 +725,109 @@ test_agent_loop_settings_sandbox_the_session() {
   expect '[]' jq -c '[.permissions.allow[] | select(test("^Bash\\((git push|gh api|curl|wget|mise|task loop:start|task loop:stop|scripts/agent-loop-supervisor)"))]' "${f}" || return 1
   # The session's settings never point at the worktree: hooks and the status line are added from the runtime copy.
   expect 'false' jq 'has("hooks") or has("statusLine")' "${f}"
+}
+
+# runtime_repo <dir>: a repository with two commits of the runtime files. The
+# second (origin/main) adds the sandbox domain example.invalid; a third commit
+# on a side branch is not on origin/main. Prints "<first> <second> <side>".
+runtime_repo() {
+  r="$1"
+  mkdir -p "${r}/scripts" "${r}/.claude/skills/agent-loop"
+  for f in scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
+    .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md; do
+    cp "${f}" "${r}/${f}"
+  done
+  git -C "${r}" init -q
+  git -C "${r}" config user.email t@example.invalid
+  git -C "${r}" config user.name t
+  git -C "${r}" add -A
+  git -C "${r}" commit -q -m first
+  first="$(git -C "${r}" rev-parse HEAD)"
+  jq '.sandbox.network.allowedDomains += ["example.invalid"]' "${r}/.claude/agent-loop-settings.json" >"${r}/new.json"
+  mv "${r}/new.json" "${r}/.claude/agent-loop-settings.json"
+  git -C "${r}" commit -q -am second
+  second="$(git -C "${r}" rev-parse HEAD)"
+  git -C "${r}" update-ref refs/remotes/origin/main "${second}"
+  git -C "${r}" switch -q -c side
+  printf 'side\n' >"${r}/side"
+  git -C "${r}" add side
+  git -C "${r}" commit -q -m side
+  side="$(git -C "${r}" rev-parse HEAD)"
+  printf '%s %s %s\n' "${first}" "${second}" "${side}"
+}
+
+test_supervisor_exports_only_the_pinned_runtime() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  shas="$(runtime_repo "${d}/runtime-repo")" || return 1
+  first="${shas%% *}"
+  rest="${shas#* }"
+  second="${rest%% *}"
+  side="${rest#* }"
+  printf '%s\n' "${first}" >"${d}/state/runtime-pin"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once >/dev/null || return 1
+  # origin/main is newer, but only the pinned commit is exported.
+  expect "${first}" cat "${d}/state/runtime/PIN" || return 1
+  expect false jq '.sandbox.network.allowedDomains | index("example.invalid") != null' "${d}/state/runtime/session-settings.json" || return 1
+  # Pins must be full SHAs of commits on origin/main.
+  for bad in abc123 "${side}" 0000000000000000000000000000000000000000; do
+    ! AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" pin "${bad}" >/dev/null 2>&1 || return 1
+  done
+  expect "${first}" cat "${d}/state/runtime-pin" || return 1
+  # A human advances the pin; the next session start exports that commit.
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" pin "${second}" >/dev/null || return 1
+  rm -f "${d}/state/pane" "${d}/state/last-start" "${d}/state/started-at" "${d}/pane-alive" "${d}/agents.json"
+  AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once >/dev/null || return 1
+  expect "${second}" cat "${d}/state/runtime/PIN" || return 1
+  expect true jq '.sandbox.network.allowedDomains | index("example.invalid") != null' "${d}/state/runtime/session-settings.json" || return 1
+  # Without a valid pin, no session starts.
+  rm -f "${d}/state/pane" "${d}/state/last-start" "${d}/pane-alive" "${d}/agents.json"
+  printf 'none\n' >"${d}/state/runtime-pin"
+  : >"${d}/calls"
+  out="$(AGENT_LOOP_RUNTIME_REPO="${d}/runtime-repo" supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: no runtime pin' || return 1
+  ! grep -q '^tmux split-window' "${d}/calls"
+}
+
+test_supervisor_refuses_symlinks_in_the_checkout() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state" "${d}/elsewhere"
+  : >"${d}/elsewhere/keep"
+  ln -s "${d}/elsewhere" "${d}/worktree/node_modules"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  out="$(supervisor "${d}" once 2>&1)" && return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to provision node_modules: a symbolic link is on its path' || return 1
+  # Nothing was written through the link, and no session started.
+  [ -f "${d}/elsewhere/keep" ] && [ ! -e "${d}/elsewhere/.package-lock.json" ] || return 1
+  ! grep -q '^tmux split-window' "${d}/calls"
+}
+
+# skill_doc <file> <step line>: a minimal skill with one step and a Human-only
+# section that mentions a denied command.
+skill_doc() {
+  bt="$(printf '\140')"
+  printf '# Skill\n\n## 1. Step\n\n%s\n\n## Human-only\n\n- %sgit push%s\n' "$2" "${bt}" "${bt}" >"$1"
+}
+
+test_skill_commands_match_the_allowlist() {
+  scripts/checks/agent-loop-skill-commands >/dev/null || return 1
+  d="$(mktemp -d)"
+  bt="$(printf '\140')"
+  # A command the rules deny, an env-prefixed command, and one they never allow all fail.
+  for cmd in "git tag -l 'v*'" "ACCEPTANCE_RECORD=x scripts/verify-acceptance 1" "curl -sS https://mechafighter.com/" "gh api repos/o/r -XPUT"; do
+    skill_doc "${d}/skill.md" "Run ${bt}${cmd}${bt}."
+    ! scripts/checks/agent-loop-skill-commands "${d}/skill.md" >/dev/null || return 1
+  done
+  # Mentions in the Human-only reference section are not commands.
+  skill_doc "${d}/ok.md" "Run ${bt}task ci${bt}."
+  scripts/checks/agent-loop-skill-commands "${d}/ok.md" >/dev/null || return 1
+  # Deny beats allow, and a compound command needs every part allowed.
+  skill_doc "${d}/compound.md" "Run ${bt}git status --short && git push origin main${bt}."
+  out="$(scripts/checks/agent-loop-skill-commands "${d}/compound.md")" && return 1
+  printf '%s\n' "${out}" | grep -q 'denied: git push origin main'
 }

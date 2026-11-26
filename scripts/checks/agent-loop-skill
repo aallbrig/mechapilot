@@ -40,7 +40,7 @@ while IFS= read -r needle; do
 done <<'EOF'
 name: agent-loop
 disable-model-invocation: true
-scripts/checks/prod-smoke
+$AGENT_LOOP_STATE_DIR/prod.json
 $AGENT_LOOP_MACHINE
 "$AGENT_LOOP_STATE_DIR/stop"
 machine:$AGENT_LOOP_MACHINE
@@ -54,7 +54,7 @@ scripts/verify-acceptance <n>
 review-verdict: pass sha=<40-char head SHA> reviewer=<tag>
 distinct lowercase tag
 task merge-gate -- <pr> --merge
-Merges happen only through `task merge-gate`
+Merges happen only through the merge gate, never any other way.
 needs-info
 ready-for-human
 Agent Loop: no work remains.

@@ -17,6 +17,7 @@
   "context_pct": null,
   "nudges": [],
   "escalations": 0,
+  "episode_nudges": 0,
   "last_start_at": null,
   "config": {
     "stall_seconds": 900,
@@ -25,6 +26,7 @@
     "nudge_window_seconds": 1800,
     "max_nudges": 2,
     "max_escalations": 2,
+    "max_episode_nudges": 6,
     "restart_pct": 45,
     "force_restart_pct": 60,
     "start_cooldown_seconds": 600
