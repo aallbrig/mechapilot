@@ -370,9 +370,9 @@ refresh_runtime() {
           PostToolUse: [{hooks: [{type: "command", command: $post, async: true}]}],
           PostToolUseFailure: [{hooks: [{type: "command", command: $post, async: true}]}]
         }' "${new}/.claude/agent-loop-settings.json" >"${new}/session-settings.json"
-  chmod -R a-w "${new}"
   if [ -d "${runtime_dir}" ]; then chmod -R u+w "${runtime_dir}" && rm -rf "${runtime_dir}"; fi
   mv "${new}" "${runtime_dir}"
+  chmod -R a-w "${runtime_dir}"
 }
 
 send() {

@@ -615,7 +615,7 @@ test_agent_loop_push_pushes_only_its_branch() {
   done
   ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push 42 --force 2>/dev/null || return 1
   ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=laptop scripts/agent-loop-push 42 2>/dev/null || return 1
-  expect 1 wc -l <"${d}/calls"
+  expect 1 grep -c . "${d}/calls"
 }
 
 test_agent_loop_settings_sandbox_the_session() {
