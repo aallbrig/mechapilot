@@ -1,0 +1,57 @@
+#!/bin/sh
+# Fail if an AWS account-specific identifier is committed under infra/.
+# Args: none (every tracked file under infra/), --staged (staged files under
+# infra/), or explicit paths (exactly those files, wherever they are).
+#
+# Flags: 12-digit account IDs, ARNs that carry an account, Route 53 hosted-zone
+# IDs, CloudFront distribution / origin-access IDs, access key IDs and email
+# addresses. Provider lock-file hashes ("h1:..." / "zh:...") are removed before
+# matching, so their digits are never mistaken for account IDs.
+# Reports file, line and kind only: the matched text is never printed, so a
+# finding does not leak into public CI logs.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+list="$(mktemp)"
+scrubbed="$(mktemp)"
+trap 'rm -f "${list}" "${scrubbed}"' EXIT
+
+check_paths "$@" >"${list}"
+if [ "$#" -eq 0 ] || [ "$1" = "--staged" ]; then
+  sed -n '/^infra\//p' "${list}" >"${scrubbed}"
+  cp "${scrubbed}" "${list}"
+fi
+
+# Identifiers are bounded by characters that cannot be part of them.
+b='(^|[^A-Za-z0-9_])'
+e='([^A-Za-z0-9_]|$)'
+patterns="account-id	${b}[0-9]{12}${e}
+arn-with-account	arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}:
+hosted-zone-id	${b}Z[A-Z0-9]{12,31}${e}
+cloudfront-id	${b}E[A-Z0-9]{12,13}${e}
+access-key-id	${b}(AKIA|ASIA|AIDA|AROA|AGPA|ANPA)[A-Z0-9]{16}${e}
+email-address	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}"
+
+tab="$(printf '\t')"
+status=0
+while IFS= read -r f; do
+  [ -f "${f}" ] || continue
+  sed -E 's/"(h1|zh):[A-Za-z0-9+\/=]+"/""/g' "${f}" >"${scrubbed}"
+  while IFS="${tab}" read -r kind regex; do
+    lines="$(grep -nE -- "${regex}" "${scrubbed}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [ -n "${lines}" ]; then
+      printf 'infra-no-identifiers: %s: %s on line(s) %s\n' "${f}" "${kind}" "${lines% }" >&2
+      status=1
+    fi
+  done <<EOF
+${patterns}
+EOF
+done <"${list}"
+
+if [ "${status}" -ne 0 ]; then
+  printf 'infra-no-identifiers: supply account-specific values through an untracked *.auto.tfvars or backend.hcl\n' >&2
+fi
+exit "${status}"

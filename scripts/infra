@@ -1,0 +1,95 @@
+#!/bin/sh
+# OpenTofu checks and human-only operations for infra/.
+#
+# Usage: scripts/infra validate|lint|scan|plan|apply [stack]
+#   validate  tofu fmt -check, then init -backend=false and validate for every
+#             module and stack (offline apart from the provider download; the
+#             committed lock file is read-only)
+#   lint      tflint (terraform "all" preset + the pinned AWS ruleset)
+#   scan      trivy config: no HIGH or CRITICAL misconfigurations
+#   plan      human only: init with backend.hcl and plan a stack (default prod)
+#   apply     human only: apply the saved plan of a stack
+# validate, lint and scan never touch AWS.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+root="infra"
+cmd="${1:?usage: scripts/infra validate|lint|scan|plan|apply [stack]}"
+
+# Every directory under infra/ that holds .tf files, sorted, one per line.
+tf_dirs() {
+  find "${root}" -name .terraform -prune -o -type f -name '*.tf' -print |
+    sed 's|/[^/]*$||' | sort -u
+}
+
+human_only() {
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    printf 'infra: %s is for humans only and refuses to run in CI\n' "${cmd}" >&2
+    exit 1
+  fi
+}
+
+case "${cmd}" in
+  validate)
+    tofu fmt -check -recursive -diff "${root}"
+    for d in $(tf_dirs); do
+      printf 'infra validate: %s\n' "${d}"
+      tofu -chdir="${d}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+      tofu -chdir="${d}" validate -no-color
+    done
+    ;;
+  lint)
+    plugin="$(command -v tflint-ruleset-aws || true)"
+    if [ -z "${plugin}" ]; then
+      printf 'infra lint: tflint-ruleset-aws not on PATH (run: task setup)\n' >&2
+      exit 1
+    fi
+    TFLINT_PLUGIN_DIR="${plugin%/*}"
+    export TFLINT_PLUGIN_DIR
+    config="$(pwd)/${root}/.tflint.hcl"
+    for d in $(tf_dirs); do
+      printf 'infra lint: %s\n' "${d}"
+      tflint --chdir="${d}" --config="${config}" --no-color
+    done
+    ;;
+  scan)
+    # Embedded checks only (--skip-check-update): the result depends on the
+    # pinned trivy version, not on whatever bundle a registry serves today.
+    # No ignore file is loaded (--ignorefile ""): findings are fixed, not suppressed.
+    trivy config --quiet --disable-telemetry --skip-check-update \
+      --ignorefile "" \
+      --skip-dirs '**/.terraform' \
+      --severity HIGH,CRITICAL --exit-code 1 "${root}"
+    ;;
+  plan | apply)
+    human_only
+    stack="${2:-prod}"
+    case "${stack}" in
+      "" | *[!a-z0-9-]*)
+        printf 'infra: bad stack name\n' >&2
+        exit 64
+        ;;
+      *) ;;
+    esac
+    dir="${root}/stacks/${stack}"
+    [ -d "${dir}" ] || {
+      printf 'infra: no stack %s\n' "${dir}" >&2
+      exit 64
+    }
+    if [ "${cmd}" = plan ]; then
+      if [ -f "${dir}/backend.hcl" ]; then
+        tofu -chdir="${dir}" init -input=false -lockfile=readonly -backend-config=backend.hcl
+      else
+        tofu -chdir="${dir}" init -input=false -lockfile=readonly
+      fi
+      tofu -chdir="${dir}" plan -input=false -out=current.tfplan
+    else
+      tofu -chdir="${dir}" apply -input=false current.tfplan
+    fi
+    ;;
+  *)
+    printf 'unknown command: %s\n' "${cmd}" >&2
+    exit 64
+    ;;
+esac

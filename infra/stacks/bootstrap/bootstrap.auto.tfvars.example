@@ -1,0 +1,2 @@
+# Copy to bootstrap.auto.tfvars (gitignored) and fill in. Never commit the real file.
+state_bucket_name = "<state-bucket-name>"

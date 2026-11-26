@@ -1,0 +1,69 @@
+#!/bin/sh
+# Tests for scripts/checks/infra-no-identifiers (run by scripts/test-shell).
+# Fixture identifiers are assembled at runtime so this file holds none itself.
+
+fixture() {
+  f="$(mktemp)"
+  printf '%s\n' "$1" >"${f}"
+  printf '%s\n' "${f}"
+}
+
+test_infra_no_identifiers_rejects_account_id() {
+  f="$(fixture "account = \"1234$(printf '%s' 56789012)\"")"
+  ! scripts/checks/infra-no-identifiers "${f}"
+}
+
+test_infra_no_identifiers_rejects_arn_with_account() {
+  f="$(fixture "role = \"arn:aws:iam::$(printf '%s' 123456789012):role/x\"")"
+  ! scripts/checks/infra-no-identifiers "${f}"
+}
+
+test_infra_no_identifiers_rejects_hosted_zone_id() {
+  f="$(fixture "zone_id = \"Z$(printf '%s' 0123456789ABCDEFGHIJ)\"")"
+  ! scripts/checks/infra-no-identifiers "${f}"
+}
+
+test_infra_no_identifiers_rejects_cloudfront_distribution_id() {
+  f13="$(fixture "id = \"E$(printf '%s' 1A2B3C4D5E6F7)\"")"
+  f14="$(fixture "id = \"E$(printf '%s' 1A2B3C4D5E6F)\"")"
+  ! scripts/checks/infra-no-identifiers "${f13}" && ! scripts/checks/infra-no-identifiers "${f14}"
+}
+
+test_infra_no_identifiers_rejects_access_key_and_email() {
+  key="$(fixture "k = \"AKIA$(printf '%s' ABCDEFGHIJKLMNOP)\"")"
+  mail="$(fixture "owner = \"someone$(printf '@')example.org\"")"
+  ! scripts/checks/infra-no-identifiers "${key}" && ! scripts/checks/infra-no-identifiers "${mail}"
+}
+
+test_infra_no_identifiers_does_not_print_the_identifier() {
+  id="Z$(printf '%s' 0123456789ABCDEFGHIJ)"
+  f="$(fixture "zone_id = \"${id}\"")"
+  out="$(scripts/checks/infra-no-identifiers "${f}" 2>&1 || true)"
+  case "${out}" in
+  *"${id}"*) return 1 ;;
+  *hosted-zone-id*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+test_infra_no_identifiers_allows_placeholders_and_interpolated_arns() {
+  f="$(mktemp)"
+  cat >"${f}" <<'EOF'
+certificate_arn = "arn:aws:acm:us-east-1:<account-id>:certificate/<uuid>"
+principal = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
+condition = can(regex("^arn:aws[a-z-]*:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$", var.certificate_arn))
+hsts = 63072000
+ENVIRONMENT_NAME = "production"
+EOF
+  scripts/checks/infra-no-identifiers "${f}"
+}
+
+test_infra_no_identifiers_ignores_lock_file_hashes() {
+  f="$(fixture "    \"zh:0$(printf '%s' 123456789012)abcdef0123456789abcdef0123456789abcdef0123456789abcdef012\",
+    \"h1:Z$(printf '%s' 0123456789ABCDEFGHIJ)/abc+def=\",")"
+  scripts/checks/infra-no-identifiers "${f}"
+}
+
+test_infra_no_identifiers_passes_on_committed_infra() {
+  scripts/checks/infra-no-identifiers
+}

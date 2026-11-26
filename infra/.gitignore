@@ -1,0 +1,11 @@
+# OpenTofu working state and anything account-specific: never committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+backend.hcl
+!*.example
