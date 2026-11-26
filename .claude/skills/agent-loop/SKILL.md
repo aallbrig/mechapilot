@@ -70,7 +70,7 @@ Reply `Agent Loop: no work remains.` and end your turn. The Supervisor sees an i
 These belong to the owner. Record them as a `ready-for-human` checklist on the issue and move on:
 
 - creating `v*` tags or releases, and deploying a new release to Production
-- applying infrastructure (`task infra:plan`, `task infra:apply`, `tofu`), DNS changes, branch protection or rulesets
+- applying infrastructure (the `task infra:*` targets beyond `task lint`, `tofu`), DNS changes, branch protection or rulesets
 - adding, rotating or reading secrets
 - merging any way other than `task merge-gate`, or bypassing a hook or check
 
