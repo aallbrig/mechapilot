@@ -1,0 +1,116 @@
+#!/bin/sh
+# Enforce the Marketing Site's static budgets on built site directories (#30).
+# A fast, fail-closed pre-filter; scripts/site-observe then lets Chrome decide.
+#   - files: only allow-listed extensions (lower case); text files must be UTF-8
+#     without a BOM, NUL bytes or C0 controls other than TAB, LF, CR and FF
+#   - CSS: all .css files together under 30 KiB, and no url(), image-set(),
+#     @import, @font-face, expression() or backslash escapes at all
+#   - no JavaScript: no .js/.mjs/.cjs/.wasm files; <script> only as a JSON-LD
+#     data block; no on*= handlers; no javascript:/vbscript:/data: URLs
+#   - no third-party loads: an absolute or protocol-relative URL may only appear
+#     in <a href> (navigation) and <link rel="canonical" href>; no ping, base,
+#     style, url() other than url(#id), SMIL animation, embedded documents or
+#     plugins; meta http-equiv only as the exact site Content-Security-Policy,
+#     which every HTML page must carry; comments must be unambiguous
+#   - no tool directives: no html-validate-* comments in the build or in site/
+# HTML is scanned by a small tokenizer (quote-aware, so '<' or '>' inside an
+# attribute value cannot end a tag). Attribute values are case folded, have
+# tab/CR/LF/FF removed (browsers strip them from URLs) and have numeric and
+# named character references decoded; an unknown named reference fails.
+# Usage: scripts/site-budget <built-site-dir>...
+set -eu
+LC_ALL=C
+export LC_ALL
+
+css_limit="${SITE_CSS_LIMIT_BYTES:-30720}"
+if [ "$#" -eq 0 ]; then
+  echo "usage: site-budget <built-site-dir>..." >&2
+  exit 64
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+status=0
+fail() {
+  printf 'site-budget: %s\n' "$*" >&2
+  status=1
+}
+
+# Tab, CR, LF and FF become \001, so each file is one awk record and the
+# tokenizer can tell "whitespace between attributes" from "inside a value".
+flatten() {
+  tr '\t\r\n\f' '\001\001\001\001' <"$1" | tr '[:upper:]' '[:lower:]'
+  printf '\n'
+}
+
+html_rules="$(dirname "$0")/site-budget.awk"
+
+css_rules() {
+  # $1: label, $2: flattened text
+  if grep -Eq '\\|url[[:space:]]*\(|image-set|@import|@font-face|expression[[:space:]]*\(' "$2"; then
+    fail "$1: CSS may not contain url(), image-set(), @import, @font-face, expression() or backslash escapes"
+  fi
+}
+
+text_rules() {
+  # $1: a text file. UTF-8 (iconv round trip), no BOM, no NUL, no C0 controls but TAB/LF/CR/FF.
+  if ! iconv -f UTF-8 -t UTF-8 <"$1" >/dev/null 2>&1; then fail "$1: not valid UTF-8"; fi
+  bom="$(head -c 3 "$1" | od -An -tx1 | tr -d ' \n')"
+  if [ "${bom}" = efbbbf ]; then fail "$1: has a UTF-8 byte order mark"; fi
+  all="$(wc -c <"$1" | tr -d ' ')"
+  clean="$(tr -d '\000-\010\013\016-\037\177' <"$1" | wc -c | tr -d ' ')"
+  if [ "${all}" != "${clean}" ]; then fail "$1: contains NUL or control characters"; fi
+}
+
+for dir in "$@"; do
+  if [ ! -f "${dir}/index.html" ]; then
+    fail "${dir}/index.html missing (run task site:build)"
+    continue
+  fi
+
+  find "${dir}" -type f >"${work}/files"
+  find "${dir}" ! -type f ! -type d >"${work}/special"
+  if [ -s "${work}/special" ]; then fail "${dir}: only regular files and directories are allowed (symlinks found)"; fi
+  while IFS= read -r f; do
+    case "${f##*/}" in
+      *.html | *.css | *.svg | *.xml | *.txt | *.webmanifest | *.json) text_rules "${f}" ;;
+      *.png | *.webp | *.avif | *.ico) ;;
+      *) fail "${f}: file type not allowed in the site build" ;;
+    esac
+  done <"${work}/files"
+
+  css_bytes=0
+  find "${dir}" -type f -iname '*.css' >"${work}/css"
+  while IFS= read -r css; do
+    size="$(wc -c <"${css}" | tr -d ' ')"
+    css_bytes=$((css_bytes + size))
+    flatten "${css}" >"${work}/flat"
+    css_rules "${css}" "${work}/flat"
+  done <"${work}/css"
+  if [ "${css_bytes}" -gt "${css_limit}" ]; then fail "${dir}: CSS is ${css_bytes} bytes (limit ${css_limit})"; fi
+
+  find "${dir}" -type f \( -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -iname '*.wasm' \) >"${work}/js"
+  if [ -s "${work}/js" ]; then
+    js_list="$(tr '\n' ' ' <"${work}/js")"
+    fail "${dir}: JavaScript files are not allowed: ${js_list}"
+  fi
+
+  find "${dir}" -type f \( -iname '*.html' -o -iname '*.htm' -o -iname '*.svg' -o -iname '*.xhtml' -o -iname '*.xml' \) >"${work}/pages"
+  pages=0
+  while IFS= read -r page; do
+    pages=$((pages + 1))
+    flatten "${page}" >"${work}/flat"
+    awk -v page="${page}" -f "${html_rules}" "${work}/flat" || status=1
+  done <"${work}/pages"
+
+  if [ "${pages}" -eq 0 ]; then fail "${dir}: no HTML pages found"; fi
+  printf 'site-budget: %s: %s pages, CSS %s bytes (limit %s)\n' "${dir}" "${pages}" "${css_bytes}" "${css_limit}"
+done
+
+# Source templates must not smuggle in validator directives (e.g. via safeHTML).
+src="${SITE_SOURCE_DIR:-site}"
+if [ -d "${src}" ] && grep -RIil 'html-validate-' "${src}" >"${work}/directives" 2>/dev/null; then
+  while IFS= read -r f; do fail "${f}: html-validate directives are not allowed"; done <"${work}/directives"
+fi
+exit "${status}"

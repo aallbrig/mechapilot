@@ -1,0 +1,38 @@
+{{- $title := .Title | default site.Title -}}
+{{- if not .IsHome }}{{ $title = printf "%s · %s" .Title site.Title }}{{ end -}}
+{{- $description := .Description | default site.Params.description -}}
+{{- $ogImage := "og-image.png" | absURL -}}
+<meta charset="utf-8">
+{{- /* Enforced by the browser whatever a check misses. connect-src lets crawlers and Lighthouse fetch robots.txt in-page. frame-ancestors is ignored
+  (with a console warning) in a meta tag, so it belongs in the response headers. */}}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ $title }}</title>
+<meta name="description" content="{{ $description }}">
+{{- if site.Params.noindex }}
+<meta name="robots" content="noindex, nofollow">
+{{- end }}
+<link rel="canonical" href="{{ .Permalink }}">
+<meta name="theme-color" content="{{ site.Params.themeColor }}">
+<meta name="color-scheme" content="dark">
+{{- $css := resources.Get "css/main.css" | minify | fingerprint "sha384" }}
+<link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+<link rel="icon" href="{{ "favicon.ico" | relURL }}" sizes="32x32">
+<link rel="icon" href="{{ "favicon.svg" | relURL }}" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{{ "apple-touch-icon.png" | relURL }}">
+<link rel="manifest" href="{{ "site.webmanifest" | relURL }}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{ site.Title }}">
+<meta property="og:title" content="{{ $title }}">
+<meta property="og:description" content="{{ $description }}">
+<meta property="og:url" content="{{ .Permalink }}">
+<meta property="og:image" content="{{ $ogImage }}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Mecha Fighter: a mech dogfighting in a sky full of enemy fighters">
+<meta property="og:locale" content="{{ replace site.Language.Locale "-" "_" }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ $title }}">
+<meta name="twitter:description" content="{{ $description }}">
+<meta name="twitter:image" content="{{ $ogImage }}">
+<meta name="twitter:image:alt" content="Mecha Fighter: a mech dogfighting in a sky full of enemy fighters">

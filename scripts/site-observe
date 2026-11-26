@@ -1,0 +1,31 @@
+#!/bin/sh
+# Load every document of one or more built site roots in the pinned Chrome for
+# Testing and fail on any script execution, off-origin request, console
+# message, CSP violation or HTTP error (see scripts/site-observe.mjs).
+# Chrome is driven over raw CDP; no automation library runs in the page.
+# Installs the pinned Node tooling and Chrome on first use.
+# Usage: scripts/site-observe <site-root>...
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: site-observe <site-root>..." >&2
+  exit 64
+fi
+# Exit status: 0 clean, 1 findings, 2 the check could not run.
+# Use the pinned Node (.mise.toml). A hook or a bare shell may have another
+# node first on PATH, so fall back to running it through mise.
+node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+run_node="node"
+if [ "${node_major}" -lt 24 ]; then
+  if command -v mise >/dev/null 2>&1; then
+    run_node="mise exec -- node"
+  else
+    echo "site-observe: needs the pinned Node 24 (found major ${node_major}) and mise is not on PATH" >&2
+    exit 2
+  fi
+fi
+if [ ! -f node_modules/@puppeteer/browsers/package.json ]; then
+  npm ci --ignore-scripts --no-audit --no-fund >&2 || exit 2
+fi
+chrome="$(scripts/site-chrome)" || exit 2
+${run_node} scripts/site-observe.mjs "${chrome}" "$@"

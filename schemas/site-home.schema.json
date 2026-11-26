@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/site-home.schema.json",
+  "title": "Marketing Site home page copy (site/data/home.yaml)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hero", "features", "controls", "cta"],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" }
+  },
+  "properties": {
+    "hero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eyebrow", "lead", "play", "secondary", "note"],
+      "properties": {
+        "eyebrow": { "$ref": "#/$defs/text" },
+        "lead": { "$ref": "#/$defs/text" },
+        "play": { "$ref": "#/$defs/text" },
+        "secondary": { "$ref": "#/$defs/text" },
+        "note": { "$ref": "#/$defs/text" }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading", "items"],
+      "properties": {
+        "heading": { "$ref": "#/$defs/text" },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["icon", "title", "text"],
+            "properties": {
+              "icon": {
+                "description": "Name of an inline SVG icon in site/layouts/_partials/icon.html",
+                "enum": ["radar", "bolt", "impact", "trophy"]
+              },
+              "title": { "$ref": "#/$defs/text" },
+              "text": { "$ref": "#/$defs/text" }
+            }
+          }
+        }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading", "intro", "schemes"],
+      "properties": {
+        "heading": { "$ref": "#/$defs/text" },
+        "intro": { "$ref": "#/$defs/text" },
+        "schemes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["device", "move", "fire"],
+            "properties": {
+              "device": { "enum": ["Keyboard", "Gamepad", "Touch"] },
+              "move": { "$ref": "#/$defs/text" },
+              "fire": { "$ref": "#/$defs/text" }
+            }
+          }
+        }
+      }
+    },
+    "cta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading", "text", "play"],
+      "properties": {
+        "heading": { "$ref": "#/$defs/text" },
+        "text": { "$ref": "#/$defs/text" },
+        "play": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

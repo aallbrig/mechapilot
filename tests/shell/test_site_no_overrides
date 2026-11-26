@@ -1,0 +1,42 @@
+#!/bin/sh
+# Tests for scripts/site-no-overrides in throwaway directories.
+
+overrides_rc() {
+  # $1: a file to create (relative), or "" for none
+  script="$(pwd)/scripts/site-no-overrides"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/build/site" "${d}/node_modules/x"
+  : >"${d}/.htmlvalidate.json"
+  : >"${d}/lychee.toml"
+  : >"${d}/node_modules/x/.htmlvalidate.json"
+  if [ -n "$1" ]; then : >"${d}/$1"; fi
+  rc=0
+  (cd "${d}" && "${script}" >/dev/null 2>&1) || rc=$?
+  rm -rf "${d}"
+  printf '%s' "${rc}"
+}
+
+test_site_no_overrides_accepts_root_configs() {
+  rc="$(overrides_rc '')"
+  [ "${rc}" = 0 ]
+}
+
+test_site_no_overrides_rejects_lycheeignore() {
+  rc="$(overrides_rc .lycheeignore)"
+  [ "${rc}" = 1 ]
+}
+
+test_site_no_overrides_rejects_htmlvalidateignore() {
+  rc="$(overrides_rc .htmlvalidateignore)"
+  [ "${rc}" = 1 ]
+}
+
+test_site_no_overrides_rejects_nested_htmlvalidate_config() {
+  rc="$(overrides_rc build/site/.htmlvalidate.json)"
+  [ "${rc}" = 1 ]
+}
+
+test_site_no_overrides_rejects_lycheecache() {
+  rc="$(overrides_rc .lycheecache)"
+  [ "${rc}" = 1 ]
+}

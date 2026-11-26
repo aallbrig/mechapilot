@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/lighthouserc.schema.json",
+  "title": "Lighthouse CI configuration (lighthouserc.json), restricted to what this repo uses",
+  "description": "Authored here: neither Lighthouse CI nor SchemaStore publishes a schema. Keys follow https://github.com/GoogleChrome/lighthouse-ci/blob/v0.16.1/docs/configuration.md. Every object is closed, and the four category budgets are required with floors, so a budget cannot be dropped or loosened without editing this schema (a verification-stack change).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ci"],
+  "$defs": {
+    "budget": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "error" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minScore", "aggregationMethod"],
+          "properties": {
+            "minScore": { "type": "number", "maximum": 1 },
+            "aggregationMethod": { "enum": ["median-run", "pessimistic"] }
+          }
+        }
+      ],
+      "items": false,
+      "minItems": 2
+    }
+  },
+  "properties": {
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collect", "assert"],
+      "properties": {
+        "collect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["staticDistDir", "url", "numberOfRuns"],
+          "properties": {
+            "staticDistDir": { "type": "string", "pattern": "^build/site/" },
+            "url": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "pattern": "^http://localhost/" }
+            },
+            "numberOfRuns": { "type": "integer", "minimum": 1, "maximum": 9 },
+            "settings": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "chromeFlags": { "type": "string" },
+                "onlyCategories": {
+                  "type": "array",
+                  "items": { "enum": ["performance", "accessibility", "best-practices", "seo"] },
+                  "uniqueItems": true
+                }
+              }
+            }
+          }
+        },
+        "assert": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["assertions"],
+          "properties": {
+            "assertions": {
+              "type": "object",
+              "required": [
+                "categories:performance",
+                "categories:accessibility",
+                "categories:best-practices",
+                "categories:seo"
+              ],
+              "additionalProperties": { "$ref": "#/$defs/budget" },
+              "properties": {
+                "categories:performance": {
+                  "allOf": [{ "$ref": "#/$defs/budget" }, { "prefixItems": [true, { "properties": { "minScore": { "minimum": 0.95 } } }] }]
+                },
+                "categories:accessibility": {
+                  "allOf": [{ "$ref": "#/$defs/budget" }, { "prefixItems": [true, { "properties": { "minScore": { "const": 1 } } }] }]
+                },
+                "categories:best-practices": {
+                  "allOf": [{ "$ref": "#/$defs/budget" }, { "prefixItems": [true, { "properties": { "minScore": { "minimum": 0.95 } } }] }]
+                },
+                "categories:seo": {
+                  "allOf": [{ "$ref": "#/$defs/budget" }, { "prefixItems": [true, { "properties": { "minScore": { "minimum": 0.95 } } }] }]
+                }
+              }
+            }
+          }
+        },
+        "upload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "outputDir"],
+          "properties": {
+            "target": { "const": "filesystem" },
+            "outputDir": { "type": "string", "pattern": "^build/" }
+          }
+        }
+      }
+    }
+  }
+}

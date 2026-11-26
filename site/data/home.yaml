@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=../../schemas/site-home.schema.json
+# Copy for the Marketing Site home page. Validated by schemas/site-home.schema.json.
+hero:
+  eyebrow: "Free arcade shooter · plays in your browser"
+  lead: >-
+    Pilot a mech through an endless sky where enemies come from every direction.
+    Twin-stick controls, one-hit kills and a score that only goes up while you stay alive.
+  play: "Play now"
+  secondary: "How to play"
+  note: "No download, no account. Keyboard, gamepad or touch."
+
+features:
+  heading: "Built for one more run"
+  items:
+    - icon: "radar"
+      title: "Dogfight in every direction"
+      text: "Like Time Pilot, the fight wraps all the way around you. Yellow indicators point at every enemy closing in, so nothing gets a free shot."
+    - icon: "bolt"
+      title: "Arcade-pure combat"
+      text: "Four shots a second, enemies drop in one hit, every kill is worth 100 points. Easy to learn, hard to put down."
+    - icon: "impact"
+      title: "Juicy by design"
+      text: "Hit-stop, screen shake, particles and punchy audio make every kill land."
+    - icon: "trophy"
+      title: "Beat your Scoreboard"
+      text: "Sign your runs with three initials. Your Scoreboard is saved in your browser, ready for the next attempt."
+
+controls:
+  heading: "How to play"
+  intro: "Move with one stick, aim and fire with the other. Holding a fire direction keeps the guns going."
+  schemes:
+    - device: "Keyboard"
+      move: "W A S D or arrow keys"
+      fire: "I J K L"
+    - device: "Gamepad"
+      move: "Left stick or D-pad"
+      fire: "Right stick"
+    - device: "Touch"
+      move: "Left on-screen stick"
+      fire: "Right on-screen stick"
+
+cta:
+  heading: "Ready for launch?"
+  text: "The sky is already full of enemies. Jump in."
+  play: "Play Mecha Fighter"

@@ -34,7 +34,10 @@ while IFS="${tab}" read -r change path; do
     .shellcheckrc | shellcheckrc | .yamllint | .yamllint.yml | .yamllint.yaml | .gitleaks.toml | \
       .gitleaksignore | .editorconfig | gdlintrc | .gdlintrc | gdformatrc | .gdformatrc | .gitattributes | .gitignore | \
       .tflint.hcl | *.tflint.hcl | trivy*.yaml | trivy*.yml | .trivyignore | .trivyignore.* | \
-      .mise.toml | mise.toml | mise.*.toml | .mise.*.toml | .tool-versions)
+      .mise.toml | mise.toml | mise.*.toml | .mise.*.toml | .tool-versions | \
+      .htmlvalidate.json | .htmlvalidate.js | .htmlvalidate.cjs | .htmlvalidate.mjs | \
+      lighthouserc.json | .lighthouserc.json | lighthouserc.js | .lighthouserc.js | lighthouserc.cjs | .lighthouserc.cjs | \
+      lighthouserc.yml | .lighthouserc.yml | lighthouserc.yaml | .lighthouserc.yaml | lychee.toml | .lychee.toml | .lycheeignore | .lycheecache | .htmlvalidateignore | .npmrc)
       why="tool config"
       ;;
     *) ;;
@@ -54,7 +57,7 @@ done <"${diff}"
 # Added lines that silence a checker anywhere in the tree.
 git -c core.quotePath=false diff --no-renames -U0 "${base}...${head}" |
   grep -E '^\+[^+]' |
-  grep -nE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)|trivy:ignore|tfsec:ignore|tflint-ignore' |
+  grep -niE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)|trivy:ignore|tfsec:ignore|tflint-ignore|html-validate-(disable|enable)' |
   sed 's/^/inline suppression\t+\t/' >>"${reasons}" || true
 
 if [ -s "${reasons}" ]; then

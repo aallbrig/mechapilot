@@ -1,0 +1,11 @@
+{{- /* The footer's copyright year: params.copyrightYear (task site:build sets it from the
+  last git commit). Only `hugo server` may fall back to the clock. */ -}}
+{{- $year := site.Params.copyrightYear | default "" -}}
+{{- if not $year -}}
+  {{- if hugo.IsDevelopment -}}
+    {{- $year = now.Year -}}
+  {{- else -}}
+    {{- errorf "params.copyrightYear is not set: build with task site:build" -}}
+  {{- end -}}
+{{- end -}}
+{{- return $year -}}

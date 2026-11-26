@@ -1,0 +1,12 @@
+# QA Environment (GitHub Pages): the site under /mechapilot/, the game under
+# /mechapilot/game/. The output is nested under mechapilot/ so serving
+# build/site/qa as a web root reproduces the Pages URL layout locally.
+# Build: hugo --source site --environment qa
+baseURL = "https://aallbrig.github.io/mechapilot/"
+publishDir = "../build/site/qa/mechapilot"
+
+[params]
+# Resolved against baseURL: /mechapilot/game/
+gameURL = "game/"
+# QA mirrors Production, so keep it out of search indexes.
+noindex = true

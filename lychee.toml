@@ -1,0 +1,10 @@
+# lychee: internal link check of the built Marketing Site (task site:links).
+# Offline: only local files are checked; external URLs are skipped, never fetched.
+offline = true
+include_fragments = "full"
+no_progress = true
+# The Game Site (/mechapilot/game/ on QA) is deployed separately (#18), so it is
+# not in the site build; Production links it absolutely (skipped offline).
+exclude = ['^file://.*/build/site/qa/mechapilot/game/?$']
+# Directory links must resolve to an index.html, as on GitHub Pages and S3.
+index_files = ["index.html"]

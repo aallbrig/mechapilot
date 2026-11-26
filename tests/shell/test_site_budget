@@ -1,0 +1,316 @@
+#!/bin/sh
+# Tests for scripts/site-budget against small fixture sites (removed after each test).
+
+budget_csp="default-src 'none'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
+
+budget_site() {
+  d="$(mktemp -d)"
+  printf '%s\n' '<!DOCTYPE html><html lang="en"><head><title>t &amp; co</title>' \
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"${budget_csp}\">" \
+    '<link rel="canonical" href="https://example.com/">' \
+    '<meta property="og:image" content="https://example.com/og.png">' \
+    '<link rel="stylesheet" href="/main.css"></head><body>' \
+    '<a href="https://example.com/game/">Play</a><svg viewBox="0 0 1 1"><use href="#x"/></svg>' "$1" \
+    '<p>&copy; 2026</p><script type="application/ld+json">{"a":"b"}</script></body></html>' >"${d}/index.html"
+  printf 'body{color:red}\n' >"${d}/main.css"
+  printf '%s' "${d}"
+}
+
+budget_rc() {
+  rc=0
+  SITE_SOURCE_DIR="$1/no-source" scripts/site-budget "$1" >/dev/null 2>&1 || rc=$?
+  rm -rf "$1"
+  printf '%s' "${rc}"
+}
+
+expect_budget() {
+  # $1: expected exit status, $2: extra body HTML
+  site="$(budget_site "$2")"
+  rc="$(budget_rc "${site}")"
+  [ "${rc}" = "$1" ]
+}
+
+expect_css() {
+  # $1: expected exit status, $2: CSS text
+  site="$(budget_site '')"
+  printf '%s\n' "$2" >"${site}/main.css"
+  rc="$(budget_rc "${site}")"
+  [ "${rc}" = "$1" ]
+}
+
+test_site_budget_accepts_clean_site() {
+  expect_budget 0 '<img src="/a.png" alt="a < b > c" title="Hold on = keep firing"><p>on=1</p>'
+}
+
+test_site_budget_rejects_uppercase_script() {
+  expect_budget 1 '<SCRIPT SRC="/x"></SCRIPT>'
+}
+
+test_site_budget_rejects_multiline_script() {
+  expect_budget 1 '<script
+  src="/x"></script>'
+}
+
+test_site_budget_rejects_handler_in_later_attribute() {
+  expect_budget 1 '<img src="/a.png" alt="a" ONLOAD="go()">'
+}
+
+test_site_budget_rejects_handler_as_first_attribute() {
+  expect_budget 1 '<button onclick="fetch(1)">x</button>'
+}
+
+test_site_budget_rejects_body_onload() {
+  expect_budget 1 '<body onload="x()">'
+}
+
+test_site_budget_rejects_img_onerror_first() {
+  expect_budget 1 '<img onerror="x()" src="/a.png" alt="a">'
+}
+
+test_site_budget_rejects_svg_slash_onload() {
+  expect_budget 1 '<svg/onload=x()>'
+}
+
+test_site_budget_rejects_handler_after_quoted_lt() {
+  expect_budget 1 '<img alt="<" onerror=x() src="/a.png">'
+}
+
+test_site_budget_rejects_javascript_url() {
+  expect_budget 1 '<a href="JavaScript:go()">x</a>'
+}
+
+test_site_budget_rejects_entity_javascript_url() {
+  expect_budget 1 '<a href="java&#115;cript:go()">x</a>'
+}
+
+test_site_budget_rejects_tab_javascript_url() {
+  expect_budget 1 "$(printf '<a href="java\tscript:go()">x</a>')"
+}
+
+test_site_budget_rejects_named_entity_javascript_url() {
+  expect_budget 1 '<a href="javascript&colon;go()">x</a>'
+}
+
+test_site_budget_rejects_unknown_named_entity() {
+  expect_budget 1 '<img alt="a" src="&unknownref;">'
+}
+
+test_site_budget_rejects_external_stylesheet_any_order() {
+  expect_budget 1 '<link href="https://cdn.example.com/x.css"
+  rel="stylesheet">'
+}
+
+test_site_budget_rejects_duplicate_rel() {
+  expect_budget 1 '<link rel="stylesheet" rel="canonical" href="https://cdn.example.com/x.css">'
+}
+
+test_site_budget_rejects_external_image() {
+  expect_budget 1 '<img alt="a" src="//cdn.example.com/a.png">'
+}
+
+test_site_budget_rejects_entity_protocol_relative_image() {
+  expect_budget 1 '<img alt="a" src="&#47;&#x2F;cdn.example.com/a.png">'
+}
+
+test_site_budget_rejects_backslash_url() {
+  expect_budget 1 '<img alt="a" src="/\cdn.example.com/a.png">'
+}
+
+test_site_budget_rejects_external_srcset() {
+  expect_budget 1 '<img alt="a" src="/a.png" srcset="/a.png 1x, https://cdn.example.com/b.png 2x">'
+}
+
+test_site_budget_rejects_anchor_ping() {
+  expect_budget 1 '<a href="/x" ping="https://tracker.example.com/">x</a>'
+}
+
+test_site_budget_rejects_meta_refresh() {
+  expect_budget 1 '<meta http-equiv="refresh" content="0;url=https://example.com/">'
+}
+
+test_site_budget_rejects_base() {
+  expect_budget 1 '<base href="https://cdn.example.com/">'
+}
+
+test_site_budget_rejects_iframe() {
+  expect_budget 1 '<iframe title="t" src="/x.html"></iframe>'
+}
+
+test_site_budget_rejects_style_attribute() {
+  expect_budget 1 '<p style="background:url(https://cdn.example.com/a.png)">x</p>'
+}
+
+test_site_budget_rejects_validator_directive_comment() {
+  expect_budget 1 '<!-- [html-validate-disable-next wcag/h37] --><img src="/a.png">'
+}
+
+test_site_budget_rejects_validator_directive_in_source() {
+  site="$(budget_site '')"
+  mkdir -p "${site}/src/layouts"
+  printf '{{ "<!-- html-validate-disable -->" | safeHTML }}\n' >"${site}/src/layouts/x.html"
+  rc=0
+  SITE_SOURCE_DIR="${site}/src" scripts/site-budget "${site}" >/dev/null 2>&1 || rc=$?
+  rm -rf "${site}"
+  [ "${rc}" = 1 ]
+}
+
+test_site_budget_rejects_external_css_url() {
+  expect_css 1 'body{background:URL( "https://cdn.example.com/a.png" )}'
+}
+
+test_site_budget_rejects_css_import() {
+  expect_css 1 '@IMPORT "/other.css";'
+}
+
+test_site_budget_rejects_css_escape() {
+  expect_css 1 '@\69mport "https://cdn.example.com/x.css";'
+}
+
+test_site_budget_rejects_css_image_set() {
+  expect_css 1 'body{background:image-set("https://cdn.example.com/a.png" 1x)}'
+}
+
+test_site_budget_rejects_oversized_css() {
+  site="$(budget_site '')"
+  rc=0
+  SITE_CSS_LIMIT_BYTES=4 SITE_SOURCE_DIR="${site}/none" scripts/site-budget "${site}" >/dev/null 2>&1 || rc=$?
+  rm -rf "${site}"
+  [ "${rc}" = 1 ]
+}
+
+test_site_budget_rejects_js_file() {
+  site="$(budget_site '')"
+  : >"${site}/app.JS"
+  rc="$(budget_rc "${site}")"
+  [ "${rc}" = 1 ]
+}
+
+test_site_budget_rejects_missing_index() {
+  d="$(mktemp -d)"
+  rc="$(budget_rc "${d}")"
+  [ "${rc}" = 1 ]
+}
+
+expect_file() {
+  # $1: expected exit status, $2: file name to add, stdin: its content
+  site="$(budget_site '')"
+  cat >"${site}/$2"
+  rc="$(budget_rc "${site}")"
+  [ "${rc}" = "$1" ]
+}
+
+test_site_budget_rejects_shtml_file() {
+  printf '<p>x</p>\n' | expect_file 1 page.shtml
+}
+
+test_site_budget_rejects_xht_file() {
+  printf '<p>x</p>\n' | expect_file 1 page.xht
+}
+
+test_site_budget_rejects_extensionless_file() {
+  printf 'x\n' | expect_file 1 CNAME
+}
+
+test_site_budget_rejects_uppercase_extension() {
+  printf '<p>x</p>\n' | expect_file 1 page.HTML
+}
+
+test_site_budget_rejects_utf16_page() {
+  printf '\377\376<\000p\000>\000\n\000' | expect_file 1 page.html
+}
+
+test_site_budget_rejects_bom() {
+  printf '\357\273\277body{color:red}\n' | expect_file 1 extra.css
+}
+
+test_site_budget_rejects_nul_byte() {
+  printf 'x\000<p>y</p>\n' | expect_file 1 page.html
+}
+
+test_site_budget_rejects_vertical_tab() {
+  printf 'User-agent: *\013\n' | expect_file 1 robots.txt
+}
+
+test_site_budget_accepts_allowed_text_file() {
+  printf 'User-agent: *\nAllow: /\n' | expect_file 0 robots.txt
+}
+
+test_site_budget_rejects_missing_csp() {
+  site="$(budget_site '')"
+  sed 's/http-equiv="Content-Security-Policy"/name="x"/' "${site}/index.html" >"${site}/x.txt"
+  mv "${site}/x.txt" "${site}/index.html"
+  rc="$(budget_rc "${site}")"
+  [ "${rc}" = 1 ]
+}
+
+test_site_budget_rejects_weakened_csp() {
+  expect_budget 1 "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'\">"
+}
+
+test_site_budget_rejects_abrupt_comment() {
+  expect_budget 1 '<!--><p>x</p><!-- y -->'
+}
+
+test_site_budget_rejects_bang_comment_close() {
+  expect_budget 1 '<!-- a --!><p>x</p><!-- b -->'
+}
+
+test_site_budget_rejects_svg_title_script() {
+  expect_budget 1 '<svg><title><script>x()</script></title></svg>'
+}
+
+test_site_budget_rejects_svg_textarea_img() {
+  expect_budget 1 '<svg><textarea><img alt="" src="https://3p.invalid/a.png"></textarea></svg>'
+}
+
+test_site_budget_rejects_control_char_url() {
+  expect_budget 1 '<img alt="" src="&#11;https://3p.invalid/a.png">'
+}
+
+test_site_budget_rejects_svg_mask_url() {
+  expect_budget 1 '<svg><rect mask="url(https://3p.invalid/m.svg#m)"/></svg>'
+}
+
+test_site_budget_accepts_svg_fragment_url() {
+  expect_budget 0 '<svg><rect fill="url(#grad-1)"/></svg>'
+}
+
+test_site_budget_rejects_svg_set() {
+  expect_budget 1 '<svg><image><set attributeName="href" to="https://3p.invalid/a.png"/></image></svg>'
+}
+
+test_site_budget_rejects_xml_stylesheet_in_svg() {
+  printf '<?xml-stylesheet href="https://3p.invalid/a.css"?><svg xmlns="http://www.w3.org/2000/svg"/>\n' | expect_file 1 icon.svg
+}
+
+test_site_budget_accepts_uppercase_canonical() {
+  expect_budget 0 '<link rel="CANONICAL" href="https://example.com/x">'
+}
+
+test_site_budget_rejects_prefixed_script_element() {
+  expect_budget 1 '<svg><s:script>x()</s:script></svg>'
+}
+
+test_site_budget_rejects_prefixed_foreignobject() {
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg"><svg:foreignObject/></svg>' | expect_file 1 a.svg
+}
+
+test_site_budget_rejects_xmlns_prefix_declaration() {
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"/>' | expect_file 1 a.svg
+}
+
+test_site_budget_rejects_foreign_svg_namespace() {
+  printf '%s\n' '<svg xmlns="http://www.w3.org/1999/xhtml"/>' | expect_file 1 a.svg
+}
+
+test_site_budget_rejects_doctype_internal_subset() {
+  printf '%s\n' '<!DOCTYPE r [<!ATTLIST r a CDATA "x">]><r/>' | expect_file 1 feed.xml
+}
+
+test_site_budget_rejects_entity_declaration() {
+  printf '%s\n' '<!DOCTYPE r [<!ENTITY e "<h:img src='"'https://3p.invalid/a.png'"'/>">]><r>&e;</r>' | expect_file 1 feed.xml
+}
+
+test_site_budget_accepts_plain_sitemap() {
+  printf '%s\n' '<?xml version="1.0" encoding="utf-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.com/</loc></url></urlset>' | expect_file 0 sitemap.xml
+}

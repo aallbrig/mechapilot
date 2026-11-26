@@ -1,0 +1,8 @@
+# Production: the Marketing Site at the apex, the Game Site at game.
+# Build: hugo --source site --environment production
+baseURL = "https://mechafighter.com/"
+publishDir = "../build/site/production"
+
+[params]
+gameURL = "https://game.mechafighter.com/"
+noindex = false

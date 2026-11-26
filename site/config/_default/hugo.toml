@@ -1,0 +1,42 @@
+# Marketing Site: settings shared by every environment.
+# Each environment (config/qa, config/production) sets baseURL, publishDir and
+# params.gameURL. Templates never hardcode an absolute URL.
+#
+# `hugo server` (the development environment) uses these defaults.
+baseURL = "http://localhost:1313/"
+title = "Mecha Fighter"
+locale = "en-US"
+defaultContentLanguage = "en"
+enableRobotsTXT = true
+disableKinds = ["rss", "section", "taxonomy", "term"]
+# A dated build stamp would make every build differ; the site has no dates.
+enableGitInfo = false
+
+[params]
+description = "Mecha Fighter is a free arcade shooter you play in your browser: Time Pilot, reforged with mechs. Dogfight in every direction, chain kills and chase a high score."
+tagline = "Time Pilot, reforged with mechs."
+# Relative paths resolve under baseURL; absolute URLs are used as they are.
+gameURL = "game/"
+# true adds <meta name="robots" content="noindex, nofollow"> to every page, and
+# a deny-all robots.txt (which only takes effect when served at a host root).
+noindex = false
+repoURL = "https://github.com/aallbrig/mechapilot"
+themeColor = "#0b1020"
+# Copyright year for the footer. task site:build sets it from the last git
+# commit (HUGO_PARAMS_COPYRIGHTYEAR), so a build never depends on the clock.
+copyrightYear = ""
+
+# Slot for a gameplay capture recorded from the Godot build. Until one exists,
+# the hero shows the SVG art in layouts/_partials/hero-art.html.
+[params.capture]
+video = ""
+poster = ""
+width = 1280
+height = 720
+
+[sitemap]
+changefreq = "weekly"
+priority = 1.0
+
+[minify]
+minifyOutput = false
