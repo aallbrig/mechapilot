@@ -126,6 +126,12 @@ case "\$1" in
   *) ;;
 esac
 EOF
+  # lsof reports the pids in <dir>/lsof-users as using the checkout.
+  cat >"${bin}/lsof" <<EOF
+#!/bin/sh
+if [ -s "$1/lsof-users" ]; then cat "$1/lsof-users"; else exit 1; fi
+EOF
+  chmod +x "${bin}/lsof"
   for tool in sandbox-exec bwrap socat; do
     printf '#!/bin/sh\nexit 0\n' >"${bin}/${tool}"
   done
@@ -381,12 +387,20 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
   expect "${head}" cat "${rt}/PIN" || return 1
   cmp -s .claude/skills/agent-loop/SKILL.md "${rt}/.claude/skills/agent-loop/SKILL.md" || return 1
   jq -e --arg r "Read(/${rt}/**)" '.permissions.allow | index($r)' "${settings}" >/dev/null || return 1
-  # What task ci would download was installed outside the sandbox and copied in.
-  [ -f "${d}/worktree/node_modules/.package-lock.json" ] || return 1
+  # What task ci:sandbox would download was installed outside the sandbox into
+  # a read-only dir in the state dir; nothing was written into the checkout.
+  deps="${d}/state/ci-deps/${head}"
+  [ -f "${deps}/node_modules/.package-lock.json" ] && [ -f "${deps}/npm-cache/index" ] || return 1
+  [ ! -w "${deps}/node_modules/.package-lock.json" ] || return 1
+  [ ! -e "${d}/worktree/node_modules" ] && [ ! -e "${d}/worktree/.agent-loop" ] || return 1
+  grep -qx "AGENT_LOOP_CI_DEPS='${deps}'" "${launcher}" || return 1
+  expect "${deps}" jq -r '.env.AGENT_LOOP_CI_DEPS' "${settings}" || return 1
+  # The session's git runs the pinned, read-only hooks.
+  grep -qx 'GIT_CONFIG_KEY_4=core.hooksPath' "${launcher}" || return 1
+  grep -qx "GIT_CONFIG_VALUE_4='${rt}/.githooks'" "${launcher}" || return 1
+  [ -x "${rt}/.githooks/pre-commit" ] && [ ! -w "${rt}/.githooks/pre-commit" ] || return 1
   # No browser is installed for the session: the Chrome steps run only in the ci check.
-  [ ! -e "${d}/worktree/build/browsers" ] || return 1
   ! grep -q '^npx ' "${d}/calls" || return 1
-  [ -f "${d}/worktree/.agent-loop/cache/npm/index" ] || return 1
   grep -q '^npm ci --ignore-scripts --no-audit --no-fund$' "${d}/calls" || return 1
   grep -qx 'npm_config_offline=true' "${launcher}" || return 1
   grep -q '^unset .* TMUX TMUX_PANE$' "${launcher}" || return 1
@@ -731,6 +745,7 @@ test_agent_loop_settings_sandbox_the_session() {
       return 1
     }
   done
+  jq -e '.permissions.allow | index("Bash(scripts/agent-loop-deps)")' "${f}" >/dev/null || return 1
   # Nothing in the allowlist pushes, calls the API directly, fetches arbitrary URLs or runs mise.
   expect '[]' jq -c '[.permissions.allow[] | select(test("^Bash\\((git push|gh api|curl|wget|mise|task loop:start|task loop:stop|scripts/agent-loop-supervisor)"))]' "${f}" || return 1
   # The session's settings never point at the worktree: hooks and the status line are added from the runtime copy.
@@ -803,50 +818,120 @@ test_supervisor_exports_only_the_pinned_runtime() {
   ! grep -q '^tmux split-window' "${d}/calls"
 }
 
-test_supervisor_refuses_symlinks_in_the_checkout() {
-  # A planted node_modules link: nothing is written through it, no session starts.
-  d="$(mktemp -d)"
-  stubs "${d}"
-  mkdir -p "${d}/worktree" "${d}/state" "${d}/elsewhere"
-  : >"${d}/elsewhere/keep"
-  ln -s "${d}/elsewhere" "${d}/worktree/node_modules"
-  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  out="$(supervisor "${d}" once 2>&1)" && return 1
-  printf '%s\n' "${out}" | grep -q 'refusing to provision node_modules: a symbolic link is on its path' || return 1
-  [ -f "${d}/elsewhere/keep" ] && [ ! -e "${d}/elsewhere/.package-lock.json" ] || return 1
-  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+# tree_state <dir>: every path below <dir> with its type and, for files, a checksum.
+tree_state() {
+  (cd "$1" && find . -print | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "${f}" ]; then
+      printf 'link %s\n' "${f}"
+    elif [ -f "${f}" ]; then
+      sum="$(cksum <"${f}")"
+      printf 'file %s %s\n' "${f}" "${sum}"
+    else
+      printf 'dir %s\n' "${f}"
+    fi
+  done)
+}
 
-  # The reported attack: .agent-loop itself is a link to a directory outside
-  # the checkout. Nothing is created or written there, and no session starts.
+test_supervisor_never_writes_into_the_checkout() {
+  # Statically: after creating the clone, no write targets the checkout.
+  writes="$(grep -nE '(>|>>|cp |mv |rm |mkdir |chmod |ln |touch |tar )[^#]*[$][{]worktree[}]' scripts/agent-loop-supervisor || true)"
+  [ -z "${writes}" ] || {
+    printf 'writes into the checkout:\n%s\n' "${writes}"
+    return 1
+  }
+  # A tick that starts a session succeeds against a checkout the Supervisor's
+  # own user cannot write, and leaves it byte-for-byte unchanged.
   d="$(mktemp -d)"
   stubs "${d}"
-  mkdir -p "${d}/worktree" "${d}/state" "${d}/outside"
-  printf 'original\n' >"${d}/outside/ci-deps-pin"
-  ln -s "${d}/outside" "${d}/worktree/.agent-loop"
+  mkdir -p "${d}/worktree/.agent-loop" "${d}/worktree/infra/stacks/prod" "${d}/state"
+  printf 'x\n' >"${d}/worktree/infra/stacks/prod/main.tf"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  out="$(supervisor "${d}" once 2>&1)" && return 1
-  printf '%s\n' "${out}" | grep -q 'refusing to write into the checkout: .agent-loop is a symbolic link' || return 1
-  expect original cat "${d}/outside/ci-deps-pin" || return 1
-  expect 'ci-deps-pin' ls "${d}/outside" || return 1
-  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  before="$(tree_state "${d}/worktree")"
+  chmod -R a-w "${d}/worktree"
+  rc=0
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  chmod -R u+w "${d}/worktree"
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  after="$(tree_state "${d}/worktree")"
+  [ "${before}" = "${after}" ]
+}
 
-  # The marker the reviewer redirected (.agent-loop/ci-deps-pin -> a victim
-  # file) is no longer written at all: the record lives in the state dir.
+test_supervisor_ignores_links_swapped_in_during_a_tick() {
+  # The reviewer's race: a leftover session process keeps swapping checkout
+  # directories for links to outside/ while the Supervisor provisions and
+  # starts a session. Nothing outside the checkout may change.
   d="$(mktemp -d)"
   stubs "${d}"
-  mkdir -p "${d}/worktree/.agent-loop" "${d}/state"
-  printf 'victim\n' >"${d}/victim"
-  ln -s "${d}/victim" "${d}/worktree/.agent-loop/ci-deps-pin"
+  mkdir -p "${d}/worktree/.agent-loop/cache" "${d}/worktree/infra" "${d}/state" "${d}/outside/cache/npm"
+  printf 'victim\n' >"${d}/outside/cache/npm/victim"
   jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
-  supervisor "${d}" once >/dev/null 2>&1 || return 1
-  expect victim cat "${d}/victim" || return 1
-  [ -L "${d}/worktree/.agent-loop/ci-deps-pin" ] || return 1
-  grep -q "^[0-9a-f]\{40\} ${d}/worktree$" "${d}/state/ci-deps/provisioned" || return 1
-  # Provisioning replaced node_modules by rename; nothing was left staged.
-  [ -f "${d}/worktree/node_modules/.package-lock.json" ] || return 1
-  for left in "${d}"/state/stage.* "${d}"/state/trash.*; do
-    [ ! -e "${left}" ] || return 1
-  done
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  before="$(tree_state "${d}/outside")"
+  (
+    cd "${d}" || exit 1
+    while [ ! -e stop-swapping ]; do
+      for name in .agent-loop infra node_modules; do
+        rm -rf "worktree/${name}"
+        ln -s "${d}/outside" "worktree/${name}"
+      done
+      sleep 0.01 2>/dev/null || sleep 1
+      for name in .agent-loop infra node_modules; do
+        rm -f "worktree/${name}"
+        mkdir -p "worktree/${name}"
+      done
+    done
+  ) &
+  swapper=$!
+  rc=0
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  : >"${d}/stop-swapping"
+  wait "${swapper}" || true
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  after="$(tree_state "${d}/outside")"
+  [ "${before}" = "${after}" ]
+}
+
+test_supervisor_refuses_while_processes_use_the_checkout() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # A double-forked leftover (pid 4242) still has the checkout open.
+  printf '4242\n' >"${d}/lsof-users"
+  out="$(supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: processes still use the checkout (pids 4242)' || return 1
+  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+  grep -q '^gh issue create --title Agent Loop held: leftover processes use the session checkout --body-file .* --label agent-loop-stall --label ready-for-human$' "${d}/calls" || return 1
+  expect 1 cat "${d}/state/stall-episode" || return 1
+  # Once nothing uses it, the next start goes ahead.
+  rm -f "${d}/lsof-users" "${d}/state/last-start"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q '^tmux split-window' "${d}/calls"
+}
+
+test_agent_loop_deps_copies_the_provisioned_tools() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/src/node_modules/pkg" "${d}/src/npm-cache" "${d}/src/infra/stacks/prod/.terraform/providers" "${d}/repo/infra/stacks/prod"
+  : >"${d}/src/node_modules/pkg/index.js"
+  : >"${d}/src/npm-cache/index"
+  : >"${d}/src/infra/stacks/prod/.terraform/providers/p"
+  here="$(pwd -P)"
+  git -C "${d}/repo" init -q || return 1
+  # Not finished yet: refused.
+  out="$(cd "${d}/repo" && AGENT_LOOP_CI_DEPS="${d}/src" "${here}/scripts/agent-loop-deps" 2>&1)" && return 1
+  printf '%s\n' "${out}" | grep -q 'does not name a finished provisioning dir' || return 1
+  : >"${d}/src/.done"
+  chmod -R a-w "${d}/src"
+  (cd "${d}/repo" && AGENT_LOOP_CI_DEPS="${d}/src" "${here}/scripts/agent-loop-deps") >/dev/null || return 1
+  chmod -R u+w "${d}/src"
+  [ -f "${d}/repo/node_modules/pkg/index.js" ] && [ -w "${d}/repo/node_modules/pkg/index.js" ] || return 1
+  [ -f "${d}/repo/.agent-loop/cache/npm/index" ] || return 1
+  [ -f "${d}/repo/infra/stacks/prod/.terraform/providers/p" ]
 }
 
 # skill_doc <file> <step line>: a minimal skill with one step and a Human-only

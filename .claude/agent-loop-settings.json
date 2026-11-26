@@ -64,6 +64,7 @@
       "Bash(scripts/verify-acceptance *)",
       "Bash(scripts/test-shell *)",
       "Bash(scripts/list-files *)",
+      "Bash(scripts/agent-loop-deps)",
       "Bash(scripts/agent-loop-push *)",
       "Bash(scripts/agent-loop-gh blockers *)",
       "Bash(scripts/agent-loop-report *)",

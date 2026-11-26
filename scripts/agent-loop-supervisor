@@ -36,7 +36,9 @@
 #     what runs unsandboxed until a human pins it.
 #   - Tools task ci:sandbox needs from the network (npm packages, OpenTofu
 #     providers) are installed by the Supervisor, outside the sandbox, from the
-#     pinned commit's lockfiles, then copied into the session's checkout. The
+#     pinned commit's lockfiles, into a read-only dir in the state dir; the
+#     session copies them in itself (scripts/agent-loop-deps). After it creates
+#     the clone, the Supervisor never writes into the session's checkout. The
 #     sandbox's network allowlist stays GitHub, QA and Production only, and
 #     local binding stays off; the Chrome steps run only in the ci check.
 #   - claude runs with --restricted (no user, project or local settings files),
@@ -380,7 +382,7 @@ runtime_paths() {
   git -C "${runtime_repo}" ls-tree -r --name-only "$1" -- \
     scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
     .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md \
-    package.json package-lock.json infra
+    package.json package-lock.json infra .githooks
 }
 
 # refresh_runtime: export the pinned commit's settings, status line, hooks,
@@ -418,10 +420,11 @@ refresh_runtime() {
   jq --arg sl "'${runtime_dir}/scripts/claude-statusline'" \
     --arg pre "'${runtime_dir}/scripts/agent-loop-heartbeat' pre" \
     --arg post "'${runtime_dir}/scripts/agent-loop-heartbeat' post" \
-    --arg state "${state_dir}" --arg machine "${me}" \
+    --arg state "${state_dir}" --arg machine "${me}" --arg pin "${pin}" \
     --arg token_dir "${token_dir}" --arg runtime "${runtime_dir}" '
       .statusLine = {type: "command", command: $sl}
-      | .env = ((.env // {}) + {AGENT_LOOP_STATE_DIR: $state, AGENT_LOOP_MACHINE: $machine})
+      | .env = ((.env // {}) + {AGENT_LOOP_STATE_DIR: $state, AGENT_LOOP_MACHINE: $machine,
+          AGENT_LOOP_CI_DEPS: ($state + "/ci-deps/" + $pin)})
       | .sandbox.filesystem.denyRead = ((.sandbox.filesystem.denyRead // []) + [$token_dir, "/" + $token_dir] | unique)
       | .permissions.deny = ((.permissions.deny // []) + ["Read(/" + $token_dir + "/**)"] | unique)
       | .permissions.allow = ((.permissions.allow // []) + ["Read(/" + $runtime + "/**)"] | unique)
@@ -435,100 +438,38 @@ refresh_runtime() {
   chmod -R a-w "${runtime_dir}"
 }
 
-# path_kind <base> <relative path>: "link" when any component of the path
-# below <base> is a symbolic link, else "plain" (missing components are fine).
-path_kind() {
-  here="$1"
-  rest="$2"
-  kind="plain"
-  while [ -n "${rest}" ]; do
-    part="${rest%%/*}"
-    if [ "${part}" = "${rest}" ]; then rest=""; else rest="${rest#*/}"; fi
-    here="${here}/${part}"
-    if [ -L "${here}" ]; then kind="link"; fi
-  done
-  printf '%s\n' "${kind}"
-}
-
-# checkout_mkdir <relative dir>: create a directory in the session's checkout
-# one component at a time, refusing a symbolic link on any component. mkdir
-# never follows a link in its last component, so a link planted between the
-# check and the mkdir makes it fail rather than write elsewhere.
-checkout_mkdir() {
-  here="${worktree}"
-  rest="$1"
-  while [ -n "${rest}" ]; do
-    part="${rest%%/*}"
-    if [ "${part}" = "${rest}" ]; then rest=""; else rest="${rest#*/}"; fi
-    here="${here}/${part}"
-    if [ -L "${here}" ]; then
-      log "refusing to write into the checkout: ${here#"${worktree}"/} is a symbolic link"
-      return 1
-    fi
-    if [ ! -d "${here}" ]; then mkdir "${here}"; fi
-  done
-}
-
-# place <source> <relative destination>: the only way the Supervisor writes
-# into the session's checkout. It refuses a symbolic link on any component,
-# stages the copy in the state dir (outside the sandbox), moves any existing
-# destination out to the state dir, and renames the copy into place. rename
-# never follows a link in its last component, and nothing is deleted or
-# written inside the checkout.
-place() {
-  parent="$(dirname "$2")"
-  if [ "${parent}" != . ]; then checkout_mkdir "${parent}"; fi
-  kind="$(path_kind "${worktree}" "$2")"
-  if [ "${kind}" != plain ]; then
-    log "refusing to provision $2: a symbolic link is on its path"
-    return 1
-  fi
-  stage="$(mktemp -d "${state_dir}/stage.XXXXXX")"
-  trash="$(mktemp -d "${state_dir}/trash.XXXXXX")"
-  cp -RP "$1" "${stage}/new"
-  if [ -e "${worktree}/$2" ] || [ -L "${worktree}/$2" ]; then mv "${worktree}/$2" "${trash}/old"; fi
-  mv "${stage}/new" "${worktree}/$2"
-  rm -rf "${stage}" "${trash}"
-}
-
 # provision_ci: install what task ci:sandbox downloads (npm packages from the
 # pinned package-lock.json with --ignore-scripts, OpenTofu providers from the
-# pinned lockfiles) once per pin, outside the sandbox, then copy them into the
-# session's checkout. No browser is installed: the Chrome steps run only in the
-# ci check. Pinning a commit trusts its npm and tofu init steps with full user
-# access (docs/agent-loop.md). The record of what was provisioned
-# lives in the state dir, never in the checkout.
+# pinned lockfiles) once per pin, outside the sandbox, into the state dir, and
+# make the result read-only. The Supervisor never writes into the session's
+# checkout: the session copies these in itself, sandboxed, with
+# scripts/agent-loop-deps (AGENT_LOOP_CI_DEPS points here). Pinning a commit
+# trusts its npm and tofu init steps with full user access (docs/agent-loop.md).
 provision_ci() {
   pin="$(pinned_sha)"
   deps="${state_dir}/ci-deps/${pin}"
-  if [ ! -e "${deps}/.done" ]; then
-    rm -rf "${deps}"
-    mkdir -p "${deps}"
-    cp -RP "${runtime_dir}/." "${deps}/"
-    chmod -R u+w "${deps}"
-    if [ -f "${deps}/package-lock.json" ]; then
-      (cd "${deps}" && npm_config_cache="${deps}/npm-cache" npm ci --ignore-scripts --no-audit --no-fund >/dev/null)
-    fi
-    if [ -d "${deps}/infra" ]; then
-      for tf_dir in $(find "${deps}/infra" -name .terraform -prune -o -type f -name '*.tf' -print | sed 's|/[^/]*$||' | sort -u); do
-        TF_CLI_CONFIG_FILE=/dev/null tofu -chdir="${tf_dir}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
-      done
-    fi
-    : >"${deps}/.done"
+  if [ -e "${deps}/.done" ]; then return 0; fi
+  if [ -d "${deps}" ]; then chmod -R u+w "${deps}" && rm -rf "${deps}"; fi
+  mkdir -p "${deps}"
+  cp -RP "${runtime_dir}/." "${deps}/"
+  chmod -R u+w "${deps}"
+  if [ -f "${deps}/package-lock.json" ]; then
+    (cd "${deps}" && npm_config_cache="${deps}/npm-cache" npm ci --ignore-scripts --no-audit --no-fund >/dev/null)
   fi
-  marker="${state_dir}/ci-deps/provisioned"
-  provisioned="$(read_or "${marker}" '')"
-  if [ "${provisioned}" = "${pin} ${worktree}" ]; then return 0; fi
-  if [ -d "${deps}/node_modules" ]; then place "${deps}/node_modules" node_modules; fi
-  if [ -d "${deps}/npm-cache" ]; then place "${deps}/npm-cache" .agent-loop/cache/npm; fi
   if [ -d "${deps}/infra" ]; then
-    for tf in $(cd "${deps}" && find infra -type d -name .terraform -prune -print); do
-      tf_parent="$(dirname "${tf}")"
-      kind="$(path_kind "${worktree}" "${tf_parent}")"
-      if [ "${kind}" = plain ] && [ -d "${worktree}/${tf_parent}" ]; then place "${deps}/${tf}" "${tf}"; fi
+    for tf_dir in $(find "${deps}/infra" -name .terraform -prune -o -type f -name '*.tf' -print | sed 's|/[^/]*$||' | sort -u); do
+      TF_CLI_CONFIG_FILE=/dev/null tofu -chdir="${tf_dir}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
     done
   fi
-  printf '%s %s\n' "${pin}" "${worktree}" >"${marker}"
+  : >"${deps}/.done"
+  chmod -R a-w "${deps}"
+}
+
+# checkout_users: pids of live processes with the checkout open (as cwd or
+# as an open file). A process the last session left behind (double-forked,
+# setsid) is invisible to kill_tree but not to lsof.
+checkout_users() {
+  lsof -t +D "${worktree}" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true
 }
 
 # kill_tree <pid>: stop a process and every descendant (a session's background
@@ -596,6 +537,7 @@ reset_session_state() {
 # only (SSH cannot pass the sandbox's proxy), and no AWS or SSH agent variables.
 write_launcher() {
   me="$(machine)"
+  pin="$(pinned_sha)"
   launcher="${state_dir}/launch"
   rm -f "${launcher}"
   cat >"${launcher}" <<EOF
@@ -611,7 +553,7 @@ GH_TOKEN="\$(cat '${token_file}')" || exit 1
 GH_CONFIG_DIR='${worktree}/.agent-loop/gh-config'
 GH_NO_UPDATE_NOTIFIER=1
 GIT_CONFIG_NOSYSTEM=1
-GIT_CONFIG_COUNT=4
+GIT_CONFIG_COUNT=5
 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
 GIT_CONFIG_VALUE_0=git@github.com:
 GIT_CONFIG_KEY_1=credential.helper
@@ -620,6 +562,9 @@ GIT_CONFIG_KEY_2=credential.helper
 GIT_CONFIG_VALUE_2='!gh auth git-credential'
 GIT_CONFIG_KEY_3=core.sshCommand
 GIT_CONFIG_VALUE_3=false
+GIT_CONFIG_KEY_4=core.hooksPath
+GIT_CONFIG_VALUE_4='${runtime_dir}/.githooks'
+AGENT_LOOP_CI_DEPS='${state_dir}/ci-deps/${pin}'
 XDG_CACHE_HOME='${worktree}/.agent-loop/cache'
 npm_config_cache='${worktree}/.agent-loop/cache/npm'
 npm_config_offline=true
@@ -628,7 +573,7 @@ AGENT_LOOP_STATE_DIR='${state_dir}'
 AGENT_LOOP_MACHINE='${me}'
 export GH_TOKEN GH_CONFIG_DIR GH_NO_UPDATE_NOTIFIER GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT \\
   GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \\
-  GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 XDG_CACHE_HOME npm_config_cache npm_config_offline HUGO_CACHEDIR AGENT_LOOP_STATE_DIR AGENT_LOOP_MACHINE
+  GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3 GIT_CONFIG_KEY_4 GIT_CONFIG_VALUE_4 AGENT_LOOP_CI_DEPS XDG_CACHE_HOME npm_config_cache npm_config_offline HUGO_CACHEDIR AGENT_LOOP_STATE_DIR AGENT_LOOP_MACHINE
 exec claude --name '${session_name}' --remote-control '${session_name}' --permission-mode dontAsk \\
   --restricted --strict-mcp-config --tools 'Bash,Read,Edit,Write,Glob,Grep,Agent,WebFetch,Skill' \\
   --settings '${runtime_dir}/session-settings.json'
@@ -649,6 +594,14 @@ do_start() {
   fi
   # A failure in any step below ends this tick; the next tick tries again.
   kill_previous_session
+  if [ -d "${worktree}" ]; then
+    users="$(checkout_users)"
+    if [ -n "${users}" ]; then
+      log "refusing to start a session: processes still use the checkout (pids ${users})"
+      do_escalate none "checkout in use by leftover processes ${users}"
+      return 0
+    fi
+  fi
   ensure_worktree
   refresh_runtime
   provision_ci
@@ -721,6 +674,7 @@ kill_session() {
 do_escalate() {
   reason="$2"
   case "${reason}" in
+    checkout*) title="Agent Loop held: leftover processes use the session checkout" ;;
     waiting*) title="Agent Loop stalled: session waiting on a prompt" ;;
     idle*) title="Agent Loop stalled: session idle with work and nudges did not help" ;;
     *) title="Agent Loop stalled: session busy with no heartbeat" ;;
@@ -962,6 +916,7 @@ preflight() {
   check "an active tag ruleset restricts creating, updating and deleting v* tags" tag_ruleset_protects_releases
   check "production requires a reviewer, admins cannot bypass, no self-review" production_needs_reviewer
   check "Claude Code's sandbox is available (sandbox-exec, or bwrap and socat)" sandbox_available
+  check "lsof is available (leftover session processes are found before a start)" command -v lsof
   printf 'preflight: %s failed\n' "${preflight_failures}"
 }
 
