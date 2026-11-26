@@ -1,0 +1,225 @@
+#!/bin/sh
+# Start the Mecha Fighter dev session detached at login: a launchd LaunchAgent
+# on macOS, a systemd --user unit on Linux. Optional; `task setup` never runs it.
+#
+# Usage: scripts/autostart/autostart platform|render [launchd|systemd]|path|install|uninstall|status
+#   platform   print the service manager for this OS (launchd or systemd)
+#   render     print the generated plist or unit (default: this platform's)
+#   path       print where install writes it
+#   install    write it and enable it for the next login (idempotent)
+#   uninstall  disable and remove it (idempotent)
+#   status     report whether it is installed and whether the session is running
+#
+# The generated file holds machine-specific paths, so it is rendered from the
+# templates next to this script at install time and never committed.
+# Overrides (tests use these): AUTOSTART_UNAME, AUTOSTART_HOME, AUTOSTART_MISE,
+# AUTOSTART_PATH, AUTOSTART_REPO_ROOT, AUTOSTART_UID.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd -P)"
+label="com.mechafighter.dev-session"
+unit="mechafighter-dev.service"
+
+die() {
+  printf 'autostart: %s\n' "$*" >&2
+  exit 1
+}
+
+detect_platform() {
+  uname_s="${AUTOSTART_UNAME:-$(uname -s)}"
+  case "${uname_s}" in
+    Darwin) platform=launchd ;;
+    Linux) platform=systemd ;;
+    *) die "unsupported platform: ${uname_s} (launchd on Darwin, systemd on Linux)" ;;
+  esac
+}
+
+# Values are substituted into XML, a systemd unit and a sed replacement, so
+# anything those would interpret is refused rather than escaped.
+require_safe() {
+  name="$1"
+  value="$2"
+  [ -n "${value}" ] || die "${name} is empty"
+  case "${value}" in
+    *'"'* | *'$'* | *'%'* | *'&'* | *'<'* | *'>'* | *\\* | *'|'* | *"
+"*)
+      die "${name} contains a character autostart refuses (one of \" \$ % & < > \\ | or a newline): ${value}"
+      ;;
+    *) ;;
+  esac
+}
+
+require_absolute() {
+  require_safe "$1" "$2"
+  case "$2" in
+    /*) ;;
+    *) die "$1 must be an absolute path: $2" ;;
+  esac
+}
+
+load_values() {
+  home="${AUTOSTART_HOME:-${HOME:-}}"
+  repo_root="${AUTOSTART_REPO_ROOT:-$(cd "${here}/../.." && pwd -P)}"
+  mise_bin="${AUTOSTART_MISE:-$(command -v mise || true)}"
+  path_value="${AUTOSTART_PATH:-${PATH}}"
+  [ -n "${mise_bin}" ] || die "mise is not on PATH (run task setup first)"
+  require_absolute HOME "${home}"
+  require_absolute "repo root" "${repo_root}"
+  require_absolute mise "${mise_bin}"
+  require_safe PATH "${path_value}"
+  log_file="${home}/Library/Logs/mechafighter-dev.log"
+}
+
+target_path() {
+  case "$1" in
+    launchd) printf '%s/Library/LaunchAgents/%s.plist\n' "${home}" "${label}" ;;
+    systemd) printf '%s/systemd/user/%s\n' "${AUTOSTART_XDG_CONFIG_HOME:-${XDG_CONFIG_HOME:-${home}/.config}}" "${unit}" ;;
+    *) die "unknown service manager: $1" ;;
+  esac
+}
+
+render() {
+  case "$1" in
+    launchd) template="${here}/launchd.plist.template" ;;
+    systemd) template="${here}/systemd.service.template" ;;
+    *) die "unknown service manager: $1 (launchd or systemd)" ;;
+  esac
+  sed -e "s|@LABEL@|${label}|g" \
+    -e "s|@REPO_ROOT@|${repo_root}|g" \
+    -e "s|@MISE@|${mise_bin}|g" \
+    -e "s|@PATH@|${path_value}|g" \
+    -e "s|@LOG_FILE@|${log_file}|g" \
+    "${template}"
+}
+
+gui_domain() {
+  uid="${AUTOSTART_UID:-}"
+  [ -n "${uid}" ] || uid="$(id -u)"
+  printf 'gui/%s\n' "${uid}"
+}
+
+install_it() {
+  target="$(target_path "${platform}")"
+  staged="$(mktemp)"
+  trap 'rm -f "${staged}"' EXIT
+  render "${platform}" >"${staged}"
+  if [ "${platform}" = launchd ] && command -v plutil >/dev/null 2>&1; then
+    plutil -lint -s "${staged}" || die "the rendered plist failed plutil -lint"
+  fi
+  mkdir -p "${target%/*}"
+  created=0
+  [ -e "${target}" ] || created=1
+  if [ -f "${target}" ] && cmp -s "${staged}" "${target}"; then
+    printf 'autostart: %s is already up to date\n' "${target}"
+  else
+    cp "${staged}" "${target}"
+    chmod 644 "${target}"
+    printf 'autostart: wrote %s\n' "${target}"
+  fi
+  enabled=0
+  case "${platform}" in
+    launchd)
+      domain="$(gui_domain)"
+      launchctl enable "${domain}/${label}" && enabled=1
+      ;;
+    systemd)
+      systemctl --user daemon-reload && systemctl --user enable "${unit}" && enabled=1
+      ;;
+    *) ;;
+  esac
+  if [ "${enabled}" -ne 1 ]; then
+    # Don't leave a file this run created for status to report as installed;
+    # a file that was already in place stays, so a transient failure can't
+    # break a working install.
+    if [ "${created}" -eq 1 ]; then
+      rm -f "${target}"
+      die "enabling ${platform} failed; removed ${target}"
+    fi
+    die "enabling ${platform} failed; left the existing ${target} in place"
+  fi
+  printf 'autostart: the dev session will start detached at your next login (task dev attaches)\n'
+  warn_branch
+}
+
+# The session runs `task setup` and the pane scripts from whatever this
+# checkout has checked out at login, so say so when that isn't main.
+warn_branch() {
+  branch="$(git -C "${repo_root}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ "${branch}" != main ]; then
+    printf 'autostart: warning: %s is on %s, not main; login will run that checkout as-is\n' \
+      "${repo_root}" "${branch:-a detached HEAD}" >&2
+  fi
+}
+
+uninstall_it() {
+  target="$(target_path "${platform}")"
+  case "${platform}" in
+    launchd)
+      domain="$(gui_domain)"
+      if launchctl print "${domain}/${label}" >/dev/null 2>&1; then
+        launchctl bootout "${domain}/${label}"
+      fi
+      ;;
+    systemd)
+      if [ -f "${target}" ]; then systemctl --user disable "${unit}"; fi
+      ;;
+    *) die "unknown service manager: ${platform}" ;;
+  esac
+  if [ -f "${target}" ]; then
+    rm -f "${target}"
+    printf 'autostart: removed %s\n' "${target}"
+    if [ "${platform}" = systemd ]; then systemctl --user daemon-reload; fi
+  else
+    printf 'autostart: not installed (%s does not exist)\n' "${target}"
+  fi
+}
+
+status_it() {
+  target="$(target_path "${platform}")"
+  if [ ! -f "${target}" ]; then
+    printf 'autostart: not installed (%s)\n' "${platform}"
+  else
+    current="$(mktemp)"
+    trap 'rm -f "${current}"' EXIT
+    render "${platform}" >"${current}"
+    if cmp -s "${current}" "${target}"; then
+      printf 'autostart: installed (%s, %s)\n' "${platform}" "${target}"
+      warn_branch
+    else
+      printf 'autostart: installed but stale (%s); run task autostart:install\n' "${target}"
+    fi
+  fi
+  session="$("${here}/../dev/session" status)"
+  printf 'dev session: %s\n' "${session}"
+}
+
+cmd="${1:-}"
+case "${cmd}" in
+  platform)
+    detect_platform
+    printf '%s\n' "${platform}"
+    ;;
+  render)
+    load_values
+    if [ -n "${2:-}" ]; then
+      platform="$2"
+    else
+      detect_platform
+    fi
+    render "${platform}"
+    ;;
+  path)
+    detect_platform
+    load_values
+    target_path "${platform}"
+    ;;
+  install | uninstall | status)
+    detect_platform
+    load_values
+    "${cmd}_it"
+    ;;
+  *)
+    printf 'usage: %s platform|render [launchd|systemd]|path|install|uninstall|status\n' "$0" >&2
+    exit 64
+    ;;
+esac

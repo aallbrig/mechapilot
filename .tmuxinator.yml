@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=schemas/tmuxinator.schema.json
+# The Mecha Fighter dev session. Start or attach with `task dev`, stop with
+# `task dev:stop`, validate with `task dev:check`. Every pane tolerates missing
+# parts (no Godot project, web build, Hugo site or Agent Loop yet).
+name: mechafighter
+root: .
+startup_window: editor
+enable_pane_titles: true
+pane_title_position: top
+pane_title_format: " #{pane_index}: #{pane_title} "
+windows:
+  - bootstrap:
+      layout: tiled
+      panes:
+        - setup:
+            - task setup
+            - task doctor
+            - scripts/dev/open-urls
+  - editor:
+      layout: tiled
+      panes:
+        - shell: git status --short --branch
+  - godot:
+      layout: tiled
+      panes:
+        - editor: scripts/dev/godot-editor
+  - serve:
+      layout: even-horizontal
+      panes:
+        - game: scripts/dev/serve game
+        - site: scripts/dev/serve site
+  - ci:
+      layout: even-vertical
+      panes:
+        - runs: gh run watch
+        - prs: gh pr status
+  - loops:
+      layout: tiled
+      panes:
+        - supervisor: scripts/dev/loops

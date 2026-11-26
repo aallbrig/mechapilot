@@ -91,6 +91,22 @@ test_rejects_trivial_task_targets() {
   ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
 }
 
+# Judged from recorded evidence, so a regression can't start a session or
+# install a login agent: each target is "recorded as passing" yet must fail.
+test_rejects_side_effecting_task_targets() {
+  evidence="$(mktemp)"
+  for t in dev dev:stop autostart:install autostart:uninstall autostart:status; do
+    printf 'task\t%s\tpass\n' "${t}" >>"${evidence}"
+  done
+  for t in dev dev:stop autostart:install autostart:uninstall autostart:status; do
+    f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:${t}${bt}")"
+    ! ACCEPTANCE_EVIDENCE="${evidence}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 >/dev/null || return 1
+  done
+  printf 'task\tdev:check\tpass\n' >>"${evidence}"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:dev:check${bt}")"
+  ACCEPTANCE_EVIDENCE="${evidence}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 >/dev/null
+}
+
 test_counts_star_and_numbered_items() {
   f="$(write_body "## Acceptance criteria" "- [ ] ok ${bt}check:forbidden-paths${bt}" "* [ ] no check here" "1. [ ] nor here")"
   out="$(VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 || true)"

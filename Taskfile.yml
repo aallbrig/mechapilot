@@ -25,7 +25,7 @@ tasks:
     cmds:
       - |
         missing=0
-        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh; do
+        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
         if [ -z "${CI:-}" ] && [ "$(git config core.hooksPath)" != ".githooks" ]; then
@@ -73,6 +73,9 @@ tasks:
       - check-jsonschema --builtin-schema vendor.dependabot .github/dependabot.yml
       - check-jsonschema --schemafile schemas/taskfile.schema.json Taskfile.yml
       - check-jsonschema --schemafile schemas/claude-code-settings.schema.json .claude/settings.json
+      - check-jsonschema --check-metaschema schemas/tmuxinator.schema.json
+      - scripts/checks/no-erb .tmuxinator.yml
+      - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -117,6 +120,37 @@ tasks:
     cmds:
       - task: ci:fast
       - task: secrets
+
+  dev:
+    desc: Start the tmux dev session (.tmuxinator.yml), or attach if it is already running
+    interactive: true
+    cmds:
+      - scripts/dev/session start
+
+  dev:stop:
+    desc: Stop the tmux dev session (no-op if it isn't running)
+    cmds:
+      - scripts/dev/session stop
+
+  dev:check:
+    desc: Render .tmuxinator.yml with `tmuxinator debug` and validate the result
+    cmds:
+      - scripts/dev/session check
+
+  autostart:install:
+    desc: "Optional: start the dev session detached at login (launchd on macOS, systemd --user on Linux)"
+    cmds:
+      - scripts/autostart/autostart install
+
+  autostart:uninstall:
+    desc: "Optional: remove the login autostart"
+    cmds:
+      - scripts/autostart/autostart uninstall
+
+  autostart:status:
+    desc: Report whether login autostart is installed and whether the dev session is running
+    cmds:
+      - scripts/autostart/autostart status
 
   verify:acceptance:
     desc: "Prove an issue's acceptance criteria (usage: task verify:acceptance -- <issue#>)"

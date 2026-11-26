@@ -1,0 +1,62 @@
+#!/bin/sh
+# Open the local dev, QA Environment and Production URLs in the browser:
+# `open` on macOS, `xdg-open` on Linux.
+#
+# Environment:
+#   MECHAFIGHTER_NO_BROWSER=1  print the URLs, open nothing (autostart sets it;
+#                              panes only see it when that autostart started the
+#                              tmux server, since an already-running server
+#                              gives new sessions its own global environment)
+#   OPEN_URLS_DRY_RUN=1        print "<opener> <url>" lines instead of opening
+#   DEV_UNAME, DEV_GIT_REMOTE  override `uname -s` and the origin URL (tests)
+#   MECHAFIGHTER_QA_URL        overrides the QA URL derived from the git remote
+#   MECHAFIGHTER_GAME_PORT / MECHAFIGHTER_SITE_PORT  local ports (8060 / 1313)
+set -eu
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
+
+# The QA Environment is GitHub Pages for this repository: https://<owner>.github.io/<repo>/
+qa_url() {
+  if [ -n "${MECHAFIGHTER_QA_URL:-}" ]; then
+    printf '%s\n' "${MECHAFIGHTER_QA_URL}"
+    return 0
+  fi
+  remote="${DEV_GIT_REMOTE:-$(git -C "${repo_root}" remote get-url origin 2>/dev/null || true)}"
+  slug="$(printf '%s\n' "${remote}" | sed -n 's#^.*github\.com[:/]\([^/]*\)/\([^/]*\)$#\1 \2#p')"
+  slug="${slug%.git}"
+  if [ -z "${slug}" ]; then return 0; fi
+  owner="${slug% *}"
+  repo="${slug#* }"
+  owner="$(printf '%s' "${owner}" | tr '[:upper:]' '[:lower:]')"
+  printf 'https://%s.github.io/%s/\n' "${owner}" "${repo}"
+}
+
+uname_s="${DEV_UNAME:-$(uname -s)}"
+case "${uname_s}" in
+  Darwin) opener=open ;;
+  Linux) opener=xdg-open ;;
+  *)
+    printf 'open-urls: unsupported platform: %s\n' "${uname_s}" >&2
+    exit 1
+    ;;
+esac
+
+qa="$(qa_url)"
+urls="http://localhost:${MECHAFIGHTER_GAME_PORT:-8060}/
+http://localhost:${MECHAFIGHTER_SITE_PORT:-1313}/
+${qa}
+https://mechafighter.com/
+https://game.mechafighter.com/"
+
+printf '%s\n' "${urls}" | while IFS= read -r url; do
+  [ -n "${url}" ] || continue
+  if [ -n "${OPEN_URLS_DRY_RUN:-}" ]; then
+    printf '%s %s\n' "${opener}" "${url}"
+  elif [ -n "${MECHAFIGHTER_NO_BROWSER:-}" ]; then
+    printf 'open-urls: %s\n' "${url}"
+  elif command -v "${opener}" >/dev/null 2>&1; then
+    "${opener}" "${url}" >/dev/null 2>&1 || printf 'open-urls: could not open %s\n' "${url}" >&2
+  else
+    printf 'open-urls: %s not found; visit %s\n' "${opener}" "${url}"
+  fi
+done
