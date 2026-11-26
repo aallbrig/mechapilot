@@ -1,0 +1,86 @@
+#!/bin/sh
+# Tests for infra/modules/github-deploy-trust: the deploy role's trust policy.
+# The module is rendered offline (it has no provider, so `tofu apply` only
+# computes outputs into a throwaway local state), then candidate OIDC tokens
+# are judged the way IAM would: aud by StringEquals, sub by StringLike, where
+# `*` (any run of characters) and `?` (one character) are the only wildcards.
+# The numeric IDs below are fakes.
+
+render_trust() {
+  d="$(mktemp -d)"
+  cp infra/modules/github-deploy-trust/*.tf "${d}/"
+  tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null || return 1
+  tofu -chdir="${d}" apply -auto-approve -input=false -no-color \
+    -var oidc_provider_arn=arn:aws:iam::provider/token.actions.githubusercontent.com \
+    -var github_owner=octo -var github_owner_id=11 \
+    -var github_repository=game -var github_repository_id=22 >/dev/null || return 1
+  tofu -chdir="${d}" output -raw policy_json
+}
+
+# The policy must have exactly the fail-closed shape: one Allow statement for
+# sts:AssumeRoleWithWebIdentity whose only conditions are aud (StringEquals)
+# and a single sub pattern (StringLike).
+shape_ok() {
+  printf '%s' "$1" | jq -e '
+    (.Statement | length) == 1
+    and (.Statement[0] | .Effect == "Allow"
+      and .Action == "sts:AssumeRoleWithWebIdentity"
+      and (.Condition | keys) == ["StringEquals", "StringLike"]
+      and .Condition.StringEquals == {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"}
+      and (.Condition.StringLike | keys) == ["token.actions.githubusercontent.com:sub"]
+      and (.Condition.StringLike["token.actions.githubusercontent.com:sub"] | type) == "string")' >/dev/null
+}
+
+# allows <policy> <aud> <sub>: exit 0 if IAM would let this token assume the role.
+allows() {
+  shape_ok "$1" || return 1
+  aud="$(printf '%s' "$1" | jq -r '.Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"]')"
+  pattern="$(printf '%s' "$1" | jq -r '.Statement[0].Condition.StringLike["token.actions.githubusercontent.com:sub"]')"
+  [ "$2" = "${aud}" ] || return 1
+  # StringLike -> anchored ERE: escape every ERE metacharacter, then * -> .* and ? -> .
+  re="$(printf '%s' "${pattern}" | sed -e 's/[][\\.^$+(){}|]/\\&/g' -e 's/[*]/.*/g' -e 's/[?]/./g')"
+  printf '%s\n' "$3" | grep -qE "^${re}\$"
+}
+
+prefix='repo:octo@11/game@22'
+aud='sts.amazonaws.com'
+
+test_deploy_trust_allows_release_tag_in_production() {
+  p="$(render_trust)" || return 1
+  allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/tags/v1.2.3"
+}
+
+test_deploy_trust_rejects_branch_ref() {
+  p="$(render_trust)" || return 1
+  shape_ok "${p}" || return 1
+  ! allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/heads/main" &&
+    ! allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/heads/v1.2.3"
+}
+
+test_deploy_trust_rejects_environment_without_tag() {
+  p="$(render_trust)" || return 1
+  shape_ok "${p}" || return 1
+  ! allows "${p}" "${aud}" "${prefix}:environment:production" &&
+    ! allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/pull/7/merge"
+}
+
+test_deploy_trust_rejects_tag_without_environment() {
+  p="$(render_trust)" || return 1
+  shape_ok "${p}" || return 1
+  ! allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1.2.3" &&
+    ! allows "${p}" "${aud}" "${prefix}:environment:staging:ref:refs/tags/v1.2.3"
+}
+
+test_deploy_trust_rejects_other_repositories_and_audiences() {
+  p="$(render_trust)" || return 1
+  shape_ok "${p}" || return 1
+  ! allows "${p}" "${aud}" "repo:octo@11/other@33:environment:production:ref:refs/tags/v1" &&
+    ! allows "${p}" "${aud}" "repo:octo/game:environment:production:ref:refs/tags/v1" &&
+    ! allows "${p}" "${aud}" "repo:evil@11/game@22:environment:production:ref:refs/tags/v1" &&
+    ! allows "${p}" "https://example.invalid" "${prefix}:environment:production:ref:refs/tags/v1"
+}
+
+test_deploy_trust_is_what_the_prod_role_uses() {
+  grep -qE '^[[:space:]]*assume_role_policy[[:space:]]*=[[:space:]]*module\.deploy_trust\.policy_json[[:space:]]*$' infra/stacks/prod/deploy-role.tf &&
+    grep -qE '^[[:space:]]*source[[:space:]]*=[[:space:]]*"\.\./\.\./modules/github-deploy-trust"[[:space:]]*$' infra/stacks/prod/deploy-role.tf
+}

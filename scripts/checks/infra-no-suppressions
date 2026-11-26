@@ -1,0 +1,50 @@
+#!/bin/sh
+# Fail if an infra/ finding could be suppressed instead of fixed.
+# Args: none (every tracked file), --staged (staged files), or explicit paths.
+#
+#   - Inline suppressions (trivy:ignore, tfsec:ignore, tflint-ignore, any case)
+#     in files under infra/ (or in any explicitly given file).
+#   - Any trivy or tflint config / ignore file other than the two that
+#     scripts/infra passes explicitly: infra/trivy.yaml and infra/.tflint.hcl.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+check_paths "$@" >"${list}"
+explicit=0
+if [ "$#" -gt 0 ] && [ "$1" != "--staged" ]; then explicit=1; fi
+
+status=0
+while IFS= read -r f; do
+  [ -f "${f}" ] || continue
+  base="${f##*/}"
+  case "${f}" in
+    infra/trivy.yaml | infra/.tflint.hcl) ;;
+    *)
+      lower="$(printf '%s' "${base}" | tr '[:upper:]' '[:lower:]')"
+      case "${lower}" in
+        trivy*.yaml | trivy*.yml | trivy*.json | .trivy* | *trivyignore* | .tflint* | tflint*.hcl | *.tflint.hcl)
+          printf 'infra-no-suppressions: %s: trivy/tflint config or ignore file the infra tasks do not pass\n' "${f}" >&2
+          status=1
+          ;;
+        *) ;;
+      esac
+      ;;
+  esac
+  scan_content=0
+  case "${f}" in
+    infra/*) scan_content=1 ;;
+    *) [ "${explicit}" -eq 0 ] || scan_content=1 ;;
+  esac
+  [ "${scan_content}" -eq 1 ] || continue
+  lines="$(grep -niE 'trivy:ignore|tfsec:ignore|tflint-ignore' "${f}" | cut -d: -f1 | tr '\n' ' ' || true)"
+  if [ -n "${lines}" ]; then
+    printf 'infra-no-suppressions: %s: inline suppression on line(s) %s\n' "${f}" "${lines% }" >&2
+    status=1
+  fi
+done <"${list}"
+exit "${status}"

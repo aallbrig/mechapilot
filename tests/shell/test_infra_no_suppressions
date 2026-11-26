@@ -1,0 +1,62 @@
+#!/bin/sh
+# Tests for scripts/checks/infra-no-suppressions (run by scripts/test-shell).
+# Suppression markers are assembled at runtime so this file holds none itself.
+
+# trivy, tfsec and tflint markers, built so no literal marker appears here.
+colon=':'
+dash='-'
+
+tf_with() {
+  d="$(mktemp -d)"
+  printf 'resource "x" "y" {\n  %s\n}\n' "$1" >"${d}/main.tf"
+  printf '%s/main.tf' "${d}"
+}
+
+test_infra_no_suppressions_rejects_trivy_inline_ignore() {
+  f="$(tf_with "# trivy${colon}ignore${colon}AVD-AWS-0011")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_tfsec_inline_ignore() {
+  f="$(tf_with "#TFSEC${colon}ignore${colon}aws-cloudfront-enable-waf")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_tflint_ignore() {
+  f="$(tf_with "# tflint${dash}ignore: terraform_unused_declarations")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_stray_trivy_config() {
+  d="$(mktemp -d)"
+  printf 'scan:\n  skip-files: ["x"]\n' >"${d}/trivy.yaml"
+  : >"${d}/.trivyignore"
+  : >"${d}/trivy-local.yml"
+  ! scripts/checks/infra-no-suppressions "${d}/trivy.yaml" &&
+    ! scripts/checks/infra-no-suppressions "${d}/.trivyignore" &&
+    ! scripts/checks/infra-no-suppressions "${d}/trivy-local.yml"
+}
+
+test_infra_no_suppressions_rejects_stray_tflint_config() {
+  d="$(mktemp -d)"
+  printf 'config {}\n' >"${d}/.tflint.hcl"
+  printf 'config {}\n' >"${d}/strict.tflint.hcl"
+  ! scripts/checks/infra-no-suppressions "${d}/.tflint.hcl" &&
+    ! scripts/checks/infra-no-suppressions "${d}/strict.tflint.hcl"
+}
+
+test_infra_no_suppressions_allows_clean_terraform() {
+  f="$(tf_with 'name = "ignore-me-not"')"
+  scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_passes_on_committed_tree() {
+  scripts/checks/infra-no-suppressions
+}
+
+test_infra_scan_uses_only_the_committed_trivy_config() {
+  d='$'
+  grep -qF -- "--config \"${d}{root}/trivy.yaml\"" scripts/infra &&
+    grep -qF -- '--ignorefile ""' scripts/infra &&
+    grep -qF -- "--config=\"${d}{config}\"" scripts/infra
+}

@@ -1,5 +1,5 @@
 // CloudFront Function (cloudfront-js-2.0), viewer-request.
-// 1. A redirect host name (e.g. www.) gets a 301 to the canonical one, keeping path and query.
+// 1. A redirect host name (e.g. www., compared case-insensitively) gets a 301 to the canonical one, keeping path and query.
 // 2. Directory-style paths map to their index.html (the S3 REST origin has no index documents).
 function querySuffix(querystring) {
   var parts = [];
@@ -22,7 +22,7 @@ var redirectHosts = ${jsonencode(redirect_hosts)};
 
 function handler(event) {
   var request = event.request;
-  var host = request.headers.host ? request.headers.host.value : '';
+  var host = request.headers.host ? request.headers.host.value.toLowerCase() : '';
   if (redirectHosts.indexOf(host) !== -1) {
     return {
       statusCode: 301,

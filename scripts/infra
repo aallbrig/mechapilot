@@ -56,8 +56,12 @@ case "${cmd}" in
   scan)
     # Embedded checks only (--skip-check-update): the result depends on the
     # pinned trivy version, not on whatever bundle a registry serves today.
-    # No ignore file is loaded (--ignorefile ""): findings are fixed, not suppressed.
-    trivy config --quiet --disable-telemetry --skip-check-update \
+    # Only the committed infra/trivy.yaml is read (--config), and no ignore file
+    # (--ignorefile ""). Inline ignores are rejected by
+    # scripts/checks/infra-no-suppressions. The flags repeat the config so a
+    # config edit can never relax them.
+    trivy config --config "${root}/trivy.yaml" \
+      --quiet --disable-telemetry --skip-check-update \
       --ignorefile "" \
       --skip-dirs '**/.terraform' \
       --severity HIGH,CRITICAL --exit-code 1 "${root}"

@@ -4,5 +4,10 @@ certificate_arn       = "arn:aws:acm:us-east-1:<account-id>:certificate/<certifi
 marketing_bucket_name = "<marketing-bucket-name>"
 game_bucket_name      = "<game-bucket-name>"
 
+# Numeric IDs in the immutable OIDC subject. Look them up with:
+#   gh api users/<owner> --jq .id   and   gh api repos/<owner>/<repo> --jq .id
+github_owner_id      = "<owner-id>"
+github_repository_id = "<repository-id>"
+
 # Flip to true at the Marketing Site cutover (infra/README.md).
 marketing_aliases_enabled = false

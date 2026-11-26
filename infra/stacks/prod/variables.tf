@@ -46,15 +46,26 @@ variable "marketing_aliases_enabled" {
   default     = false
 }
 
-variable "github_repository" {
-  description = "owner/name of the GitHub repository whose Actions may assume the deploy role."
+variable "github_owner" {
+  description = "Owner login of the GitHub repository whose Actions may assume the deploy role."
   type        = string
-  default     = "aallbrig/mechapilot"
+  default     = "aallbrig"
+}
 
-  validation {
-    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
-    error_message = "github_repository must be owner/name."
-  }
+variable "github_owner_id" {
+  description = "Numeric ID of the repository owner, part of the immutable OIDC subject (untracked tfvars, never committed)."
+  type        = string
+}
+
+variable "github_repository" {
+  description = "Name of the GitHub repository whose Actions may assume the deploy role."
+  type        = string
+  default     = "mechapilot"
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the repository, part of the immutable OIDC subject (untracked tfvars, never committed)."
+  type        = string
 }
 
 variable "github_environment" {

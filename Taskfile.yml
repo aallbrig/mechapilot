@@ -91,6 +91,8 @@ tasks:
           [ "$(jq -r '.name' "${tmp}/${name}.json")" = "${name}" ] || { echo "${skill}: name must match its directory"; exit 1; }
           check-jsonschema --schemafile schemas/claude-skill-frontmatter.schema.json "${tmp}/${name}.json"
         done
+      - check-jsonschema --check-metaschema schemas/infra-trivy-config.schema.json
+      - check-jsonschema --schemafile schemas/infra-trivy-config.schema.json infra/trivy.yaml
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -108,6 +110,7 @@ tasks:
       - scripts/checks/forbidden-paths
       - scripts/checks/large-files
       - scripts/checks/infra-no-identifiers
+      - scripts/checks/infra-no-suppressions
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack

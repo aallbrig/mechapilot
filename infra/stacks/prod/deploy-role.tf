@@ -1,7 +1,8 @@
 # GitHub Actions deploy role, trusted through the account's existing (shared)
-# GitHub OIDC provider, which is referenced here and never managed. Only this
-# repository's production-environment jobs or v* tag workflows may assume it,
-# and it may only sync the two site buckets and invalidate the two distributions.
+# GitHub OIDC provider, which is referenced here and never managed. Only a job
+# of this repository that runs in the production environment AND on a v* tag
+# may assume it (one sub pattern, see modules/github-deploy-trust), and it may
+# only sync the two site buckets and invalidate the two distributions.
 
 data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
@@ -14,31 +15,15 @@ locals {
   }
 }
 
-data "aws_iam_policy_document" "deploy_trust" {
-  statement {
-    sid     = "GitHubActionsProductionOrReleaseTag"
-    actions = ["sts:AssumeRoleWithWebIdentity"]
+module "deploy_trust" {
+  source = "../../modules/github-deploy-trust"
 
-    principals {
-      type        = "Federated"
-      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.github_repository}:environment:${var.github_environment}",
-        "repo:${var.github_repository}:ref:refs/tags/v*",
-      ]
-    }
-  }
+  oidc_provider_arn    = data.aws_iam_openid_connect_provider.github.arn
+  github_owner         = var.github_owner
+  github_owner_id      = var.github_owner_id
+  github_repository    = var.github_repository
+  github_repository_id = var.github_repository_id
+  github_environment   = var.github_environment
 }
 
 data "aws_iam_policy_document" "deploy" {
@@ -76,7 +61,7 @@ data "aws_iam_policy_document" "deploy" {
 resource "aws_iam_role" "deploy" {
   name                 = "mechapilot-github-deploy"
   description          = "GitHub Actions deploys of the mechafighter.com sites"
-  assume_role_policy   = data.aws_iam_policy_document.deploy_trust.json
+  assume_role_policy   = module.deploy_trust.policy_json
   max_session_duration = 3600
 }
 

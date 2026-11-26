@@ -185,6 +185,12 @@ data "aws_iam_policy_document" "site_key" {
         variable = "aws:SourceAccount"
         values   = [data.aws_caller_identity.current.account_id]
       }
+
+      condition {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = ["arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"]
+      }
     }
   }
 }
