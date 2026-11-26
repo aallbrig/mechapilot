@@ -53,3 +53,9 @@ test_verdicts_malformed_last_line_blocks() {
     [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 1" ] || return 1
   done
 }
+
+test_verdicts_malformed_block_cannot_be_cleared_by_guessing_its_tag() {
+  # The synthetic tag for a malformed verdict must be one no well-formed verdict can use.
+  f="$(comments "$(owner_says "review-verdict: block"),$(owner_says "review-verdict: pass sha=${A} reviewer=malformed-0"),$(owner_says "review-verdict: pass sha=${A} reviewer=x")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "2 1" ]
+}

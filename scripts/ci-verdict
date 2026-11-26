@@ -1,0 +1,30 @@
+#!/bin/sh
+# Judge the ci check-runs on one commit (see scripts/merge-gate step 1).
+#
+# Usage: scripts/ci-verdict <check-runs-pages.json>
+#   <check-runs-pages.json>: `gh api --paginate --slurp` of
+#   GET /repos/{o}/{r}/commits/{sha}/check-runs?check_name=ci&filter=all&per_page=100
+#   (an array of pages, each {"total_count": n, "check_runs": [...]}).
+# Prints success, missing, pending, incomplete or not-green.
+#
+# Only check-runs named ci from the github-actions app count, every attempt
+# included. The newest of them must have succeeded. Older cancelled runs are
+# ignored (a PR-body edit re-runs CI and cancels the in-flight run on the same
+# commit); any other older conclusion must also be success. If the pages hold
+# fewer runs than total_count, the answer is incomplete (fail closed).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+json="${1:?usage: ci-verdict <check-runs-pages.json>}"
+jq -r '
+  (.[0].total_count // 0) as $total
+  | [.[].check_runs[]] as $all
+  | [$all[] | select(.name == "ci" and .app.slug == "github-actions")]
+  | sort_by(.started_at // "", .id) as $runs
+  | if ($all | length) != $total then "incomplete"
+    elif ($runs | length) == 0 then "missing"
+    elif any($runs[]; .status != "completed") then "pending"
+    elif ($runs | last | .conclusion) != "success" then "not-green"
+    elif all($runs[:-1][]; .conclusion == "success" or .conclusion == "cancelled") then "success"
+    else "not-green" end' "${json}"

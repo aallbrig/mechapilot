@@ -22,7 +22,7 @@ fail() {
 
 ref="refs/merge-gate/${pr}"
 git fetch --quiet --force origin main "+pull/${pr}/head:${ref}"
-for s in scripts/verify-acceptance scripts/lib-tests scripts/checks/verification-guard scripts/review-verdicts; do
+for s in scripts/verify-acceptance scripts/ci-verdict scripts/lib-tests scripts/checks/verification-guard scripts/review-verdicts; do
   mkdir -p "${gate}/main/$(dirname "${s}")"
   git show "origin/main:${s}" >"${gate}/main/${s}" 2>/dev/null || fail "main has no ${s}"
   chmod +x "${gate}/main/${s}"
@@ -46,10 +46,12 @@ author="$(jq -r .author.login "${gate}/pr.json")"
 cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
 [ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
 
-# 1. Every ci check from GitHub Actions on exactly this head commit passed.
-ci="$(gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" --jq \
-  '[.check_runs[] | select(.name == "ci" and .app.slug == "github-actions")]
-   | if length == 0 then "missing" elif all(.conclusion == "success") then "success" else "not-green" end')"
+# 1. The newest ci check from GitHub Actions on exactly this head commit is
+#    green, and no older one failed (see scripts/ci-verdict). All pages and
+#    all attempts are read, so nothing can be pushed out of view.
+gh api --paginate --slurp \
+  "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci&filter=all&per_page=100" >"${gate}/check-runs.json"
+ci="$("${gate}/main/scripts/ci-verdict" "${gate}/check-runs.json")"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
 # 2. Acceptance: judged by main's verifier from the ci run's recorded evidence.
@@ -73,9 +75,10 @@ else
       *) fail "linked issue #${n} is not labelled ready-for-agent" ;;
     esac
   done
-  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --json databaseId,conclusion \
-    --jq '[.[] | select(.conclusion == "success")][0].databaseId // empty')"
-  [ -n "${run_id}" ] || fail "no successful ci.yml run for ${head_sha}"
+  # Evidence comes from the newest ci.yml run on this commit, which must have succeeded.
+  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --limit 1 --json databaseId,conclusion \
+    --jq '.[0] | select(.conclusion == "success") | .databaseId')"
+  [ -n "${run_id}" ] || fail "the newest ci.yml run for ${head_sha} did not succeed"
   gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
   for n in ${issues}; do
     rc=0
