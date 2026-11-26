@@ -24,14 +24,17 @@ while IFS="${tab}" read -r change path; do
     .github/* | .githooks/* | scripts/* | schemas/* | .claude/* | Taskfile.yml | Taskfile.yaml | \
       .mise.toml | mise.toml | mise.lock | .mise.lock | package.json | package-lock.json | \
       CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg | \
-      .mise/* | AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | .gitmodules | GLOSSARY.md)
+      .mise/* | */.mise/* | mise/* | */mise/* | .config/mise.toml | */.config/mise.toml | \
+      AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | .gitmodules | GLOSSARY.md)
       why="verification path"
       ;;
     *) ;;
   esac
   case "${base_name}" in
     .shellcheckrc | shellcheckrc | .yamllint | .yamllint.yml | .yamllint.yaml | .gitleaks.toml | \
-      .gitleaksignore | .editorconfig | gdlintrc | .gdlintrc | gdformatrc | .gdformatrc | .gitattributes | .gitignore)
+      .gitleaksignore | .editorconfig | gdlintrc | .gdlintrc | gdformatrc | .gdformatrc | .gitattributes | .gitignore | \
+      .tflint.hcl | *.tflint.hcl | trivy*.yaml | trivy*.yml | .trivyignore | .trivyignore.* | \
+      .mise.toml | mise.toml | mise.*.toml | .mise.*.toml | .tool-versions)
       why="tool config"
       ;;
     *) ;;
@@ -51,7 +54,7 @@ done <"${diff}"
 # Added lines that silence a checker anywhere in the tree.
 git -c core.quotePath=false diff --no-renames -U0 "${base}...${head}" |
   grep -E '^\+[^+]' |
-  grep -nE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)' |
+  grep -nE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)|trivy:ignore|tfsec:ignore|tflint-ignore' |
   sed 's/^/inline suppression\t+\t/' >>"${reasons}" || true
 
 if [ -s "${reasons}" ]; then

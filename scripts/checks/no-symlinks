@@ -1,0 +1,28 @@
+#!/bin/sh
+# Fail if the repository tracks a symbolic link.
+# Args: none (the whole index), --staged (the index too: a staged symlink is
+# already in it), or explicit paths (each must not be a symlink on disk).
+#
+# Tools disagree on symlinks: OpenTofu follows a symlinked .tf file that trivy
+# skips, and content checks that read tracked files never see a target outside
+# the repo, so a link can carry configuration past every check.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+status=0
+if [ "$#" -eq 0 ] || [ "$1" = "--staged" ]; then
+  links="$(git -c core.quotePath=false ls-files -s | awk '$1 == "120000" { sub(/^[^\t]*\t/, ""); print }')"
+  if [ -n "${links}" ]; then
+    printf 'no-symlinks: tracked symlink: %s\n' "${links}" >&2
+    status=1
+  fi
+else
+  for p in "$@"; do
+    if [ -L "${p}" ]; then
+      printf 'no-symlinks: %s is a symlink\n' "${p}" >&2
+      status=1
+    fi
+  done
+fi
+exit "${status}"

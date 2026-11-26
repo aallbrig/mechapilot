@@ -1,0 +1,268 @@
+#!/bin/sh
+# Tests for scripts/checks/infra-no-suppressions (run by scripts/test-shell).
+# Suppression markers are assembled at runtime so this file holds none itself.
+
+# trivy, tfsec and tflint markers, built so no literal marker appears here.
+colon=':'
+dash='-'
+
+tf_with() {
+  d="$(mktemp -d)"
+  printf 'resource "x" "y" {\n  %s\n}\n' "$1" >"${d}/main.tf"
+  printf '%s/main.tf' "${d}"
+}
+
+test_infra_no_suppressions_rejects_trivy_inline_ignore() {
+  f="$(tf_with "# trivy${colon}ignore${colon}AVD-AWS-0011")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_tfsec_inline_ignore() {
+  f="$(tf_with "#TFSEC${colon}ignore${colon}aws-cloudfront-enable-waf")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_tflint_ignore() {
+  f="$(tf_with "# tflint${dash}ignore: terraform_unused_declarations")"
+  ! scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_rejects_stray_trivy_config() {
+  d="$(mktemp -d)"
+  printf 'scan:\n  skip-files: ["x"]\n' >"${d}/trivy.yaml"
+  : >"${d}/.trivyignore"
+  : >"${d}/trivy-local.yml"
+  ! scripts/checks/infra-no-suppressions "${d}/trivy.yaml" &&
+    ! scripts/checks/infra-no-suppressions "${d}/.trivyignore" &&
+    ! scripts/checks/infra-no-suppressions "${d}/trivy-local.yml"
+}
+
+test_infra_no_suppressions_rejects_stray_tflint_config() {
+  d="$(mktemp -d)"
+  printf 'config {}\n' >"${d}/.tflint.hcl"
+  printf 'config {}\n' >"${d}/strict.tflint.hcl"
+  ! scripts/checks/infra-no-suppressions "${d}/.tflint.hcl" &&
+    ! scripts/checks/infra-no-suppressions "${d}/strict.tflint.hcl"
+}
+
+test_infra_no_suppressions_allows_clean_terraform() {
+  f="$(tf_with 'name = "ignore-me-not"')"
+  scripts/checks/infra-no-suppressions "${f}"
+}
+
+test_infra_no_suppressions_passes_on_committed_tree() {
+  scripts/checks/infra-no-suppressions
+}
+
+test_infra_scan_uses_only_the_committed_trivy_config() {
+  d='$'
+  grep -qF -- "--config \"${d}{root}/trivy.yaml\"" scripts/infra &&
+    grep -qF -- '--ignorefile ""' scripts/infra &&
+    grep -qF -- "--config=\"${d}{config}\"" scripts/infra
+}
+
+# A throwaway repository (checks list tracked files) with one stack.
+module_repo() {
+  r="$(mktemp -d)"
+  git -C "${r}" init --quiet
+  mkdir -p "${r}/infra/stacks/a" "${r}/infra/modules/ok" "${r}/mods/x"
+  printf 'variable "v" {\n  type = string\n}\n' >"${r}/infra/modules/ok/main.tf"
+  printf 'variable "v" {\n  type = string\n}\n' >"${r}/mods/x/main.tf"
+  printf '%s' "${r}"
+}
+
+# stack_with <repo> <module block body line>: write the stack and track everything.
+stack_with() {
+  printf 'module "m" {\n  %s\n  v = "x"\n}\n' "$2" >"$1/infra/stacks/a/main.tf"
+  git -C "$1" add -A
+}
+
+check_in() {
+  check="$(pwd)/scripts/checks/infra-no-suppressions"
+  rc=0
+  (cd "$1" && "${check}" >/dev/null 2>&1) || rc=$?
+  printf '%s' "${rc}"
+}
+
+test_infra_no_suppressions_allows_module_inside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 0 ]
+}
+
+test_infra_no_suppressions_rejects_module_outside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../../mods/x"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_remote_and_computed_module_sources() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "git::https://example.invalid/x.git"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  stack_with "${r}" 'source = "terraform-aws-modules/s3-bucket/aws"'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  stack_with "${r}" 'source = local.where'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_scans_terraform_outside_infra() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in mods/x/main.tf mods/x/extra.tftpl mods/x/vals.tfvars mods/x/other.tofu; do
+    printf '# trivy%signore%sAVD-AWS-0107\n' "${colon}" "${colon}" >>"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    [ "${rc}" = 1 ] || {
+      printf 'not caught: %s\n' "${f}"
+      return 1
+    }
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm "${r}/${f}"
+  done
+}
+
+test_infra_no_suppressions_rejects_json_configuration() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  printf '{"module": {"m": {"source": "../../../mods/x"}}}\n' >"${r}/infra/stacks/a/extra.tf.json"
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+# stack_raw <repo> <file content>: write the stack verbatim and track everything.
+stack_raw() {
+  printf '%s\n' "$2" >"$1/infra/stacks/a/main.tf"
+  git -C "$1" add -A
+}
+
+test_infra_no_suppressions_rejects_unquoted_remote_module() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module hidden {
+  source = "git::https://example.invalid/x.git"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_quoted_remote_module() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module "hidden" {
+  source = "registry.example.invalid/x/y/aws"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_unquoted_local_module_outside_infra() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module   hidden{
+  source="../../../mods/x"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_fails_closed_on_unusual_module_forms() {
+  r="$(module_repo)"
+  for body in 'module "m" { source = "../../modules/ok" }' \
+    'module "m" {
+  source = <<EOT
+../../../mods/x
+EOT
+}' \
+    'module "m" {
+  source = local.where
+}' \
+    'module
+"m" {
+  source = "../../../mods/x"
+}'; do
+    stack_raw "${r}" "${body}"
+    rc="$(check_in "${r}")"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${body}"
+      return 1
+    fi
+  done
+}
+
+test_infra_no_suppressions_rejects_override_files() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  # An override that switches off a bucket's public-access block: OpenTofu
+  # merges it, trivy scans only the secure base block.
+  cat >"${r}/infra/stacks/a/main_override.tf" <<'EOF'
+resource "aws_s3_bucket_public_access_block" "state" {
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+EOF
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ] || return 1
+  for f in override.tf x_override.tofu override.tf.json elsewhere/y_override.tofu.json; do
+    git -C "${r}" rm --quiet -r --cached infra/stacks/a/main_override.tf 2>/dev/null || true
+    rm -f "${r}/infra/stacks/a/main_override.tf"
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf '{}\n' >"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+}
+
+test_infra_no_suppressions_rejects_committed_tfvars() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in infra/stacks/a/terraform.tfvars infra/stacks/a/prod.auto.tfvars \
+    infra/stacks/a/x.auto.tfvars.json elsewhere/dev.tfvars; do
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf 'lock_down = false\n' >"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+  printf 'lock_down = "<placeholder>"\n' >"${r}/infra/stacks/a/prod.auto.tfvars.example"
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 0 ]
+}
+
+test_infra_no_suppressions_rejects_cli_config_state_and_working_data() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in .terraformrc infra/terraform.rc .tofurc infra/stacks/a/terraform.tfstate \
+    infra/stacks/a/terraform.tfstate.backup infra/stacks/a/current.tfplan \
+    infra/stacks/a/.terraform/terraform.tfstate; do
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf 'provider_installation {\n  dev_overrides {}\n}\n' >"${r}/${f}"
+    git -C "${r}" add -f -A
+    git -C "${r}" add -f "${f}"
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+}

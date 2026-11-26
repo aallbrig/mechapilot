@@ -25,7 +25,9 @@ tasks:
     cmds:
       - |
         missing=0
-        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator trivy; do
+        tools="task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator"
+        tools="$tools tofu tflint tflint-ruleset-aws trivy"
+        for t in $tools; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
         if [ -z "${CI:-}" ] && [ "$(git config core.hooksPath)" != ".githooks" ]; then
@@ -48,6 +50,9 @@ tasks:
       - task: lint:actions
       - task: lint:schema
       - task: lint:gd
+      - task: infra:validate
+      - task: infra:lint
+      - task: infra:scan
       - task: checks
 
   lint:sh:
@@ -88,6 +93,8 @@ tasks:
           [ "$(jq -r '.name' "${tmp}/${name}.json")" = "${name}" ] || { echo "${skill}: name must match its directory"; exit 1; }
           check-jsonschema --schemafile schemas/claude-skill-frontmatter.schema.json "${tmp}/${name}.json"
         done
+      - check-jsonschema --check-metaschema schemas/infra-trivy-config.schema.json
+      - check-jsonschema --schemafile schemas/infra-trivy-config.schema.json infra/trivy.yaml
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -104,6 +111,34 @@ tasks:
       - scripts/checks/safe-filenames
       - scripts/checks/forbidden-paths
       - scripts/checks/large-files
+      - scripts/checks/infra-no-identifiers
+      - scripts/checks/infra-no-suppressions
+      - scripts/checks/no-symlinks
+
+  infra:validate:
+    desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
+    cmds:
+      - scripts/infra validate
+
+  infra:lint:
+    desc: tflint (all terraform rules + the pinned AWS ruleset) on every module and stack
+    cmds:
+      - scripts/infra lint
+
+  infra:scan:
+    desc: trivy misconfiguration scan of infra/ (fails on any HIGH or CRITICAL finding)
+    cmds:
+      - scripts/infra scan
+
+  infra:plan:
+    desc: "Human only: plan a stack with your own AWS credentials (usage: task infra:plan -- --human [stack]); refuses CI and agents"
+    cmds:
+      - scripts/infra plan {{.CLI_ARGS}}
+
+  infra:apply:
+    desc: "Human only: apply the saved plan of a stack (usage: task infra:apply -- --human [stack]); refuses CI and agents"
+    cmds:
+      - scripts/infra apply {{.CLI_ARGS}}
 
   secrets:
     desc: gitleaks over the full git history

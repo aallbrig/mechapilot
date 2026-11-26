@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/infra-trivy-config.schema.json",
+  "title": "trivy config (the subset infra/trivy.yaml may use)",
+  "description": "Written for this repo: trivy publishes no JSON Schema for its config file. Keys follow https://trivy.dev/latest/docs/references/configuration/config-file/ . Anything outside this subset (notably ignore files, skip-files and severity relaxations) is rejected on purpose.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["severity", "exit-code", "scan", "misconfiguration"],
+  "properties": {
+    "severity": {
+      "type": "array",
+      "items": { "enum": ["HIGH", "CRITICAL"] },
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "exit-code": { "const": 1 },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanners"],
+      "properties": {
+        "scanners": { "const": ["misconfig"] },
+        "skip-dirs": {
+          "type": "array",
+          "items": { "const": "**/.terraform" },
+          "maxItems": 1
+        }
+      }
+    },
+    "misconfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanners"],
+      "properties": {
+        "scanners": {
+          "type": "array",
+          "items": { "enum": ["terraform"] },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

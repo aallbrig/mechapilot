@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../schemas/infra-trivy-config.schema.json
+# The only trivy config used for infra/: scripts/infra scan passes it with
+# --config, so no other trivy.yaml is picked up. Suppressions are not allowed
+# (scripts/checks/infra-no-suppressions); fix findings instead.
+severity:
+  - HIGH
+  - CRITICAL
+exit-code: 1
+scan:
+  scanners:
+    - misconfig
+  skip-dirs:
+    - "**/.terraform"
+misconfiguration:
+  scanners:
+    - terraform

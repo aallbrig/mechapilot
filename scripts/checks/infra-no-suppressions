@@ -1,0 +1,160 @@
+#!/bin/sh
+# Fail if an infra finding could be suppressed instead of fixed.
+# Args: none (every tracked file), --staged (staged files), or explicit paths
+# (exactly those files, each treated as if it were under infra/).
+# Run from the repository root: module sources are resolved against ./infra.
+#
+#   1. Inline suppressions (trivy:ignore, tfsec:ignore, tflint-ignore, any
+#      case) in any file under infra/ and in every OpenTofu/Terraform file
+#      anywhere in the repo (.tf, .tofu, .tftpl, .tfvars, .hcl, ...).
+#   2. Any trivy or tflint config / ignore file other than the two that
+#      scripts/infra passes explicitly: infra/trivy.yaml and infra/.tflint.hcl.
+#   3. JSON-syntax configuration (.tf.json, .tofu.json), which check 4 cannot
+#      parse, and override files (override.tf, *_override.tf, .tofu and JSON
+#      forms), anywhere in the repo.
+#   4. Module blocks under infra/ whose source is not a local path inside
+#      infra/ (a module elsewhere would escape checks 1 and 2).
+#   5. Anywhere: committed *.tfvars / *.tfvars.json (only .example copies),
+#      CLI config files (.terraformrc, terraform.rc, .tofurc, tofu.rc), state,
+#      plan files and .terraform/ contents.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+list="$(mktemp)"
+sources="$(mktemp)"
+trap 'rm -f "${list}" "${sources}"' EXIT
+check_paths "$@" >"${list}"
+explicit=0
+if [ "$#" -gt 0 ] && [ "$1" != "--staged" ]; then explicit=1; fi
+
+infra_root="$(cd infra 2>/dev/null && pwd -P || printf '/nonexistent-infra-root')"
+status=0
+
+fail() {
+  printf 'infra-no-suppressions: %s: %s\n' "$1" "$2" >&2
+  status=1
+}
+
+# Print the source of every module block in a .tf/.tofu file, one per line,
+# or "<unparsed>" for a module block whose source is not a plain string on its
+# own line (heredoc, expression, one-line block) or a module keyword line this
+# parser does not recognise. scripts/infra re-checks with tofu's own
+# resolution (.terraform/modules/modules.json) after init.
+module_sources() {
+  awk '
+    # A module block opens with a quoted or a bare label: module "x" { / module x {.
+    !inmod && /^[[:space:]]*module([[:space:]]*"[^"]*"|[[:space:]]+[A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*\{/ {
+      inmod = 1; depth = 0; found = 0
+    }
+    # Anything else that starts with the module keyword is not understood: fail closed.
+    !inmod && /^[[:space:]]*module([[:space:]"{]|$)/ { print "<unparsed>"; next }
+    inmod {
+      line = $0
+      if (depth == 1 && match(line, /^[[:space:]]*source[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$/)) {
+        s = line
+        sub(/^[^"]*"/, "", s)
+        sub(/"[[:space:]]*$/, "", s)
+        print s
+        found = 1
+      }
+      opened = gsub(/\{/, "{", line)
+      closed = gsub(/\}/, "}", line)
+      depth += opened - closed
+      if (depth <= 0) {
+        if (!found) print "<unparsed>"
+        inmod = 0
+      }
+    }
+  ' "$1"
+}
+
+while IFS= read -r f; do
+  [ -f "${f}" ] || continue
+  base="${f##*/}"
+  lower="$(printf '%s' "${base}" | tr '[:upper:]' '[:lower:]')"
+
+  # 2. Unpinned trivy / tflint configuration.
+  case "${f}" in
+    infra/trivy.yaml | infra/.tflint.hcl) ;;
+    *)
+      case "${lower}" in
+        trivy*.yaml | trivy*.yml | trivy*.json | .trivy* | *trivyignore* | .tflint* | tflint*.hcl | *.tflint.hcl)
+          fail "${f}" "trivy/tflint config or ignore file the infra tasks do not pass"
+          ;;
+        *) ;;
+      esac
+      ;;
+  esac
+
+  # 3. JSON-syntax configuration, and override files: OpenTofu merges an
+  #    override into another file's blocks, but trivy scans the unmerged base.
+  case "${lower}" in
+    override.tf | *_override.tf | override.tofu | *_override.tofu | \
+      override.tf.json | *_override.tf.json | override.tofu.json | *_override.tofu.json)
+      fail "${f}" "override files are not allowed (edit the block itself)"
+      ;;
+    *.tf.json | *.tofu.json) fail "${f}" "JSON-syntax configuration is not allowed (write HCL)" ;;
+    *) ;;
+  esac
+
+  # 5. Values and settings that change effective config without changing the
+  #    scanned source: variable files (OpenTofu auto-loads terraform.tfvars and
+  #    *.auto.tfvars; trivy does not), CLI config files (provider
+  #    dev_overrides), state and plan files, and .terraform/ contents.
+  case "${f}" in
+    .terraform/* | */.terraform/*) fail "${f}" "OpenTofu working data must not be committed" ;;
+    *) ;;
+  esac
+  case "${lower}" in
+    *.tfvars | *.tfvars.json) fail "${f}" "variable files must not be committed (commit a .example)" ;;
+    .terraformrc | terraform.rc | .tofurc | tofu.rc) fail "${f}" "CLI config files must not be committed" ;;
+    *.tfstate | *.tfstate.* | *.tfplan) fail "${f}" "state and plan files must not be committed" ;;
+    *) ;;
+  esac
+
+  # 1. Inline suppressions.
+  scan_content=${explicit}
+  case "${f}" in
+    infra/*) scan_content=1 ;;
+    *) ;;
+  esac
+  case "${lower}" in
+    *.tf | *.tofu | *.tftpl | *.tfvars | *.tfvars.json | *.hcl) scan_content=1 ;;
+    *) ;;
+  esac
+  if [ "${scan_content}" -eq 1 ]; then
+    lines="$(grep -niE 'trivy:ignore|tfsec:ignore|tflint-ignore' "${f}" | cut -d: -f1 | tr '\n' ' ' || true)"
+    if [ -n "${lines}" ]; then fail "${f}" "inline suppression on line(s) ${lines% }"; fi
+  fi
+
+  # 4. Module sources must stay inside infra/.
+  check_modules=0
+  case "${lower}" in
+    *.tf | *.tofu)
+      case "${f}" in
+        infra/*) check_modules=1 ;;
+        *) check_modules=${explicit} ;;
+      esac
+      ;;
+    *) ;;
+  esac
+  [ "${check_modules}" -eq 1 ] || continue
+  module_sources "${f}" >"${sources}"
+  while IFS= read -r src; do
+    case "${src}" in
+      ./* | ../*)
+        resolved="$(cd "$(dirname "${f}")" 2>/dev/null && cd "${src}" 2>/dev/null && pwd -P || true)"
+        case "${resolved}" in
+          "${infra_root}" | "${infra_root}"/*) ;;
+          "") fail "${f}" "module source ${src} does not exist" ;;
+          *) fail "${f}" "module source ${src} resolves outside infra/" ;;
+        esac
+        ;;
+      *) fail "${f}" "module source ${src} is not a local path inside infra/" ;;
+    esac
+  done <"${sources}"
+done <"${list}"
+exit "${status}"

@@ -1,0 +1,212 @@
+#!/bin/sh
+# OpenTofu checks and human-only operations for infra/.
+#
+# Usage: scripts/infra validate|lint|scan|modules
+#        scripts/infra plan|apply --human [stack]
+#   validate  tofu fmt -check, then init -backend=false and validate for every
+#             module and stack (offline apart from the provider download; the
+#             committed lock file is read-only)
+#   lint      tflint (terraform "all" preset + the pinned AWS ruleset)
+#   scan      install (tofu get) and check the modules of every module and stack,
+#             then trivy config: no HIGH or CRITICAL misconfigurations
+#   modules   check the modules tofu installed (.terraform/modules/modules.json)
+#             in every module and stack: each must be a local path inside infra/
+#   plan      human only: init with backend.hcl and plan a stack (default prod)
+#   apply     human only: apply the saved plan of a stack
+# plan and apply need the explicit --human flag, an interactive terminal, and
+# no CI or agent environment (CI, GITHUB_ACTIONS, CLAUDE*, CODEX*, AGENT*).
+# They are the only places in the repo that run tofu plan or apply
+# (tests/shell/test_infra_human_only checks that).
+# validate, lint and scan never touch AWS.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+root="infra"
+cmd="${1:?usage: scripts/infra validate|lint|scan|modules|plan|apply [stack]}"
+
+# The tools take settings from the environment (TRIVY_SKIP_FILES,
+# TRIVY_MISCONFIG_SCANNERS, TFLINT_*, TF_CLI_ARGS_*, TF_VAR_*, ...), which a
+# mise [env] block or CI could set silently. Clear them all: only the
+# committed configs, the tfvars files on disk and the flags below decide what
+# is checked and applied.
+for v in $(env | sed -n -e 's/^\(TRIVY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TFLINT_[A-Za-z0-9_]*\)=.*/\1/p' \
+  -e 's/^\(TF_CLI_ARGS[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TF_VAR_[A-Za-z0-9_]*\)=.*/\1/p' \
+  -e 's/^\(TOFU_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "${v}"
+done
+for v in TF_PLUGIN_CACHE_DIR TF_DATA_DIR TF_WORKSPACE TERRAFORM_CONFIG; do
+  unset "${v}"
+done
+# An empty CLI config: no ~/.terraformrc, ~/.tofurc or working-dir rc file, so
+# no provider dev_overrides, mirrors or plugin caches can swap what runs.
+TF_CLI_CONFIG_FILE=/dev/null
+export TF_CLI_CONFIG_FILE
+
+# Every directory under infra/ that holds configuration, sorted, one per line.
+tf_dirs() {
+  find "${root}" -name .terraform -prune -o -type f \( -name '*.tf' -o -name '*.tofu' \) -print |
+    sed 's|/[^/]*$||' | sort -u
+}
+
+init_offline() {
+  tofu -chdir="$1" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+}
+
+# Authoritative module check, from tofu's own resolution: every module that
+# `tofu init` installed for <dir> must come from a local path ("./" or "../")
+# and live inside infra/. Inline-ignore and config checks only cover infra/,
+# so a module from anywhere else would escape them.
+check_modules() {
+  manifest="$1/.terraform/modules/modules.json"
+  [ -f "${manifest}" ] || return 0
+  infra_abs="$(cd "${root}" && pwd -P)"
+  bad=0
+  entries="$(jq -r '.Modules[] | select(.Key != "") | [.Key, .Source, .Dir] | @tsv' "${manifest}")" || {
+    printf 'infra modules: %s: unreadable module manifest\n' "$1" >&2
+    return 1
+  }
+  tab="$(printf '\t')"
+  while IFS="${tab}" read -r key src dir; do
+    [ -n "${key}" ] || continue
+    case "${src}" in
+      ./* | ../*) ;;
+      *)
+        printf 'infra modules: %s: module %s has a non-local source (%s)\n' "$1" "${key}" "${src}" >&2
+        bad=1
+        continue
+        ;;
+    esac
+    abs="$(cd "$1" 2>/dev/null && cd "${dir}" 2>/dev/null && pwd -P || true)"
+    case "${abs}" in
+      "${infra_abs}" | "${infra_abs}"/*) ;;
+      *)
+        printf 'infra modules: %s: module %s resolves outside infra/ (%s)\n' "$1" "${key}" "${dir}" >&2
+        bad=1
+        ;;
+    esac
+  done <<EOF
+${entries}
+EOF
+  return "${bad}"
+}
+
+refuse() {
+  printf 'infra: %s is for humans only: %s\n' "${cmd}" "$1" >&2
+  exit 1
+}
+
+human_only() {
+  [ "${1:-}" = "--human" ] || refuse "pass --human (task infra:${cmd} -- --human [stack])"
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then refuse "refusing to run in CI"; fi
+  agent_vars="$(env | sed -n -e 's/^\(CLAUDE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(CODEX[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(AGENT[A-Za-z0-9_]*\)=.*/\1/p')"
+  if [ -n "${agent_vars}" ]; then
+    names="$(printf '%s' "${agent_vars}" | tr '\n' ' ')"
+    refuse "refusing to run under an agent (${names})"
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then refuse "needs an interactive terminal"; fi
+}
+
+# Files OpenTofu loads that the scanners don't see as written: override files
+# are merged into other resources (trivy scans the unmerged base), symlinks
+# are followed by tofu but not by trivy, and CLI config files can redirect
+# providers (dev_overrides).
+refuse_hidden_config() {
+  hidden="$(find "${root}" -name .terraform -prune -o \( -type l -o -name 'override.tf' -o -name '*_override.tf' \
+    -o -name 'override.tofu' -o -name '*_override.tofu' -o -name 'override.tf.json' -o -name '*_override.tf.json' \
+    -o -name 'override.tofu.json' -o -name '*_override.tofu.json' \
+    -o -name '.terraformrc' -o -name 'terraform.rc' -o -name '.tofurc' -o -name 'tofu.rc' \) -print)"
+  if [ -n "${hidden}" ]; then
+    printf 'infra: override files and symlinks are not allowed under %s/:\n%s\n' "${root}" "${hidden}" >&2
+    exit 1
+  fi
+}
+
+case "${cmd}" in
+  validate)
+    refuse_hidden_config
+    tofu fmt -check -recursive -diff "${root}"
+    for d in $(tf_dirs); do
+      printf 'infra validate: %s\n' "${d}"
+      init_offline "${d}"
+      check_modules "${d}"
+      tofu -chdir="${d}" validate -no-color
+    done
+    ;;
+  modules)
+    for d in $(tf_dirs); do
+      check_modules "${d}"
+    done
+    ;;
+  lint)
+    plugin="$(command -v tflint-ruleset-aws || true)"
+    if [ -z "${plugin}" ]; then
+      printf 'infra lint: tflint-ruleset-aws not on PATH (run: task setup)\n' >&2
+      exit 1
+    fi
+    TFLINT_PLUGIN_DIR="${plugin%/*}"
+    export TFLINT_PLUGIN_DIR
+    config="$(pwd)/${root}/.tflint.hcl"
+    for d in $(tf_dirs); do
+      printf 'infra lint: %s\n' "${d}"
+      tflint --chdir="${d}" --config="${config}" --no-color
+    done
+    ;;
+  scan)
+    # Embedded checks only (--skip-check-update): the result depends on the
+    # pinned trivy version, not on whatever bundle a registry serves today.
+    # Only the committed infra/trivy.yaml is read (--config), and no ignore file
+    # (--ignorefile ""). Inline ignores are rejected by
+    # scripts/checks/infra-no-suppressions. The flags repeat the config so a
+    # config edit can never relax them.
+    refuse_hidden_config
+    # tofu get installs modules only (no providers), so this works offline.
+    for d in $(tf_dirs); do
+      tofu -chdir="${d}" get -no-color >/dev/null
+      check_modules "${d}"
+    done
+    # OpenTofu auto-loads terraform.tfvars and *.auto.tfvars, trivy does not.
+    # Committed tfvars are rejected (scripts/checks/infra-no-suppressions);
+    # local ones (a human's real values) are passed in, so the scan judges
+    # what an apply would use.
+    set --
+    for f in $(find "${root}" -name .terraform -prune -o -type f \( -name '*.tfvars' -o -name '*.tfvars.json' \) -print | sort); do
+      set -- "$@" --tf-vars "${f}"
+    done
+    trivy config --config "${root}/trivy.yaml" \
+      --quiet --disable-telemetry --skip-check-update \
+      --ignorefile "" \
+      --skip-dirs '**/.terraform' \
+      --severity HIGH,CRITICAL --exit-code 1 "$@" "${root}"
+    ;;
+  plan | apply)
+    human_only "${2:-}"
+    stack="${3:-prod}"
+    case "${stack}" in
+      "" | *[!a-z0-9-]*)
+        printf 'infra: bad stack name\n' >&2
+        exit 64
+        ;;
+      *) ;;
+    esac
+    dir="${root}/stacks/${stack}"
+    [ -d "${dir}" ] || {
+      printf 'infra: no stack %s\n' "${dir}" >&2
+      exit 64
+    }
+    if [ "${cmd}" = plan ]; then
+      if [ -f "${dir}/backend.hcl" ]; then
+        tofu -chdir="${dir}" init -input=false -lockfile=readonly -backend-config=backend.hcl
+      else
+        tofu -chdir="${dir}" init -input=false -lockfile=readonly
+      fi
+      tofu -chdir="${dir}" plan -input=false -out=current.tfplan
+    else
+      tofu -chdir="${dir}" apply -input=false current.tfplan
+    fi
+    ;;
+  *)
+    printf 'unknown command: %s\n' "${cmd}" >&2
+    exit 64
+    ;;
+esac

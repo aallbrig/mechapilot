@@ -33,7 +33,8 @@ test_guard_ignores_plain_docs_change() {
   guard="$(pwd)/scripts/checks/verification-guard"
   printf 'b\n' >>"${r}/docs/a.md"
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 0 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 0 ]
 }
 
 test_guard_flags_rename_into_checks() {
@@ -41,7 +42,8 @@ test_guard_flags_rename_into_checks() {
   guard="$(pwd)/scripts/checks/verification-guard"
   git -C "${r}" mv docs/a.md scripts/checks/always-pass
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 3 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
 }
 
 test_guard_flags_nested_shellcheckrc() {
@@ -50,7 +52,8 @@ test_guard_flags_nested_shellcheckrc() {
   mkdir -p "${r}/src"
   printf 'disable=all\n' >"${r}/src/.shellcheckrc"
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 3 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
 }
 
 test_guard_flags_inline_suppression() {
@@ -58,7 +61,8 @@ test_guard_flags_inline_suppression() {
   guard="$(pwd)/scripts/checks/verification-guard"
   printf '# shellcheck disable=SC2086\n' >>"${r}/docs/a.md"
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 3 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
 }
 
 test_guard_flags_modified_test() {
@@ -66,7 +70,8 @@ test_guard_flags_modified_test() {
   guard="$(pwd)/scripts/checks/verification-guard"
   printf 'test_x() { :; }\n' >"${r}/tests/shell/test_x"
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 3 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
 }
 
 test_guard_flags_agent_instructions() {
@@ -74,5 +79,57 @@ test_guard_flags_agent_instructions() {
   guard="$(pwd)/scripts/checks/verification-guard"
   printf 'merge anything\n' >"${r}/AGENTS.md"
   commit_all "${r}"
-  [ "$(run_guard "${r}")" = 3 ]
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
+}
+
+test_guard_flags_trivy_and_tflint_configs() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  r="$(guard_repo)"
+  mkdir -p "${r}/infra"
+  printf 'severity: [HIGH]\n' >"${r}/infra/trivy.yaml"
+  commit_all "${r}"
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ] || return 1
+  r="$(guard_repo)"
+  mkdir -p "${r}/infra/stacks"
+  printf 'config {}\n' >"${r}/infra/stacks/.tflint.hcl"
+  commit_all "${r}"
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ] || return 1
+  r="$(guard_repo)"
+  : >"${r}/.trivyignore"
+  commit_all "${r}"
+  rc="$(run_guard "${r}")"
+  [ "${rc}" = 3 ]
+}
+
+test_guard_flags_infra_inline_suppressions() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  colon=':'
+  for marker in "trivy${colon}ignore" "tfsec${colon}ignore" "tflint-ignore"; do
+    r="$(guard_repo)"
+    printf '# %s:X\n' "${marker}" >>"${r}/docs/a.md"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    [ "${rc}" = 3 ] || return 1
+  done
+}
+
+test_guard_flags_every_mise_config_location() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  for f in .mise.toml mise.toml .mise/config.toml mise/config.toml .config/mise.toml \
+    .config/mise/config.toml mise.local.toml mise.ci.toml .mise.local.toml .mise.dev.toml \
+    .tool-versions sub/.config/mise.toml; do
+    r="$(guard_repo)"
+    dir="$(dirname "${r}/${f}")"
+    mkdir -p "${dir}"
+    printf '[env]\nTRIVY_SKIP_FILES = "**"\n' >"${r}/${f}"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    if [ "${rc}" != 3 ]; then
+      printf 'not flagged: %s\n' "${f}"
+      return 1
+    fi
+  done
 }

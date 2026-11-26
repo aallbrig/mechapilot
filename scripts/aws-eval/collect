@@ -150,7 +150,13 @@ ro logs describe-log-groups >"${raw}/log-groups.json"
 
 printf 'collect: trivy config infra/\n' >&2
 if [ -d infra ]; then
-  trivy config --quiet --format json --output "${raw}/trivy.json" infra
+  # Same config, offline checks, ignore policy and skips as task infra:scan
+  # (scripts/infra), so the two can't drift; only severity and exit code differ:
+  # the evaluation wants every finding and must not stop on one.
+  trivy config --config infra/trivy.yaml --quiet --disable-telemetry --skip-check-update \
+    --ignorefile "" --skip-dirs '**/.terraform' \
+    --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --exit-code 0 \
+    --format json --output "${raw}/trivy.json" infra
 else
   printf 'collect: no infra/ yet; trivy skipped\n' >&2
   cp "${raw}/null.json" "${raw}/trivy.json"

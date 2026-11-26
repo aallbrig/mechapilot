@@ -1,0 +1,112 @@
+#!/bin/sh
+# Tests for `scripts/infra scan`: a planted HIGH/CRITICAL finding must fail the
+# scan, and no TRIVY_* environment variable may switch that off.
+# Each test scans a throwaway tree holding the committed scripts/infra and
+# infra/trivy.yaml plus one bad resource (SSH open to the internet).
+
+planted_tree() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts" "${d}/infra/stacks/planted"
+  cp "${root}/scripts/infra" "${d}/scripts/infra"
+  cp "${root}/infra/trivy.yaml" "${d}/infra/trivy.yaml"
+  cat >"${d}/infra/stacks/planted/main.tf" <<'EOF'
+resource "aws_security_group_rule" "planted" {
+  description       = "planted finding"
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = "sg-planted"
+}
+EOF
+  printf 'package trivy\n\nimport rego.v1\n\ndefault ignore := true\n' >"${d}/ignore-all.rego"
+  printf '%s' "${d}"
+}
+
+# scan_rc <dir> [VAR=value ...]: exit status of scripts/infra scan in <dir>,
+# or "no-finding" if the scan didn't fail because trivy reported the planted
+# rule (so a failure elsewhere, e.g. in tofu, can't pass these tests).
+scan_rc() {
+  dir="$1"
+  shift
+  rc=0
+  out="$(cd "${dir}" && env "$@" scripts/infra scan 2>&1)" || rc=$?
+  rm -rf "${dir}"
+  case "${out}" in
+  *"AWS-0107 (HIGH)"*) printf '%s' "${rc}" ;;
+  *) printf 'no-finding' ;;
+  esac
+}
+
+test_infra_scan_fails_on_planted_finding() {
+  d="$(planted_tree)"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_scan_ignores_trivy_skip_files() {
+  d="$(planted_tree)"
+  rc="$(scan_rc "${d}" 'TRIVY_SKIP_FILES=**/planted/main.tf' 'TRIVY_SKIP_DIRS=**/planted')"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_scan_ignores_trivy_misconfig_scanners() {
+  d="$(planted_tree)"
+  rc="$(scan_rc "${d}" TRIVY_MISCONFIG_SCANNERS=cloudformation TRIVY_SCANNERS=secret)"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_scan_ignores_trivy_ignore_policy() {
+  d="$(planted_tree)"
+  rc="$(scan_rc "${d}" "TRIVY_IGNORE_POLICY=${d}/ignore-all.rego")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_scan_ignores_trivy_severity_and_exit_code() {
+  d="$(planted_tree)"
+  rc="$(scan_rc "${d}" TRIVY_SEVERITY=UNKNOWN TRIVY_EXIT_CODE=0 TRIVY_CONFIG=/dev/null)"
+  [ "${rc}" = 1 ]
+}
+
+# A secure default that a tfvars value flips: OpenTofu auto-loads
+# terraform.tfvars, so the scan must judge it too.
+tfvars_tree() {
+  d="$(planted_tree)"
+  cat >"${d}/infra/stacks/planted/main.tf" <<'EOF'
+variable "lock_down" {
+  description = "Keep SSH closed to the internet."
+  type        = bool
+  default     = true
+}
+
+resource "aws_security_group_rule" "planted" {
+  description       = "planted finding"
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = var.lock_down ? ["10.0.0.0/8"] : ["0.0.0.0/0"]
+  security_group_id = "sg-planted"
+}
+EOF
+  printf '%s' "${d}"
+}
+
+test_infra_scan_passes_secure_default_without_tfvars() {
+  d="$(tfvars_tree)"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = "no-finding" ]
+}
+
+test_infra_scan_judges_local_tfvars() {
+  d="$(tfvars_tree)"
+  printf 'lock_down = false\n' >"${d}/infra/stacks/planted/terraform.tfvars"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = 1 ] || return 1
+  d="$(tfvars_tree)"
+  printf 'lock_down = false\n' >"${d}/infra/stacks/planted/prod.auto.tfvars"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = 1 ]
+}
