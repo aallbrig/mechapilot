@@ -1,0 +1,22 @@
+#!/bin/sh
+# Tests for scripts/test-shell itself.
+
+# Hooks export GIT_DIR; tests that build throwaway repos must not inherit it,
+# or they rewrite the real repository (seen when pre-push ran in a worktree).
+test_test_shell_drops_git_environment_from_hooks() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/tests/shell"
+  # The probe's name is built at runtime so this runner doesn't discover it here.
+  probe="test_""probe"
+  {
+    printf '%s() {\n' "${probe}"
+    cat <<'EOF'
+  [ -z "${GIT_DIR:-}${GIT_INDEX_FILE:-}${GIT_WORK_TREE:-}" ]
+}
+EOF
+  } >"${d}/tests/shell/test_probe"
+  (cd "${d}" && GIT_DIR="${d}/not-a-repo" GIT_INDEX_FILE="${d}/index" GIT_WORK_TREE="${d}" \
+    "${root}/scripts/test-shell" "${d}/out" >/dev/null) || return 1
+  grep -q 'tests="1" failures="0"' "${d}/out/shell.xml"
+}
