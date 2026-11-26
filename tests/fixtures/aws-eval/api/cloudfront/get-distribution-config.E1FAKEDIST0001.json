@@ -1,0 +1,34 @@
+{
+  "ETag": "fake-etag",
+  "DistributionConfig": {
+    "Origins": {
+      "Quantity": 1,
+      "Items": [
+        {
+          "Id": "s3-assets",
+          "DomainName": "fake-public-assets-111122223333.s3.us-east-1.amazonaws.com",
+          "OriginAccessControlId": "",
+          "S3OriginConfig": {
+            "OriginAccessIdentity": ""
+          }
+        }
+      ]
+    },
+    "DefaultCacheBehavior": {
+      "TargetOriginId": "s3-assets",
+      "ViewerProtocolPolicy": "redirect-to-https",
+      "ResponseHeadersPolicyId": "00000000-0000-4000-8000-0000000000cc"
+    },
+    "CacheBehaviors": {
+      "Quantity": 0
+    },
+    "ViewerCertificate": {
+      "ACMCertificateArn": "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000aa",
+      "MinimumProtocolVersion": "TLSv1.2_2019",
+      "SSLSupportMethod": "sni-only"
+    },
+    "Logging": {
+      "Enabled": false
+    }
+  }
+}

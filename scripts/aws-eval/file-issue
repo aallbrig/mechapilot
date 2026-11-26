@@ -1,0 +1,37 @@
+#!/bin/sh
+# File one finding as a GitHub issue labelled needs-triage, only if it is clean.
+# Usage: scripts/aws-eval/file-issue <title> <body-file> [inventory.json]
+# Runs scripts/aws-eval/redact --check over the title and body (with the
+# inventory's resource names as literals; default .scratch/aws-eval/inventory.json)
+# and refuses, without calling gh, if any identifier is left.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+title="${1:?usage: file-issue <title> <body-file> [inventory.json]}"
+body="${2:?usage: file-issue <title> <body-file> [inventory.json]}"
+inventory="${3:-.scratch/aws-eval/inventory.json}"
+
+if [ ! -f "${body}" ]; then
+  printf 'file-issue: no body file %s\n' "${body}" >&2
+  exit 64
+fi
+if [ ! -f "${inventory}" ]; then
+  printf 'file-issue: no inventory at %s; its resource names are needed for the check\n' "${inventory}" >&2
+  exit 64
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+{
+  printf '%s\n' "${title}"
+  cat "${body}"
+} >"${work}/all.txt"
+
+status=0
+"${here}/redact" --check --known "${inventory}" <"${work}/all.txt" || status=$?
+if [ "${status}" -ne 0 ]; then
+  printf 'file-issue: REFUSED: the title or body still holds identifiers; pipe it through scripts/aws-eval/redact\n' >&2
+  exit 1
+fi
+
+gh issue create --title "${title}" --body-file "${body}" --label needs-triage

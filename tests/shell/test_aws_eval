@@ -1,0 +1,283 @@
+#!/bin/sh
+# Tests for scripts/aws-eval/* (run by scripts/test-shell). No AWS calls: a fake
+# `aws` (tests/fixtures/aws-eval/fake-aws.sh) answers from canned fixtures.
+
+fixtures="tests/fixtures/aws-eval"
+now="2026-11-26T12:00:00Z"
+
+# Score a fixture inventory into a temp file and print its path.
+scored() {
+  r="$(mktemp)"
+  scripts/aws-eval/score --now "${now}" "${fixtures}/$1" >"${r}" || return 1
+  printf '%s' "${r}"
+}
+
+# True when the report has a finding with this id, severity and resource.
+has_finding() {
+  jq -e --arg id "$2" --arg sev "$3" --arg res "$4" \
+    'any(.findings[]; .id == $id and .severity == $sev and .resource == $res)' "$1" >/dev/null
+}
+
+# Put the fake aws (and a fake gh) first on PATH, answering from a copy of the API fixtures.
+use_fake_aws() {
+  fake="$(mktemp -d)"
+  mkdir -p "${fake}/bin"
+  ln -s "${PWD}/${fixtures}/fake-aws.sh" "${fake}/bin/aws"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/gh.log"\n' "${fake}" >"${fake}/bin/gh"
+  chmod +x "${fake}/bin/gh"
+  cp -R "${fixtures}/api" "${fake}/api"
+  : >"${fake}/aws.log"
+  FAKE_AWS_DIR="${fake}/api"
+  FAKE_AWS_LOG="${fake}/aws.log"
+  PATH="${fake}/bin:${PATH}"
+  export FAKE_AWS_DIR FAKE_AWS_LOG PATH
+}
+
+# A throwaway git repo that ignores .scratch/, like this one.
+scratch_repo() {
+  repo="$(mktemp -d)"
+  git -C "${repo}" init --quiet || return 1
+  printf '.scratch/\n' >"${repo}/.gitignore"
+  printf '%s' "${repo}"
+}
+
+identifiers_input() {
+  printf 'account 111122223333 owns arn:aws:iam::111122223333:role/fake-deploy\n'
+  printf 'distribution E1FAKEDIST0001 zone Z0FAKEZONE00001 cert 00000000-0000-4000-8000-0000000000aa\n'
+  printf 'mail someone@example.com host d111111abcdef8.cloudfront.net internal fake-build-01.corp.example.net\n'
+  printf 'iam key %s\n' "AKIA$(printf 'FAKE%.0s' 1 2 3 4)"
+  printf 'again 111122223333 E1FAKEDIST0001\n'
+}
+
+test_aws_eval_redacts_identifiers() {
+  out="$(identifiers_input | scripts/aws-eval/redact --no-known)" || return 1
+  printf '%s\n' "${out}"
+  for leaked in 111122223333 arn:aws E1FAKEDIST0001 Z0FAKEZONE00001 00000000-0000-4000-8000-0000000000aa \
+    someone@example.com cloudfront.net corp.example.net AKIAFAKE; do
+    if printf '%s' "${out}" | grep -qF "${leaked}"; then
+      printf 'leaked: %s\n' "${leaked}"
+      return 1
+    fi
+  done
+  # Stable: the repeated account and distribution get the same placeholders.
+  printf '%s\n' "${out}" | grep -qxF 'again [account-1] [resource-id-2]'
+}
+
+test_aws_eval_redact_keeps_public_domain_and_prose() {
+  in='game.mechafighter.com uses TLSv1.2_2021; see report.json, e.g. github.com and sts.amazonaws.com'
+  out="$(printf '%s\n' "${in}" | scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = "${in}" ]
+}
+
+test_aws_eval_redact_check_fails_without_echoing_values() {
+  err="$(identifiers_input | scripts/aws-eval/redact --check 2>&1 >/dev/null)" && return 1
+  printf '%s\n' "${err}" | grep -q 'residual account' || return 1
+  ! printf '%s' "${err}" | grep -qF 111122223333
+}
+
+test_aws_eval_redact_check_passes_clean_text() {
+  printf 'All [account-1] buckets on game.mechafighter.com scored 85.\n' | scripts/aws-eval/redact --check
+}
+
+test_aws_eval_redact_requires_known_or_no_known() {
+  ! printf 'x\n' | scripts/aws-eval/redact 2>/dev/null
+}
+
+test_aws_eval_redact_replaces_inventory_names() {
+  out="$(printf 'bucket fake-private-logs, role fake-oidc-any-ref, log group /fake/app\n' |
+    scripts/aws-eval/redact --known "${fixtures}/inventory-insecure.json")" || return 1
+  [ "${out}" = 'bucket [bucket-1], role [role-1], log group [log-group-1]' ]
+}
+
+test_aws_eval_redacted_report_matches_schema_and_hides_names() {
+  r="$(scored inventory-insecure.json)" || return 1
+  red="$(mktemp)"
+  scripts/aws-eval/redact --known "${fixtures}/inventory-insecure.json" <"${r}" >"${red}" || return 1
+  check-jsonschema --schemafile schemas/aws-eval-report.schema.json "${red}" || return 1
+  ! grep -qE 'fake-|111122223333|E1FAKEDIST' "${red}"
+}
+
+test_aws_eval_fixtures_match_inventory_schema() {
+  check-jsonschema --schemafile schemas/aws-eval-inventory.schema.json \
+    "${fixtures}/inventory-insecure.json" "${fixtures}/inventory-secure.json"
+}
+
+test_aws_eval_report_matches_schema() {
+  r="$(scored inventory-insecure.json)" || return 1
+  s="$(scored inventory-secure.json)" || return 1
+  check-jsonschema --schemafile schemas/aws-eval-report.schema.json "${r}" "${s}"
+}
+
+test_aws_eval_flags_public_bucket() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" S3_PUBLIC_BUCKET critical fake-public-assets-111122223333 || return 1
+  # Only the bucket whose policy status is public.
+  ! jq -e 'any(.findings[]; .id == "S3_PUBLIC_BUCKET" and .resource == "fake-private-logs")' "${r}" >/dev/null
+}
+
+test_aws_eval_flags_incomplete_public_access_block() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" S3_PUBLIC_ACCESS_BLOCK_INCOMPLETE high fake-private-logs &&
+    has_finding "${r}" S3_PUBLIC_ACCESS_BLOCK_INCOMPLETE high fake-public-assets-111122223333
+}
+
+test_aws_eval_flags_missing_hsts() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" CF_NO_HSTS high E1FAKEDIST0001
+}
+
+test_aws_eval_flags_old_tls_policy() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" CF_TLS_POLICY_OLD high E1FAKEDIST0001 || return 1
+  # TLSv1.2_2021 itself passes.
+  s="$(scored inventory-secure.json)" || return 1
+  ! jq -e 'any(.findings[]; .id == "CF_TLS_POLICY_OLD")' "${s}" >/dev/null
+}
+
+test_aws_eval_flags_s3_origin_without_oac() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" CF_S3_ORIGIN_WITHOUT_OAC high E1FAKEDIST0001 &&
+    has_finding "${r}" CF_S3_WEBSITE_ORIGIN high E1FAKEDIST0001 &&
+    has_finding "${r}" CF_HTTP_ALLOWED medium E1FAKEDIST0001
+}
+
+test_aws_eval_flags_oidc_trust_without_sub() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" OIDC_TRUST_WITHOUT_SUB critical arn:aws:iam::111122223333:role/fake-oidc-no-sub
+}
+
+test_aws_eval_flags_oidc_wildcard_repo() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" OIDC_TRUST_WILDCARD_REPO critical arn:aws:iam::111122223333:role/fake-oidc-wildcard &&
+    has_finding "${r}" OIDC_TRUST_AUDIENCE high arn:aws:iam::111122223333:role/fake-oidc-wildcard &&
+    has_finding "${r}" OIDC_TRUST_ANY_REF medium arn:aws:iam::111122223333:role/fake-oidc-any-ref
+}
+
+test_aws_eval_flags_expiring_and_expired_certificates() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" ACM_EXPIRING high arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000aa &&
+    has_finding "${r}" ACM_EXPIRED critical arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000bb
+}
+
+test_aws_eval_flags_logging_and_retention() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" CF_LOGGING_OFF low E1FAKEDIST0001 &&
+    has_finding "${r}" LOGS_NO_RETENTION low /fake/app &&
+    has_finding "${r}" S3_ACCESS_LOGGING_OFF low fake-private-logs
+}
+
+test_aws_eval_maps_trivy_failures() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" TRIVY_AWS_0089 medium main.tf || return 1
+  # Passing checks are not findings.
+  ! jq -e 'any(.findings[]; .id == "TRIVY_AWS_0086")' "${r}" >/dev/null
+}
+
+test_aws_eval_score_counts_and_floors() {
+  r="$(scored inventory-insecure.json)" || return 1
+  jq -e '.score == 0 and .counts.critical == 4 and
+    (.counts | .critical + .high + .medium + .low) == (.findings | length)' "${r}" >/dev/null
+}
+
+test_aws_eval_secure_inventory_scores_100() {
+  s="$(scored inventory-secure.json)" || return 1
+  jq -e '.score == 100 and (.findings | length) == 0 and .evaluated.trivy == true' "${s}" >/dev/null
+}
+
+refused() {
+  ! scripts/aws-eval/aws-ro "$@" 2>/dev/null
+}
+
+test_aws_eval_aws_ro_refuses_writes() {
+  use_fake_aws
+  refused s3api put-bucket-policy --bucket x &&
+    refused s3api delete-bucket --bucket x &&
+    refused iam create-role --role-name x &&
+    refused iam get-account-authorization-details &&
+    refused s3 cp a s3://x &&
+    refused s3api get-bucket-policy-status --endpoint-url=http://x &&
+    refused s3api list-buckets --cli-input-json file://x || return 1
+  # Refused calls never reach aws.
+  [ ! -s "${FAKE_AWS_LOG}" ] || return 1
+  scripts/aws-eval/aws-ro s3api list-buckets >/dev/null && grep -qx 's3api list-buckets' "${FAKE_AWS_LOG}"
+}
+
+test_aws_eval_collect_builds_valid_inventory() {
+  use_fake_aws
+  root="${PWD}"
+  repo="$(scratch_repo)" || return 1
+  (cd "${repo}" && "${root}/scripts/aws-eval/collect") || return 1
+  inv="${repo}/.scratch/aws-eval/inventory.json"
+  check-jsonschema --schemafile schemas/aws-eval-inventory.schema.json "${inv}" || return 1
+  # Only reads were made, and only the GitHub OIDC role was fetched.
+  ! grep -vE '^[a-z0-9]+ (get|list|describe)-' "${FAKE_AWS_LOG}" || return 1
+  roles_fetched="$(grep -c '^iam get-role$' "${FAKE_AWS_LOG}")"
+  [ "${roles_fetched}" -eq 1 ] || return 1
+  jq -e '.oidc_roles[0].name == "fake-oidc-no-sub" and .buckets[0].public_access_block == null
+    and .log_groups == [{"name": "/fake/app", "retention_days": null}, {"name": "/fake/kept", "retention_days": 90}]
+    and .trivy == null' "${inv}" >/dev/null || return 1
+  r="$(mktemp)"
+  scripts/aws-eval/score --now "${now}" "${inv}" >"${r}" || return 1
+  has_finding "${r}" S3_PUBLIC_BUCKET critical fake-public-assets-111122223333 &&
+    has_finding "${r}" CF_NO_HSTS high E1FAKEDIST0001 &&
+    has_finding "${r}" OIDC_TRUST_WITHOUT_SUB critical arn:aws:iam::111122223333:role/fake-oidc-no-sub
+}
+
+test_aws_eval_collect_stops_on_access_denied() {
+  use_fake_aws
+  root="${PWD}"
+  rm "${FAKE_AWS_DIR}/s3api/get-public-access-block.err"
+  printf 'An error occurred (AccessDenied) when calling the GetPublicAccessBlock operation\n' \
+    >"${FAKE_AWS_DIR}/s3api/get-public-access-block.err"
+  repo="$(scratch_repo)" || return 1
+  ! (cd "${repo}" && "${root}/scripts/aws-eval/collect" 2>/dev/null) || return 1
+  [ ! -f "${repo}/.scratch/aws-eval/inventory.json" ]
+}
+
+test_aws_eval_collect_refuses_unignored_scratch() {
+  use_fake_aws
+  root="${PWD}"
+  repo="$(scratch_repo)" || return 1
+  : >"${repo}/.gitignore"
+  ! (cd "${repo}" && "${root}/scripts/aws-eval/collect" 2>/dev/null) || return 1
+  [ ! -s "${FAKE_AWS_LOG}" ] && [ ! -d "${repo}/.scratch" ]
+}
+
+test_aws_eval_check_profile_accepts_read_only_role() {
+  use_fake_aws
+  out="$(scripts/aws-eval/check-profile)" || return 1
+  [ "${out}" = 'check-profile: read-only (ReadOnlyAccess SecurityAudit)' ]
+}
+
+test_aws_eval_check_profile_rejects_admin_role() {
+  use_fake_aws
+  printf '{"Arn": "arn:aws:sts::111122223333:assumed-role/fake-admin/session"}\n' \
+    >"${FAKE_AWS_DIR}/sts/get-caller-identity.json"
+  err="$(scripts/aws-eval/check-profile 2>&1)" && return 1
+  printf '%s\n' "${err}" | grep -q 'policy AdministratorAccess is not an AWS-managed read-only policy'
+}
+
+test_aws_eval_check_profile_rejects_inline_policy() {
+  use_fake_aws
+  printf '{"PolicyNames": ["fake-inline"]}\n' >"${FAKE_AWS_DIR}/iam/list-role-policies.fake-readonly.json"
+  ! scripts/aws-eval/check-profile 2>/dev/null
+}
+
+test_aws_eval_file_issue_refuses_identifiers() {
+  use_fake_aws
+  body="$(mktemp)"
+  printf 'Bucket fake-private-logs in 111122223333 is public.\n' >"${body}"
+  ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json" 2>/dev/null || return 1
+  # The inventory name alone (no account ID) is refused too.
+  printf 'Bucket fake-private-logs is public.\n' >"${body}"
+  ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json" 2>/dev/null || return 1
+  [ ! -f "${fake}/gh.log" ]
+}
+
+test_aws_eval_file_issue_files_clean_body_as_needs_triage() {
+  use_fake_aws
+  body="$(mktemp)"
+  printf 'Bucket [bucket-1] is public (critical).\n' >"${body}"
+  scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json" || return 1
+  grep -q -- '--label needs-triage' "${fake}/gh.log"
+}

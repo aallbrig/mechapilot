@@ -25,7 +25,7 @@ tasks:
     cmds:
       - |
         missing=0
-        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator; do
+        for t in task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator trivy; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
         if [ -z "${CI:-}" ] && [ "$(git config core.hooksPath)" != ".githooks" ]; then
@@ -76,6 +76,8 @@ tasks:
       - check-jsonschema --check-metaschema schemas/tmuxinator.schema.json
       - scripts/checks/no-erb .tmuxinator.yml
       - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
+      - check-jsonschema --check-metaschema schemas/aws-eval-inventory.schema.json schemas/aws-eval-report.schema.json
+      - check-jsonschema --schemafile schemas/aws-eval-inventory.schema.json tests/fixtures/aws-eval/inventory-*.json
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript

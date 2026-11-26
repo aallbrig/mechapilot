@@ -1,0 +1,8 @@
+{
+  "CertificateSummaryList": [
+    {
+      "CertificateArn": "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000aa",
+      "DomainName": "*.mechafighter.com"
+    }
+  ]
+}

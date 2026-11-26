@@ -1,0 +1,83 @@
+#!/bin/sh
+# Confirm the current AWS credentials are read-only before collecting.
+# Usage: scripts/aws-eval/check-profile   (uses AWS_PROFILE as set)
+# Passes only when every policy on the caller (role, or user and its groups) is
+# an AWS-managed read-only policy and there are no inline policies. Exit 0 =
+# read-only, 1 = not read-only (or cannot tell), 2 = refused call.
+# Prints policy names only, never account IDs or ARNs.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+ro() {
+  "${here}/aws-ro" "$@"
+}
+
+ro sts get-caller-identity >"${work}/identity.json"
+arn="$(jq -r '.Arn' "${work}/identity.json")"
+
+# Policies that grant only reads.
+read_only_policy() {
+  case "$1" in
+    arn:aws:iam::aws:policy/ReadOnlyAccess | arn:aws:iam::aws:policy/SecurityAudit | \
+      arn:aws:iam::aws:policy/job-function/ViewOnlyAccess) printf 'yes' ;;
+    *) printf 'no' ;;
+  esac
+}
+
+: >"${work}/attached.txt"
+: >"${work}/inline.txt"
+case "${arn}" in
+  arn:aws:sts::*:assumed-role/*)
+    role="${arn#*:assumed-role/}"
+    role="${role%%/*}"
+    ro iam list-attached-role-policies --role-name "${role}" >"${work}/a.json"
+    ro iam list-role-policies --role-name "${role}" >"${work}/i.json"
+    jq -r '.AttachedPolicies[].PolicyArn' "${work}/a.json" >>"${work}/attached.txt"
+    jq -r '.PolicyNames[]' "${work}/i.json" >>"${work}/inline.txt"
+    ;;
+  arn:aws:iam::*:user/*)
+    user="${arn##*/}"
+    ro iam list-attached-user-policies --user-name "${user}" >"${work}/a.json"
+    ro iam list-user-policies --user-name "${user}" >"${work}/i.json"
+    jq -r '.AttachedPolicies[].PolicyArn' "${work}/a.json" >>"${work}/attached.txt"
+    jq -r '.PolicyNames[]' "${work}/i.json" >>"${work}/inline.txt"
+    ro iam list-groups-for-user --user-name "${user}" >"${work}/g.json"
+    jq -r '.Groups[].GroupName' "${work}/g.json" >"${work}/groups.txt"
+    while IFS= read -r group; do
+      ro iam list-attached-group-policies --group-name "${group}" >"${work}/a.json"
+      ro iam list-group-policies --group-name "${group}" >"${work}/i.json"
+      jq -r '.AttachedPolicies[].PolicyArn' "${work}/a.json" >>"${work}/attached.txt"
+      jq -r '.PolicyNames[]' "${work}/i.json" >>"${work}/inline.txt"
+    done <"${work}/groups.txt"
+    ;;
+  *)
+    printf 'check-profile: NOT read-only: the caller is neither an assumed role nor an IAM user (root?)\n' >&2
+    exit 1
+    ;;
+esac
+
+status=0
+if [ ! -s "${work}/attached.txt" ]; then
+  printf 'check-profile: NOT read-only: no attached policies found, cannot confirm\n' >&2
+  status=1
+fi
+while IFS= read -r policy; do
+  verdict="$(read_only_policy "${policy}")"
+  if [ "${verdict}" != "yes" ]; then
+    printf 'check-profile: NOT read-only: policy %s is not an AWS-managed read-only policy\n' "${policy##*/}" >&2
+    status=1
+  fi
+done <"${work}/attached.txt"
+while IFS= read -r inline; do
+  printf 'check-profile: NOT read-only: inline policy %s may grant writes\n' "${inline}" >&2
+  status=1
+done <"${work}/inline.txt"
+
+if [ "${status}" -eq 0 ]; then
+  names="$(sed 's|.*/||' "${work}/attached.txt" | sort -u | tr '\n' ' ')"
+  printf 'check-profile: read-only (%s)\n' "${names% }"
+fi
+exit "${status}"

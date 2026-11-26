@@ -1,0 +1,187 @@
+#!/bin/sh
+# Collect the AWS security posture behind the public domain, read-only.
+# Usage: scripts/aws-eval/collect   (run from the repo; uses AWS_PROFILE as set)
+# Every AWS call goes through scripts/aws-eval/aws-ro (allowlisted reads only).
+# Raw responses go to .scratch/aws-eval/raw/ and the assembled inventory to
+# .scratch/aws-eval/inventory.json (schemas/aws-eval-inventory.schema.json).
+# Both are gitignored and hold real identifiers: never publish them; publish
+# only what scripts/aws-eval/redact prints.
+# Env: AWS_EVAL_DOMAIN (default mechafighter.com), AWS_EVAL_REPO (default
+# aallbrig/mechapilot), AWS_EVAL_CERT_REGION (default us-east-1, CloudFront's).
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(git rev-parse --show-toplevel)"
+domain="${AWS_EVAL_DOMAIN:-mechafighter.com}"
+repo="${AWS_EVAL_REPO:-aallbrig/mechapilot}"
+cert_region="${AWS_EVAL_CERT_REGION:-us-east-1}"
+out="${root}/.scratch/aws-eval"
+raw="${out}/raw"
+
+cd "${root}"
+# Refuse to write anywhere git would track.
+if ! git check-ignore -q .scratch/aws-eval/inventory.json; then
+  printf 'collect: .scratch/ is not gitignored here; refusing to write raw AWS data\n' >&2
+  exit 1
+fi
+rm -rf "${raw}"
+mkdir -p "${raw}/buckets" "${raw}/distributions" "${raw}/headers" "${raw}/certificates" "${raw}/roles" "${raw}/zones"
+printf 'null\n' >"${raw}/null.json"
+
+ro() {
+  "${here}/aws-ro" "$@"
+}
+
+# Run a read whose "not configured" error is an expected answer.
+# Usage: optional <outfile> <expected error code> <service> <operation> [args...]
+# Writes the response, or null when AWS answers with the expected error code.
+# Any other failure (auth, throttling, network) stops the collection, so a
+# missing permission is never mistaken for a missing setting.
+optional() {
+  file="$1"
+  code="$2"
+  shift 2
+  err="${file}.err"
+  status=0
+  "${here}/aws-ro" "$@" >"${file}" 2>"${err}" || status=$?
+  if [ "${status}" -eq 0 ]; then
+    rm -f "${err}"
+    return 0
+  fi
+  if grep -q "(${code})" "${err}"; then
+    printf 'null\n' >"${file}"
+    rm -f "${err}"
+    return 0
+  fi
+  printf 'collect: %s %s failed:\n' "$1" "$2" >&2
+  cat "${err}" >&2
+  exit 1
+}
+
+# Safe file name for an identifier.
+slug() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+printf 'collect: S3\n' >&2
+ro s3api list-buckets >"${raw}/list-buckets.json"
+jq -r '.Buckets[]?.Name' "${raw}/list-buckets.json" >"${raw}/bucket-names.txt"
+while IFS= read -r bucket; do
+  d="${raw}/buckets/$(slug "${bucket}")"
+  mkdir -p "${d}"
+  optional "${d}/pab.json" NoSuchPublicAccessBlockConfiguration s3api get-public-access-block --bucket "${bucket}"
+  optional "${d}/policy-status.json" NoSuchBucketPolicy s3api get-bucket-policy-status --bucket "${bucket}"
+  optional "${d}/encryption.json" ServerSideEncryptionConfigurationNotFoundError s3api get-bucket-encryption --bucket "${bucket}"
+  ro s3api get-bucket-versioning --bucket "${bucket}" >"${d}/versioning.json"
+  ro s3api get-bucket-logging --bucket "${bucket}" >"${d}/logging.json"
+  # An empty response body means "not configured" for these two.
+  [ -s "${d}/versioning.json" ] || printf '{}\n' >"${d}/versioning.json"
+  [ -s "${d}/logging.json" ] || printf '{}\n' >"${d}/logging.json"
+  jq -n --arg name "${bucket}" \
+    --slurpfile pab "${d}/pab.json" --slurpfile ps "${d}/policy-status.json" \
+    --slurpfile enc "${d}/encryption.json" --slurpfile ver "${d}/versioning.json" --slurpfile log "${d}/logging.json" \
+    '{name: $name,
+      public_access_block: ($pab[0].PublicAccessBlockConfiguration // null),
+      policy_status: ($ps[0].PolicyStatus // null),
+      encryption: ($enc[0].ServerSideEncryptionConfiguration // null),
+      versioning: $ver[0], logging: $log[0]}' >"${d}/bucket.json"
+done <"${raw}/bucket-names.txt"
+
+printf 'collect: CloudFront\n' >&2
+ro cloudfront list-distributions >"${raw}/list-distributions.json"
+[ -s "${raw}/list-distributions.json" ] || printf '{}\n' >"${raw}/list-distributions.json"
+jq -r '.DistributionList.Items[]?.Id' "${raw}/list-distributions.json" >"${raw}/distribution-ids.txt"
+while IFS= read -r id; do
+  d="${raw}/distributions/$(slug "${id}")"
+  mkdir -p "${d}"
+  ro cloudfront get-distribution-config --id "${id}" >"${d}/config.json"
+  jq -r '[.DistributionConfig.DefaultCacheBehavior] + (.DistributionConfig.CacheBehaviors.Items // [])
+    | map(.ResponseHeadersPolicyId // empty) | unique[]' "${d}/config.json" >"${d}/header-policy-ids.txt"
+  : >"${d}/headers.jsonl"
+  while IFS= read -r policy; do
+    h="${raw}/headers/$(slug "${policy}").json"
+    [ -f "${h}" ] || ro cloudfront get-response-headers-policy --id "${policy}" >"${h}"
+    jq -c '.ResponseHeadersPolicy.ResponseHeadersPolicyConfig' "${h}" >>"${d}/headers.jsonl"
+  done <"${d}/header-policy-ids.txt"
+  jq -n --arg id "${id}" --slurpfile c "${d}/config.json" --slurpfile h "${d}/headers.jsonl" \
+    '{id: $id, config: $c[0].DistributionConfig, response_headers_policies: $h}' >"${d}/distribution.json"
+done <"${raw}/distribution-ids.txt"
+
+printf 'collect: ACM\n' >&2
+ro acm list-certificates --region "${cert_region}" >"${raw}/list-certificates.json"
+jq -r '.CertificateSummaryList[]?.CertificateArn' "${raw}/list-certificates.json" >"${raw}/certificate-arns.txt"
+while IFS= read -r arn; do
+  f="${raw}/certificates/$(slug "${arn}")"
+  ro acm describe-certificate --region "${cert_region}" --certificate-arn "${arn}" >"${f}.response"
+  jq '.Certificate' "${f}.response" >"${f}.json"
+  rm -f "${f}.response"
+done <"${raw}/certificate-arns.txt"
+
+printf 'collect: IAM roles trusting GitHub OIDC\n' >&2
+ro iam list-roles >"${raw}/list-roles.json"
+jq -r '.Roles[]
+  | select([.AssumeRolePolicyDocument.Statement[]?.Principal.Federated // empty
+            | if type == "array" then .[] else . end
+            | select(endswith("token.actions.githubusercontent.com"))] | length > 0)
+  | .RoleName' "${raw}/list-roles.json" >"${raw}/oidc-role-names.txt"
+while IFS= read -r role; do
+  f="${raw}/roles/$(slug "${role}")"
+  ro iam get-role --role-name "${role}" >"${f}.response"
+  jq '{name: .Role.RoleName, arn: .Role.Arn, trust_policy: .Role.AssumeRolePolicyDocument}' "${f}.response" >"${f}.json"
+  rm -f "${f}.response"
+done <"${raw}/oidc-role-names.txt"
+
+printf 'collect: Route 53\n' >&2
+ro route53 list-hosted-zones >"${raw}/list-hosted-zones.json"
+jq -r '.HostedZones[]? | [.Id, .Name, (.Config.PrivateZone // false | tostring)] | @tsv' \
+  "${raw}/list-hosted-zones.json" >"${raw}/zones.tsv"
+tab="$(printf '\t')"
+while IFS="${tab}" read -r zone name private; do
+  f="${raw}/zones/$(slug "${zone}").json"
+  ro route53 list-resource-record-sets --hosted-zone-id "${zone}" >"${f}.records"
+  jq --arg id "${zone}" --arg name "${name}" --argjson private "${private}" \
+    '{id: $id, name: $name, private: $private, records: .ResourceRecordSets}' "${f}.records" >"${f}"
+  rm -f "${f}.records"
+done <"${raw}/zones.tsv"
+
+printf 'collect: CloudWatch Logs retention\n' >&2
+ro logs describe-log-groups >"${raw}/log-groups.json"
+
+printf 'collect: trivy config infra/\n' >&2
+if [ -d infra ]; then
+  trivy config --quiet --format json --output "${raw}/trivy.json" infra
+else
+  printf 'collect: no infra/ yet; trivy skipped\n' >&2
+  cp "${raw}/null.json" "${raw}/trivy.json"
+fi
+
+jq_all() {
+  dir="$1"
+  name="$2"
+  find "${dir}" -name "${name}" -type f | LC_ALL=C sort >"${raw}/files.txt"
+  if [ -s "${raw}/files.txt" ]; then
+    tr '\n' '\0' <"${raw}/files.txt" | xargs -0 jq -s '.'
+  else
+    printf '[]\n'
+  fi
+}
+
+jq_all "${raw}/buckets" bucket.json >"${raw}/buckets.json"
+jq_all "${raw}/distributions" distribution.json >"${raw}/distributions.json"
+jq_all "${raw}/certificates" '*.json' >"${raw}/certificates.json"
+jq_all "${raw}/roles" '*.json' >"${raw}/roles.json"
+jq_all "${raw}/zones" '*.json' >"${raw}/zones.json"
+
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n --arg now "${now}" --arg domain "${domain}" --arg repo "${repo}" \
+  --slurpfile buckets "${raw}/buckets.json" --slurpfile distributions "${raw}/distributions.json" \
+  --slurpfile certificates "${raw}/certificates.json" --slurpfile roles "${raw}/roles.json" \
+  --slurpfile zones "${raw}/zones.json" --slurpfile logs "${raw}/log-groups.json" \
+  --slurpfile trivy "${raw}/trivy.json" \
+  '{schema_version: 1, collected_at: $now, domain: $domain, repo: $repo,
+    buckets: $buckets[0], distributions: $distributions[0], certificates: $certificates[0],
+    oidc_roles: $roles[0], hosted_zones: $zones[0],
+    log_groups: [$logs[0].logGroups[]? | {name: .logGroupName, retention_days: (.retentionInDays // null)}],
+    trivy: $trivy[0]}' >"${out}/inventory.json"
+
+printf 'collect: wrote %s\n' ".scratch/aws-eval/inventory.json" >&2

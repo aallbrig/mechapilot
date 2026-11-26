@@ -1,0 +1,41 @@
+{
+  "Roles": [
+    {
+      "RoleName": "fake-oidc-no-sub",
+      "Arn": "arn:aws:iam::111122223333:role/fake-oidc-no-sub",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Federated": "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "RoleName": "fake-lambda",
+      "Arn": "arn:aws:iam::111122223333:role/fake-lambda",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    }
+  ]
+}
