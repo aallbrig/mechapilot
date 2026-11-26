@@ -1,0 +1,34 @@
+#!/bin/sh
+# Tests for scripts/test-shell itself.
+
+# Hooks export GIT_DIR; tests that build throwaway repos must not inherit it,
+# or they rewrite the real repository (seen when pre-push ran in a worktree).
+test_test_shell_drops_git_environment_from_hooks() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/tests/shell"
+  # The probe's name is built at runtime so this runner doesn't discover it here.
+  probe="test_""probe"
+  {
+    printf '%s() {\n' "${probe}"
+    cat <<'EOF'
+  [ -z "${GIT_DIR:-}${GIT_INDEX_FILE:-}${GIT_WORK_TREE:-}" ]
+}
+EOF
+  } >"${d}/tests/shell/test_probe"
+  (cd "${d}" && GIT_DIR="${d}/not-a-repo" GIT_INDEX_FILE="${d}/index" GIT_WORK_TREE="${d}" \
+    "${root}/scripts/test-shell" "${d}/out" >/dev/null) || return 1
+  grep -q 'tests="1" failures="0"' "${d}/out/shell.xml"
+}
+
+test_hooks_unset_git_environment() {
+  # pre-commit keeps GIT_INDEX_FILE: with `git commit <paths>` it names the
+  # temporary index, which the staged secret scan must see. It runs no tests.
+  ! grep -q 'unset.*GIT_INDEX_FILE' .githooks/pre-commit || return 1
+  for hook in .githooks/pre-push .githooks/pre-merge-commit; do
+    # The unset must come before the first command that runs checks.
+    first_unset="$(grep -n '^unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE' "${hook}" | head -n 1 | cut -d: -f1)"
+    first_task="$(grep -n -E '^[[:space:]]*(task|gitleaks|scripts/)' "${hook}" | head -n 1 | cut -d: -f1)"
+    [ -n "${first_unset}" ] && [ -n "${first_task}" ] && [ "${first_unset}" -lt "${first_task}" ] || return 1
+  done
+}
