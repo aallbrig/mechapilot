@@ -1,0 +1,13 @@
+#!/bin/sh
+# Put the pinned toolchain (.mise.toml) first on PATH. Sourced by git hooks and
+# the Claude edit hook, which run with the user's login PATH rather than an
+# activated mise shell, so they would otherwise pick up unpinned or missing tools.
+# Without mise (e.g. CI, where mise-action already set PATH) this is a no-op.
+if command -v mise >/dev/null 2>&1; then
+  toolchain_env="$(mise env --shell bash)" || {
+    printf 'toolchain: mise env failed; run task setup\n' >&2
+    exit 1
+  }
+  eval "${toolchain_env}"
+  unset toolchain_env
+fi

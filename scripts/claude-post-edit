@@ -13,6 +13,8 @@ case "${file}" in
   *) exit 0 ;;
 esac
 cd "${root}"
+# shellcheck source=lib-toolchain
+. scripts/lib-toolchain
 
 out="$(mktemp)"
 trap 'rm -f "${out}"' EXIT

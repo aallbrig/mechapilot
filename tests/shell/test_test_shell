@@ -32,3 +32,36 @@ test_hooks_unset_git_environment() {
     [ -n "${first_unset}" ] && [ -n "${first_task}" ] && [ "${first_unset}" -lt "${first_task}" ] || return 1
   done
 }
+
+test_hooks_load_the_pinned_toolchain_before_checks() {
+  for hook in .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit scripts/claude-post-edit; do
+    first_lib="$(grep -n 'lib-toolchain"\{0,1\}$' "${hook}" | grep -v '^[0-9]*:#' | head -n 1 | cut -d: -f1)"
+    first_check="$(grep -n -E '^[[:space:]]*(task|gitleaks|scripts/checks/|shellcheck|shfmt|yamllint)' "${hook}" | head -n 1 | cut -d: -f1)"
+    [ -n "${first_lib}" ] && [ -n "${first_check}" ] && [ "${first_lib}" -lt "${first_check}" ] || return 1
+  done
+}
+
+test_lib_toolchain_puts_mise_tools_first_on_path() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin" "${d}/pinned"
+  cat >"${d}/bin/mise" <<STUB
+#!/bin/sh
+[ "\$1 \$2 \$3" = "env --shell bash" ] || exit 9
+printf 'export PATH="%s:\$PATH"\n' "${d}/pinned"
+STUB
+  chmod +x "${d}/bin/mise"
+  first="$(PATH="${d}/bin:${PATH}" sh -c '. scripts/lib-toolchain; printf "%s" "${PATH%%:*}"')"
+  rm -rf "${d}"
+  [ "${first}" = "${d}/pinned" ]
+}
+
+test_lib_toolchain_fails_when_mise_env_fails() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nexit 1\n' >"${d}/bin/mise"
+  chmod +x "${d}/bin/mise"
+  rc=0
+  PATH="${d}/bin:${PATH}" sh -c '. scripts/lib-toolchain; echo unreachable' >/dev/null 2>&1 || rc=$?
+  rm -rf "${d}"
+  [ "${rc}" -ne 0 ]
+}

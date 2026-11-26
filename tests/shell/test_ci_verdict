@@ -1,0 +1,45 @@
+#!/bin/sh
+# Tests for scripts/ci-verdict.
+
+runs() {
+  f="$(mktemp)"
+  printf '{"check_runs":[%s]}\n' "$1" >"${f}"
+  printf '%s' "${f}"
+}
+
+run() {
+  printf '{"name":"%s","app":{"slug":"%s"},"status":"%s","conclusion":%s}' "$1" "$2" "$3" "$4"
+}
+
+verdict_of() {
+  f="$(runs "$1")"
+  v="$(scripts/ci-verdict "${f}")"
+  rm -f "${f}"
+  printf '%s' "${v}"
+}
+
+test_ci_verdict_ignores_cancelled_when_a_run_succeeded() {
+  [ "$(verdict_of "$(run ci github-actions completed '"cancelled"'),$(run ci github-actions completed '"success"')")" = success ]
+}
+
+test_ci_verdict_fails_when_any_run_failed() {
+  [ "$(verdict_of "$(run ci github-actions completed '"failure"'),$(run ci github-actions completed '"success"')")" = not-green ]
+}
+
+test_ci_verdict_needs_a_success_not_only_cancelled() {
+  [ "$(verdict_of "$(run ci github-actions completed '"cancelled"')")" = missing ]
+}
+
+test_ci_verdict_waits_for_in_progress_runs() {
+  [ "$(verdict_of "$(run ci github-actions in_progress null),$(run ci github-actions completed '"success"')")" = pending ]
+}
+
+test_ci_verdict_ignores_other_apps_and_names() {
+  [ "$(verdict_of "$(run ci other-app completed '"success"'),$(run lint github-actions completed '"success"')")" = missing ]
+  [ "$(verdict_of "$(run ci other-app completed '"failure"'),$(run ci github-actions completed '"success"')")" = success ]
+}
+
+test_ci_verdict_rejects_skipped_and_neutral() {
+  [ "$(verdict_of "$(run ci github-actions completed '"skipped"'),$(run ci github-actions completed '"success"')")" = not-green ]
+  [ "$(verdict_of "$(run ci github-actions completed '"neutral"')")" = not-green ]
+}

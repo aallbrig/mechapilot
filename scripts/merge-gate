@@ -22,7 +22,7 @@ fail() {
 
 ref="refs/merge-gate/${pr}"
 git fetch --quiet --force origin main "+pull/${pr}/head:${ref}"
-for s in scripts/verify-acceptance scripts/lib-tests scripts/checks/verification-guard scripts/review-verdicts; do
+for s in scripts/verify-acceptance scripts/ci-verdict scripts/lib-tests scripts/checks/verification-guard scripts/review-verdicts; do
   mkdir -p "${gate}/main/$(dirname "${s}")"
   git show "origin/main:${s}" >"${gate}/main/${s}" 2>/dev/null || fail "main has no ${s}"
   chmod +x "${gate}/main/${s}"
@@ -46,10 +46,10 @@ author="$(jq -r .author.login "${gate}/pr.json")"
 cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
 [ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
 
-# 1. Every ci check from GitHub Actions on exactly this head commit passed.
-ci="$(gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" --jq \
-  '[.check_runs[] | select(.name == "ci" and .app.slug == "github-actions")]
-   | if length == 0 then "missing" elif all(.conclusion == "success") then "success" else "not-green" end')"
+# 1. The ci check from GitHub Actions is green on exactly this head commit
+#    (cancelled runs ignored; see scripts/ci-verdict).
+gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" >"${gate}/check-runs.json"
+ci="$("${gate}/main/scripts/ci-verdict" "${gate}/check-runs.json")"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
 # 2. Acceptance: judged by main's verifier from the ci run's recorded evidence.

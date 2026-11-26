@@ -4,5 +4,8 @@ set -eu
 # directory instead, so tests that build throwaway repos never touch this one.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
+# Run checks with the pinned toolchain, not whatever is on the login PATH.
+# shellcheck source=../scripts/lib-toolchain
+. scripts/lib-toolchain
 printf 'pre-merge-commit: task ci\n'
 task ci
