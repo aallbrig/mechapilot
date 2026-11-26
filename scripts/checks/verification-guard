@@ -1,39 +1,58 @@
 #!/bin/sh
-# List changes on this branch that touch the verification stack.
-# Prints each matching path; exits 0 always (it classifies, it does not gate).
-# With --label <pr-number> and GH_TOKEN set, labels the PR `verification-change`.
+# Classify whether this branch touches the verification stack.
+# Prints every reason, one per line. Exit status: 0 = no verification change,
+# 3 = verification change (needs a second adversarial review, see #7), other = error.
+# The merge gate runs main's copy of this script, never the PR's.
 set -eu
 
 base="${VERIFICATION_GUARD_BASE:-origin/main}"
-pr=""
-if [ "${1:-}" = "--label" ]; then
-  pr="${2:?--label needs a PR number}"
-fi
+reasons="$(mktemp)"
+diff="$(mktemp)"
+trap 'rm -f "${reasons}" "${diff}"' EXIT
 
-matches="$(mktemp)"
-git diff --name-status "${base}...HEAD" | while IFS="$(printf '\t')" read -r change path rest; do
-  : "${rest:=}"
+# --no-renames: a rename shows as delete + add, so both paths are classified.
+git -c core.quotePath=false diff --no-renames --name-status "${base}...HEAD" >"${diff}"
+
+tab="$(printf '\t')"
+while IFS="${tab}" read -r change path; do
+  base_name="${path##*/}"
+  why=""
   case "${path}" in
-    .githooks/* | .github/workflows/* | Taskfile.yml | .mise.toml | .shellcheckrc | .yamllint.yml | \
-      .editorconfig | .gitleaks.toml | schemas/* | scripts/checks/* | scripts/verify-acceptance | \
-      .claude/settings.json | godot/project.godot | */gdlintrc | gdlintrc)
-      printf '%s\t%s\n' "${change}" "${path}"
-      ;;
-    *test*)
-      if [ "${change}" = "D" ]; then printf '%s\t%s\n' "${change}" "${path}"; fi
+    .github/* | .githooks/* | scripts/* | schemas/* | .claude/* | Taskfile.yml | Taskfile.yaml | \
+      .mise.toml | mise.toml | mise.lock | .mise.lock | package.json | package-lock.json | \
+      CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg)
+      why="verification path"
       ;;
     *) ;;
   esac
-done >"${matches}"
+  case "${base_name}" in
+    .shellcheckrc | shellcheckrc | .yamllint | .yamllint.yml | .yamllint.yaml | .gitleaks.toml | \
+      .gitleaksignore | .editorconfig | gdlintrc | .gdlintrc | gdformatrc | .gdformatrc | .gitattributes | .gitignore)
+      why="tool config"
+      ;;
+    *) ;;
+  esac
+  case "${path}" in
+    tests/* | */tests/* | *test_* | *_test.* | *.test.*)
+      case "${change}" in
+        M | D) why="existing test changed or removed" ;;
+        *) ;;
+      esac
+      ;;
+    *) ;;
+  esac
+  if [ -n "${why}" ]; then printf '%s\t%s\t%s\n' "${why}" "${change}" "${path}" >>"${reasons}"; fi
+done <"${diff}"
 
-if [ -s "${matches}" ]; then
-  printf 'verification-guard: this change touches the verification stack:\n'
-  cat "${matches}"
-  if [ -n "${pr}" ]; then
-    gh pr edit "${pr}" --add-label verification-change >/dev/null
-    printf 'verification-guard: labelled PR #%s verification-change\n' "${pr}"
-  fi
-else
-  printf 'verification-guard: no verification-stack changes\n'
+# Added lines that silence a checker anywhere in the tree.
+git -c core.quotePath=false diff --no-renames -U0 "${base}...HEAD" |
+  grep -E '^\+[^+]' |
+  grep -nE 'shellcheck[[:space:]]+disable|gdlint:[[:space:]]*(ignore|disable)|@warning_ignore|yamllint[[:space:]]+disable|gitleaks:allow|noqa|eslint-disable|fmt:[[:space:]]*(off|skip)' |
+  sed 's/^/inline suppression\t+\t/' >>"${reasons}" || true
+
+if [ -s "${reasons}" ]; then
+  printf 'verification-guard: VERIFICATION CHANGE\n'
+  cat "${reasons}"
+  exit 3
 fi
-rm -f "${matches}"
+printf 'verification-guard: no verification-stack changes\n'

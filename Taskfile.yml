@@ -86,6 +86,7 @@ tasks:
   checks:
     desc: Repository hygiene checks
     cmds:
+      - scripts/checks/safe-filenames
       - scripts/checks/forbidden-paths
       - scripts/checks/large-files
 
@@ -97,6 +98,7 @@ tasks:
   test:
     desc: Run the test suites (JUnit output in build/test-results)
     cmds:
+      - rm -rf build/test-results
       - mkdir -p build/test-results
       - scripts/test-shell
       - |
@@ -121,6 +123,11 @@ tasks:
       - scripts/verify-acceptance {{.CLI_ARGS}}
 
   verify:guard:
-    desc: Classify changes that touch the verification stack
+    desc: "Classify changes that touch the verification stack (exit 3 = verification change)"
     cmds:
-      - scripts/checks/verification-guard {{.CLI_ARGS}}
+      - scripts/checks/verification-guard
+
+  merge-gate:
+    desc: "Decide (and with --merge, perform) a PR merge using main's gate scripts (usage: task merge-gate -- <pr> [--merge])"
+    cmds:
+      - scripts/merge-gate {{.CLI_ARGS}}

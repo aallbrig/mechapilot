@@ -8,6 +8,7 @@ actionlint = "1.7.12"
 gitleaks = "8.30.1"
 yq = "4.54.3"
 jq = "1.8.2"
+uv = "0.13.10"
 watchexec = "2.8.0"
 "pipx:check-jsonschema" = "0.39.0"
 "pipx:yamllint" = "1.38.0"
@@ -15,3 +16,4 @@ watchexec = "2.8.0"
 
 [settings]
 experimental = true
+lockfile = true

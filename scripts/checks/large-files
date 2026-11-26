@@ -1,28 +1,21 @@
 #!/bin/sh
-# Fail if any given file (default: all tracked files) exceeds the size limit.
+# Fail if any file exceeds the size limit. Args: none (all tracked), --staged, or paths.
 set -eu
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
 
 limit_bytes="${LARGE_FILE_LIMIT_BYTES:-5242880}"
-status=0
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+check_paths "$@" >"${list}"
 
-check() {
-  f="$1"
-  [ -f "${f}" ] || return 0
+status=0
+while IFS= read -r f; do
+  [ -f "${f}" ] || continue
   size="$(wc -c <"${f}" | tr -d ' ')"
   if [ "${size}" -gt "${limit_bytes}" ]; then
     printf 'large-files: %s is %s bytes (limit %s)\n' "${f}" "${size}" "${limit_bytes}" >&2
     status=1
   fi
-  return 0
-}
-
-if [ "$#" -gt 0 ]; then
-  for f in "$@"; do check "${f}"; done
-else
-  tmp="$(mktemp)"
-  git ls-files >"${tmp}"
-  while IFS= read -r f; do check "${f}"; done <"${tmp}"
-  rm -f "${tmp}"
-fi
-
+done <"${list}"
 exit "${status}"

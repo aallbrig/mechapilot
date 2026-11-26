@@ -1,0 +1,70 @@
+#!/bin/sh
+# Tests for scripts/checks/verification-guard against throwaway git repos.
+
+guard_repo() {
+  root="$(pwd)"
+  repo="$(mktemp -d)"
+  git -C "${repo}" init --quiet
+  git -C "${repo}" config user.email t@example.invalid
+  git -C "${repo}" config user.name t
+  mkdir -p "${repo}/scripts/checks" "${repo}/docs" "${repo}/tests/shell"
+  printf 'a\n' >"${repo}/docs/a.md"
+  printf 'test_x() { true; }\n' >"${repo}/tests/shell/test_x"
+  git -C "${repo}" add -A
+  git -C "${repo}" commit --quiet -m base
+  git -C "${repo}" update-ref refs/remotes/origin/main HEAD
+  guard="${root}/scripts/checks/verification-guard"
+  printf '%s' "${repo}"
+}
+
+run_guard() {
+  rc=0
+  (cd "$1" && "${guard:?}" >/dev/null) || rc=$?
+  printf '%s' "${rc}"
+}
+
+commit_all() {
+  git -C "$1" add -A
+  git -C "$1" commit --quiet -m change
+}
+
+test_guard_ignores_plain_docs_change() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  printf 'b\n' >>"${r}/docs/a.md"
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 0 ]
+}
+
+test_guard_flags_rename_into_checks() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  git -C "${r}" mv docs/a.md scripts/checks/always-pass
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 3 ]
+}
+
+test_guard_flags_nested_shellcheckrc() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  mkdir -p "${r}/src"
+  printf 'disable=all\n' >"${r}/src/.shellcheckrc"
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 3 ]
+}
+
+test_guard_flags_inline_suppression() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  printf '# shellcheck disable=SC2086\n' >>"${r}/docs/a.md"
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 3 ]
+}
+
+test_guard_flags_modified_test() {
+  r="$(guard_repo)"
+  guard="$(pwd)/scripts/checks/verification-guard"
+  printf 'test_x() { :; }\n' >"${r}/tests/shell/test_x"
+  commit_all "${r}"
+  [ "$(run_guard "${r}")" = 3 ]
+}

@@ -1,84 +1,143 @@
 #!/bin/sh
-# Prove an issue's acceptance criteria with evidence (the Provably Complete gate).
+# Prove an issue's acceptance criteria with evidence (the Provably Complete gate, #7).
 #
 # Usage: scripts/verify-acceptance <issue-number> [junit-dir]
 #
-# Each line under "## Acceptance criteria" in the issue must end with exactly one
+# Every list item under "## Acceptance criteria" must end with exactly one
 # backticked check reference:
-#   `task:<target>`   -> `task <target>` must exit 0
-#   `check:<script>`  -> scripts/checks/<script> must exit 0
-#   `test:<name>`     -> a passing <testcase name="<name>"> in <junit-dir>/*.xml
-#   `e2e:<name>`      -> same as test:, for browser smoke tests
+#   `task:<target>`        `task <target>` exits 0 (setup/maintenance targets rejected)
+#   `check:<name>`         scripts/checks/<name> (tracked, executable) exits 0
+#   `test:[<suite>::]<name>` / `e2e:...`
+#                          exactly one JUnit <testcase> with that exact name (and
+#                          classname containing <suite>, if given) exists in
+#                          <junit-dir>, it passed, and a test with that name is
+#                          defined in test source (so results can't be forged).
 set -eu
 
 issue="${1:?usage: verify-acceptance <issue-number> [junit-dir]}"
 junit_dir="${2:-build/test-results}"
+bt="$(printf '\140')" # a backtick, kept out of quoted literals
 
-body="$(mktemp)"
-criteria="$(mktemp)"
-trap 'rm -f "${body}" "${criteria}"' EXIT
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
 
 if [ -n "${VERIFY_ACCEPTANCE_BODY_FILE:-}" ]; then
-  tr -d '\r' <"${VERIFY_ACCEPTANCE_BODY_FILE}" >"${body}"
+  tr -d '\r' <"${VERIFY_ACCEPTANCE_BODY_FILE}" >"${work}/body"
 else
-  gh issue view "${issue}" --json body --jq .body | tr -d '\r' >"${body}"
+  gh issue view "${issue}" --json body --jq .body | tr -d '\r' >"${work}/body"
 fi
 
+# Every list item (-, *, + or numbered) in the section counts as a criterion.
 awk '
-  /^##[[:space:]]+Acceptance criteria/ { inside = 1; next }
-  /^##[[:space:]]/ { inside = 0 }
-  inside && /^[[:space:]]*- \[[ xX]\]/ { print }
-' "${body}" >"${criteria}"
+  /^##[[:space:]]+Acceptance criteria[[:space:]]*$/ { inside = 1; next }
+  /^#{1,2}[[:space:]]/ { inside = 0 }
+  inside && /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/ { print }
+' "${work}/body" >"${work}/criteria"
 
-if [ ! -s "${criteria}" ]; then
-  printf 'verify-acceptance: issue #%s has no "## Acceptance criteria" checklist\n' "${issue}" >&2
+if [ ! -s "${work}/criteria" ]; then
+  printf 'verify-acceptance: issue #%s has no "## Acceptance criteria" list\n' "${issue}" >&2
   exit 1
 fi
 
-# Prints "pass" if a self-closing <testcase name="$1"> (no failure/error/skipped
-# child) exists in any JUnit file, otherwise "fail". Always returns 0.
-junit_result() {
+# Flatten every JUnit testcase to: classname<TAB>name<TAB>pass|fail
+: >"${work}/cases"
+for xml in "${junit_dir}"/*.xml; do
+  [ -f "${xml}" ] || continue
+  yq -p xml -o json '.' "${xml}" | jq -r '
+    [.. | objects | .testcase? // empty | if type == "array" then .[] else . end]
+    | .[]
+    | [(.["+@classname"] // ""), (.["+@name"] // ""),
+       (if (has("failure") or has("error") or has("skipped")) then "fail" else "pass" end)]
+    | @tsv' >>"${work}/cases"
+done
+
+# Each prover sets result=pass only when its evidence holds; it never fails the
+# script itself, so set -e stays meaningful for real errors.
+prove_test() {
   result=fail
-  if [ -d "${junit_dir}" ]; then
-    for xml in "${junit_dir}"/*.xml; do
-      [ -f "${xml}" ] || continue
-      if grep -Eq "<testcase[^>]*name=\"$1\"[^>]*/>" "${xml}"; then result=pass; fi
-    done
-  fi
-  printf '%s\n' "${result}"
+  spec="$1"
+  case "${spec}" in
+    *::*) suite="${spec%%::*}" name="${spec#*::}" ;;
+    *) suite="" name="${spec}" ;;
+  esac
+  case "${name}" in
+    "" | *[!A-Za-z0-9_]*) return 0 ;;
+    *) ;;
+  esac
+  awk -F '\t' -v n="${name}" -v s="${suite}" '
+    $2 == n && (s == "" || index($1, s) > 0) { print $3 }
+  ' "${work}/cases" >"${work}/hits"
+  hits="$(wc -l <"${work}/hits" | tr -d ' ')"
+  [ "${hits}" -eq 1 ] || return 0
+  verdict="$(cat "${work}/hits")"
+  [ "${verdict}" = pass ] || return 0
+  # The test must be defined in test source, so a forged JUnit entry can't count.
+  grep -rlE "^(func[[:space:]]+)?${name}[[:space:]]*\\(" tests godot/tests >"${work}/defs" 2>/dev/null || true
+  [ -s "${work}/defs" ] || return 0
+  result=pass
 }
 
-bt="$(printf '\140')" # a backtick, kept out of quoted literals
+prove_task() {
+  result=fail
+  case "$1" in
+    "" | *[!a-z0-9:-]* | [!a-z]*) return 0 ;;
+    default | setup | doctor | fmt | ci | ci:fast | verify:*) return 0 ;;
+    *) ;;
+  esac
+  rc=0
+  task "$1" >"${work}/out" 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ] && result=pass
+  return 0
+}
+
+prove_check() {
+  result=fail
+  case "$1" in
+    "" | *[!a-z0-9-]* | [!a-z]*) return 0 ;;
+    *) ;;
+  esac
+  script="scripts/checks/$1"
+  [ -x "${script}" ] || return 0
+  tracked="$(git ls-files -- "${script}")"
+  [ "${tracked}" = "${script}" ] || return 0
+  rc=0
+  "${script}" >"${work}/out" 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ] && result=pass
+  return 0
+}
 
 failures=0
 total=0
 while IFS= read -r line; do
   total=$((total + 1))
-  ref="$(printf '%s\n' "${line}" | sed -n "s/.*${bt}\([a-z0-9]*:[^${bt}]*\)${bt}[[:space:]]*\$/\1/p")"
+  refs="$(printf '%s\n' "${line}" | grep -o "${bt}[a-z0-9]*:[^${bt}]*${bt}" | wc -l | tr -d ' ')"
+  if [ "${refs}" -ne 1 ]; then
+    printf 'FAIL  (needs exactly one check reference, found %s) %s\n' "${refs}" "${line}"
+    failures=$((failures + 1))
+    continue
+  fi
+  ref="$(printf '%s\n' "${line}" | sed -n "s/.*${bt}\\([a-z0-9]*:[^${bt}]*\\)${bt}[[:space:]]*\$/\\1/p")"
   if [ -z "${ref}" ]; then
-    printf 'FAIL  (no check reference) %s\n' "${line}"
+    printf 'FAIL  (check reference must end the line) %s\n' "${line}"
     failures=$((failures + 1))
     continue
   fi
   kind="${ref%%:*}"
   name="${ref#*:}"
-  ok=1
+  result=fail
   case "${kind}" in
-    task) task "${name}" >/dev/null 2>&1 || ok=0 ;;
-    check) "scripts/checks/${name}" >/dev/null 2>&1 || ok=0 ;;
-    test | e2e)
-      verdict="$(junit_result "${name}")"
-      [ "${verdict}" = pass ] || ok=0
-      ;;
-    *) ok=0 ;;
+    task) prove_task "${name}" ;;
+    check) prove_check "${name}" ;;
+    test | e2e) prove_test "${name}" ;;
+    *) ;;
   esac
-  if [ "${ok}" -eq 1 ]; then
+  if [ "${result}" = pass ]; then
     printf 'PASS  %s\n' "${ref}"
   else
     printf 'FAIL  %s\n' "${ref}"
     failures=$((failures + 1))
   fi
-done <"${criteria}"
+done <"${work}/criteria"
 
 printf 'verify-acceptance: issue #%s: %s/%s criteria proven\n' "${issue}" "$((total - failures))" "${total}"
 [ "${failures}" -eq 0 ]

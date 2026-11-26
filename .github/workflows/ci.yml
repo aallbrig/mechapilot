@@ -2,15 +2,18 @@ name: ci
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
 
+# Read-only everywhere: the gate never writes to the repo. Merging is decided by
+# scripts/merge-gate, which re-checks everything with main's copies of the scripts.
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,7 +24,7 @@ jobs:
     permissions:
       contents: read
       issues: read
-      pull-requests: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,19 +38,33 @@ jobs:
       - name: task ci
         run: task ci
 
-      - name: Verification guard
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: build/test-results/
+          if-no-files-found: error
+
+      - name: Verification guard (informational; the merge gate recomputes it)
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: scripts/checks/verification-guard --label "${PR_NUMBER}"
+        run: |
+          rc=0
+          scripts/checks/verification-guard || rc=$?
+          [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ]
 
       - name: Acceptance evidence
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          issues="$(printf '%s\n' "${PR_BODY}" | grep -oiE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true)"
-          if [ -z "${issues}" ]; then echo "No linked issue; nothing to prove."; exit 0; fi
+          issues="$(gh pr view "${PR_NUMBER}" --json closingIssuesReferences --jq '.closingIssuesReferences[].number')"
+          if [ -z "${issues}" ]; then
+            case "${PR_AUTHOR}" in
+              dependabot*) echo "Dependabot PR: no linked issue required."; exit 0 ;;
+              *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
+            esac
+          fi
           for n in ${issues}; do scripts/verify-acceptance "${n}"; done

@@ -31,8 +31,8 @@ test_fails_when_junit_test_missing() {
 
 test_passes_when_junit_test_passed() {
   d="$(mktemp -d)"
-  printf '<testsuite><testcase classname="c" name="spawns_wave"/></testsuite>\n' >"${d}/a.xml"
-  f="$(write_body "## Acceptance criteria" "- [x] waves ${bt}test:spawns_wave${bt}")"
+  printf '<testsuite><testcase classname="c" name="test_large_files_allows_small_file"/></testsuite>\n' >"${d}/a.xml"
+  f="$(write_body "## Acceptance criteria" "- [x] small ${bt}test:test_large_files_allows_small_file${bt}")"
   VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
 }
 
@@ -41,4 +41,63 @@ test_fails_when_junit_test_failed() {
   printf '<testsuite><testcase classname="c" name="spawns_wave"><failure/></testcase></testsuite>\n' >"${d}/a.xml"
   f="$(write_body "## Acceptance criteria" "- [x] waves ${bt}test:spawns_wave${bt}")"
   ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+junit_with() {
+  d="$(mktemp -d)"
+  printf '%s\n' "$@" >"${d}/a.xml"
+  printf '%s' "${d}"
+}
+
+test_rejects_pattern_test_names() {
+  d="$(junit_with '<testsuite><testcase classname="c" name="test_list_files_finds_posix_scripts"/></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:.*${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_classname_only_match() {
+  d="$(junit_with '<testsuite><testcase classname="test_large_files_allows_small_file" name="other"/></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_forged_result_for_undefined_test() {
+  d="$(junit_with '<testsuite><testcase classname="c" name="mech_can_fly"/></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:mech_can_fly${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_duplicate_test_results() {
+  d="$(junit_with '<testsuite><testcase classname="a" name="test_large_files_allows_small_file"/><testcase classname="b" name="test_large_files_allows_small_file"><failure/></testcase></testsuite>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_accepts_multiline_junit_and_suite_prefix() {
+  d="$(junit_with '<testsuites>' '  <testsuite name="shell">' '    <testcase' '      classname="tests/shell/test_checks"' '      name="test_large_files_allows_small_file"' '      time="0.1">' '    </testcase>' '  </testsuite>' '</testsuites>')"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_checks::test_large_files_allows_small_file${bt}")"
+  VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_rejects_check_path_traversal() {
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}check:../test-shell${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
+}
+
+test_rejects_trivial_task_targets() {
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:default${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:--version${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
+}
+
+test_counts_star_and_numbered_items() {
+  f="$(write_body "## Acceptance criteria" "- [ ] ok ${bt}check:forbidden-paths${bt}" "* [ ] no check here" "1. [ ] nor here")"
+  out="$(VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 || true)"
+  printf '%s\n' "${out}" | grep -q '1/3 criteria proven'
+}
+
+test_rejects_multiple_check_references() {
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}task:does-not-exist${bt} ${bt}check:safe-filenames${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
 }

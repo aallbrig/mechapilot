@@ -1,18 +1,17 @@
 #!/bin/sh
-# Fast, staged-only checks. Bypass is not allowed by policy; fix the finding.
+# Fast checks on what is being committed. Never bypass (--no-verify); fix the finding.
 set -eu
 
-staged="$(mktemp)"
-trap 'rm -f "${staged}"' EXIT
-git diff --cached --name-only --diff-filter=ACMR >"${staged}"
-[ -s "${staged}" ] || exit 0
+staged="$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR)"
+[ -n "${staged}" ] || exit 0
 
-printf 'pre-commit: secrets\n'
+printf 'pre-commit: secrets (staged)\n'
 gitleaks git --staged --no-banner --redact
 
-printf 'pre-commit: forbidden paths and large files\n'
-xargs scripts/checks/forbidden-paths <"${staged}"
-xargs scripts/checks/large-files <"${staged}"
+printf 'pre-commit: filenames, forbidden paths, large files (staged)\n'
+scripts/checks/safe-filenames --staged
+scripts/checks/forbidden-paths --staged
+scripts/checks/large-files --staged
 
 printf 'pre-commit: lint\n'
 task lint

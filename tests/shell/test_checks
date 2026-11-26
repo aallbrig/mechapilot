@@ -28,3 +28,17 @@ test_large_files_allows_small_file() {
 test_list_files_finds_posix_scripts() {
   scripts/list-files sh | grep -qx 'scripts/verify-acceptance'
 }
+
+test_safe_filenames_rejects_quotes_and_spaces() {
+  ! scripts/checks/safe-filenames "it's.txt" && ! scripts/checks/safe-filenames "a b.txt"
+}
+
+test_forbidden_paths_rejects_non_ascii_names() {
+  ! scripts/checks/forbidden-paths "build/café.txt" && ! scripts/checks/forbidden-paths "naïve.pem"
+}
+
+test_large_files_handles_spaces_in_names() {
+  d="$(mktemp -d)"
+  printf '0123456789' >"${d}/big file.bin"
+  ! LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${d}/big file.bin"
+}

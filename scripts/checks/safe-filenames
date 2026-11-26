@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fail on filenames that break tooling: outside the legacy unity/ tree, every path
+# may only use [A-Za-z0-9._/@+-]. Args: none (all tracked), --staged, or paths.
+set -eu
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+check_paths "$@" >"${list}"
+
+status=0
+while IFS= read -r f; do
+  case "${f}" in
+    unity/*) continue ;;
+    *[!A-Za-z0-9._/@+-]*)
+      printf 'safe-filenames: unsafe characters in %s\n' "${f}" >&2
+      status=1
+      ;;
+    *) ;;
+  esac
+done <"${list}"
+exit "${status}"

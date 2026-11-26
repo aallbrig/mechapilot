@@ -25,12 +25,13 @@ All checks are Taskfile targets, so hooks, CI and agents run the same commands. 
 
 ## Delivery (Provably Complete)
 
-Work on a branch, open a PR whose body says `Closes #<issue>`, and merge with a squash only when all of these hold (see issue #7):
+Work on a branch, open a PR whose body links its issue with `Closes #<issue>`, and merge only through the gate (see issue #7):
 
-1. Every line under the issue's `## Acceptance criteria` ends with a check reference (`task:`, `check:`, `test:` or `e2e:`), and `task verify:acceptance -- <issue>` passes.
-2. The `ci` check is green.
-3. An adversarial reviewer subagent posts a PR comment ending in `review-verdict: pass`.
-4. PRs labelled `verification-change` need a second, independent adversarial review.
+1. Every list item under the issue's `## Acceptance criteria` ends with exactly one check reference (`task:<target>`, `check:<name>`, `test:[<suite>::]<name>` or `e2e:<name>`). Test names must match exactly, and the test must be defined in test source.
+2. The `ci` check is green on the PR's head commit. Its JUnit artifact is the evidence.
+3. Adversarial reviewer subagents post PR comments ending in `review-verdict: pass sha=<head-sha>` (or `block`). A new push invalidates the earlier verdicts.
+4. If `scripts/checks/verification-guard` exits 3 (the PR touches the verification stack), two independent passing reviews are required.
+5. Merge with `task merge-gate -- <pr> --merge` from an up-to-date `main`. The gate uses main's copies of its own scripts, so a PR can't weaken the gate that judges it.
 
 Releases (`v*` tags), applying infrastructure changes, and anything that needs new secrets are for humans only.
 
