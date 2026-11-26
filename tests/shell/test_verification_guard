@@ -133,3 +133,28 @@ test_guard_flags_every_mise_config_location() {
     fi
   done
 }
+
+test_guard_flags_site_measurement_configs() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  for f in .htmlvalidate.json .htmlvalidateignore site/.htmlvalidate.json lighthouserc.json lychee.toml site/.lychee.toml \
+    .lycheeignore .npmrc package.json package-lock.json; do
+    r="$(guard_repo)"
+    mkdir -p "${r}/site"
+    printf '{}\n' >"${r}/${f}"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    [ "${rc}" = 3 ] || return 1
+  done
+}
+
+test_guard_flags_html_validate_directives() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  for directive in '<!-- [html-validate-disable-next wcag/h37] -->' '<!-- [html-validate-disable-block] -->' \
+    '<!-- [html-validate-enable] -->' '<!-- [HTML-Validate-Disable] -->'; do
+    r="$(guard_repo)"
+    printf '%s\n' "${directive}" >>"${r}/docs/a.md"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    [ "${rc}" = 3 ] || return 1
+  done
+}

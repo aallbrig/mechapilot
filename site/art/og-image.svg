@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="sky" cx="72%" cy="50%" r="70%">
+      <stop offset="0" stop-color="#1d2b55"/>
+      <stop offset="0.55" stop-color="#121a38"/>
+      <stop offset="1" stop-color="#0b1020"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ffb347" stop-opacity="0.9"/>
+      <stop offset="0.4" stop-color="#ff6a1a" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ff6a1a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff6a1a" stop-opacity="0"/>
+    </linearGradient>
+    <g id="fighter">
+      <path d="M0 -11 L4 2 L11 6 L11 9 L2 7 L0 11 L-2 7 L-11 9 L-11 6 L-4 2 Z" fill="#ff4d6d"/>
+    </g>
+  </defs>
+  <rect width="1200" height="630" fill="url(#sky)"/>
+  <g fill="#cfe3ff">
+    <circle cx="80" cy="60" r="2"/><circle cx="420" cy="40" r="1.5"/><circle cx="640" cy="90" r="2"/>
+    <circle cx="1140" cy="60" r="1.6"/><circle cx="1160" cy="560" r="1.6"/><circle cx="560" cy="590" r="1.4"/>
+    <circle cx="40" cy="560" r="1.8"/><circle cx="700" cy="330" r="1.2"/>
+  </g>
+  <circle cx="870" cy="315" r="200" fill="none" stroke="#5ee6ff" stroke-opacity="0.14" stroke-dasharray="6 14" stroke-width="2"/>
+  <g transform="translate(870 315)">
+    <g transform="rotate(20) translate(0 -230) rotate(180) scale(2.2)"><use href="#fighter"/></g>
+    <g transform="rotate(95) translate(0 -250) rotate(180) scale(2.2)"><use href="#fighter"/></g>
+    <g transform="rotate(160) translate(0 -215) rotate(180) scale(2.2)"><use href="#fighter"/></g>
+    <g transform="rotate(225) translate(0 -245) rotate(180) scale(2.2)"><use href="#fighter"/></g>
+    <g transform="rotate(290) translate(0 -220) rotate(180) scale(2.2)"><use href="#fighter"/></g>
+    <g fill="#fff700">
+      <path transform="rotate(20)" d="M0 -100 L14 -84 L0 -89 L-14 -84 Z"/>
+      <path transform="rotate(95)" d="M0 -100 L14 -84 L0 -89 L-14 -84 Z"/>
+      <path transform="rotate(160)" d="M0 -100 L14 -84 L0 -89 L-14 -84 Z"/>
+      <path transform="rotate(225)" d="M0 -100 L14 -84 L0 -89 L-14 -84 Z"/>
+      <path transform="rotate(290)" d="M0 -100 L14 -84 L0 -89 L-14 -84 Z"/>
+    </g>
+    <g transform="translate(150 -150)">
+      <circle r="60" fill="url(#glow)"/>
+      <path d="M0 -38 L9 -10 L35 -17 L14 3 L31 28 L3 16 L-10 38 L-10 10 L-38 7 L-14 -7 Z" fill="#ffd27a"/>
+      <circle r="10" fill="#fff7e0"/>
+    </g>
+    <g fill="#bff6ff">
+      <rect x="-3" y="-44" width="6" height="40" rx="3" transform="translate(66 -66) rotate(45)"/>
+      <rect x="-3" y="-44" width="6" height="40" rx="3" transform="translate(112 -112) rotate(45)"/>
+    </g>
+    <g transform="rotate(45) scale(2)">
+      <path d="M-9 26 L-4 70 L4 70 L9 26 Z" fill="url(#trail)" opacity="0.85"/>
+      <rect x="-16" y="10" width="10" height="20" rx="3" fill="#5b6a92"/>
+      <rect x="6" y="10" width="10" height="20" rx="3" fill="#5b6a92"/>
+      <rect x="-30" y="-14" width="14" height="26" rx="5" fill="#8fa2d6"/>
+      <rect x="16" y="-14" width="14" height="26" rx="5" fill="#8fa2d6"/>
+      <rect x="-27" y="-34" width="7" height="24" rx="2" fill="#c9d4f2"/>
+      <rect x="20" y="-34" width="7" height="24" rx="2" fill="#c9d4f2"/>
+      <path d="M-17 -16 L0 -28 L17 -16 L14 18 L-14 18 Z" fill="#d8e0f7"/>
+      <path d="M-10 -10 L0 -18 L10 -10 L8 6 L-8 6 Z" fill="#ff7a1a"/>
+      <circle cx="0" cy="-6" r="4.5" fill="#5ee6ff"/>
+    </g>
+  </g>
+  <g font-family="Avenir Next Condensed, Arial Narrow, Helvetica, Arial, sans-serif">
+    <text x="72" y="190" fill="#5ee6ff" font-size="26" font-weight="700" letter-spacing="5">FREE ARCADE SHOOTER</text>
+    <text x="68" y="300" fill="#ffffff" font-size="118" font-weight="800">MECHA</text>
+    <text x="68" y="410" fill="#ffffff" font-size="118" font-weight="800">FIGHTER</text>
+    <text x="72" y="470" fill="#ff9a4d" font-size="38" font-weight="700">Time Pilot, reforged with mechs.</text>
+    <rect x="72" y="505" width="250" height="64" rx="32" fill="#ff7a1a"/>
+    <text x="197" y="547" fill="#0b1020" font-size="28" font-weight="800" text-anchor="middle" letter-spacing="2">PLAY NOW</text>
+  </g>
+</svg>

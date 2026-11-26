@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refuse to run the Marketing Site checks when a file exists that html-validate
+# or lychee would pick up on its own and that could quietly weaken them:
+#   .htmlvalidateignore, .lycheeignore, .lycheecache, and any html-validate or
+#   lychee config other than the root .htmlvalidate.json / lychee.toml
+#   (html-validate merges nested .htmlvalidate.* files, e.g. one copied into build/).
+# Searches the whole tree (tracked, untracked and build output), except
+# node_modules/ and .git/. Usage: scripts/site-no-overrides
+set -eu
+LC_ALL=C
+export LC_ALL
+
+all="$(mktemp)"
+found="$(mktemp)"
+trap 'rm -f "${all}" "${found}"' EXIT
+find . \( -path ./node_modules -o -path ./.git -o -path './.claude/worktrees' \) -prune -o \
+  \( -name '.htmlvalidateignore' -o -name '.htmlvalidate*' -o -name '.lycheeignore' -o -name '.lycheecache' \
+  -o -name 'lychee.toml' -o -name '.lychee.toml' \) -print >"${all}"
+grep -vx -e './.htmlvalidate.json' -e './lychee.toml' "${all}" >"${found}" || true
+
+if [ -s "${found}" ]; then
+  while IFS= read -r f; do
+    printf 'site-no-overrides: %s would change what html-validate or lychee checks; remove it\n' "${f}" >&2
+  done <"${found}"
+  exit 1
+fi

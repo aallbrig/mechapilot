@@ -1,0 +1,35 @@
+#!/bin/sh
+# Install the pinned Chrome for Testing that Lighthouse CI drives, and print the
+# absolute path of its executable. Idempotent: an installed build is reused.
+# Fails unless the install succeeds and the printed path is an executable file,
+# so Lighthouse can never fall back to an unpinned system Chrome.
+# The pinned version lives here, the single source for site:audit and site:observe.
+# Usage: scripts/site-chrome [chrome-version]
+set -eu
+
+version="${1:-158.0.8127.88}"
+case "${version}" in
+  *[!0-9.]* | "")
+    printf 'site-chrome: %s is not an exact Chrome version\n' "${version}" >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+
+out="$(mktemp)"
+trap 'rm -f "${out}"' EXIT
+npx --no-install @puppeteer/browsers install "chrome@${version}" \
+  --path "${PWD}/build/browsers" --format '{{path}}' >"${out}"
+path="$(tail -n 1 "${out}")"
+case "${path}" in
+  "${PWD}/build/browsers/"*) ;;
+  *)
+    printf 'site-chrome: unexpected install path: %s\n' "${path}" >&2
+    exit 1
+    ;;
+esac
+if [ ! -f "${path}" ] || [ ! -x "${path}" ]; then
+  printf 'site-chrome: %s is not an executable file\n' "${path}" >&2
+  exit 1
+fi
+printf '%s\n' "${path}"

@@ -2,6 +2,8 @@ extends: default
 ignore: |
   unity/
   .claude/worktrees/
+  node_modules/
+  build/
 rules:
   line-length:
     max: 160

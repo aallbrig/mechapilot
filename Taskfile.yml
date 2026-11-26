@@ -27,6 +27,7 @@ tasks:
         missing=0
         tools="task shellcheck shfmt actionlint gitleaks yq jq check-jsonschema yamllint gdlint gdformat gh tmux tmuxinator"
         tools="$tools tofu tflint tflint-ruleset-aws trivy"
+        tools="$tools hugo lychee node npm npx"
         for t in $tools; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
@@ -46,6 +47,7 @@ tasks:
     desc: All static checks (fast)
     cmds:
       - task: lint:sh
+      - task: lint:js
       - task: lint:yaml
       - task: lint:actions
       - task: lint:schema
@@ -60,6 +62,11 @@ tasks:
     cmds:
       - scripts/list-files sh | xargs shellcheck
       - scripts/list-files sh | xargs shfmt -d
+
+  lint:js:
+    desc: Syntax-check the Node scripts (strict ES modules)
+    cmds:
+      - for f in scripts/*.mjs; do node --check "$f" || exit 1; done
 
   lint:yaml:
     desc: yamllint (strict)
@@ -95,6 +102,21 @@ tasks:
         done
       - check-jsonschema --check-metaschema schemas/infra-trivy-config.schema.json
       - check-jsonschema --schemafile schemas/infra-trivy-config.schema.json infra/trivy.yaml
+      - check-jsonschema --check-metaschema schemas/lighthouserc.schema.json schemas/site-home.schema.json
+      # Vendored: https://www.schemastore.org/package.json
+      - check-jsonschema --schemafile schemas/package.schema.json package.json
+      # Vendored: https://www.schemastore.org/hugo.json
+      - check-jsonschema --schemafile schemas/hugo.schema.json site/config/_default/hugo.toml site/config/qa/hugo.toml site/config/production/hugo.toml
+      # Vendored from html-validate 11.21.1 (dist/schema/config.json, published as https://html-validate.org/schemas/config.json)
+      - check-jsonschema --schemafile schemas/html-validate-config.schema.json .htmlvalidate.json
+      # Vendored: https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/schema.json
+      - check-jsonschema --schemafile schemas/lychee.schema.json lychee.toml
+      # Authored here (no upstream schema exists); pins the Lighthouse budgets
+      - check-jsonschema --schemafile schemas/lighthouserc.schema.json lighthouserc.json
+      # Authored here: the Marketing Site's home page copy
+      - check-jsonschema --schemafile schemas/site-home.schema.json site/data/home.yaml
+      # Vendored: https://www.schemastore.org/web-manifest.json
+      - check-jsonschema --schemafile schemas/web-manifest.schema.json site/static/site.webmanifest
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -156,6 +178,78 @@ tasks:
         task godot:test
       - scripts/checks/test-results-clean
 
+  # ---- Marketing Site (site/, #30) ----
+  # Hugo builds two environments into build/site/; Node tools come from
+  # package-lock.json (npm ci) and Lighthouse drives a pinned Chrome for Testing.
+
+  site:deps:
+    desc: Install the pinned Node tooling (npm ci, no install scripts)
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules/.package-lock.json
+    cmds:
+      - npm ci --ignore-scripts --no-audit --no-fund
+
+  site:build:
+    desc: Build the Marketing Site for QA and Production into build/site/
+    cmds:
+      - rm -rf build/site
+      - |
+        HUGO_PARAMS_COPYRIGHTYEAR="$(git log -1 --format=%cd --date=format:%Y)" || exit 1
+        export HUGO_PARAMS_COPYRIGHTYEAR
+        for env in qa production; do
+          hugo build --source site --environment "${env}" --panicOnWarning --printPathWarnings --cleanDestinationDir || exit 1
+        done
+      - scripts/site-budget build/site/qa/mechapilot build/site/production
+
+  site:validate:
+    desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
+    cmds:
+      - task: site:deps
+      - task: site:build
+      - scripts/site-no-overrides
+      - npx --no-install html-validate --max-warnings 0 "build/site/**/*.html"
+      - scripts/site-observe build/site/qa build/site/production
+
+  site:links:
+    desc: Check every internal link and fragment in both builds with lychee (offline)
+    cmds:
+      - task: site:build
+      - scripts/site-no-overrides
+      # lychee exits 0 when its glob matches nothing, so also require that links were checked.
+      - |
+        for env in qa production; do
+          out="build/lychee-${env}.json"
+          lychee --config lychee.toml --root-dir "{{.ROOT_DIR}}/build/site/${env}" --format json --output "${out}" \
+            "build/site/${env}/**/*.html" || { jq '.error_map' "${out}"; exit 1; }
+          jq -e '.successful > 0 and .errors == 0' "${out}" >/dev/null || { echo "site:links: ${env}: no links checked"; exit 1; }
+          jq -r --arg env "${env}" '"site:links: \($env): \(.successful) links OK, \(.excludes) excluded (external, offline)"' "${out}"
+        done
+
+  site:audit:
+    desc: Lighthouse CI against the built Production site, with the budgets in lighthouserc.json
+    cmds:
+      - task: site:deps
+      - task: site:build
+      - rm -rf build/lighthouse .lighthouseci
+      - |
+        chrome="$(scripts/site-chrome)" || exit 1
+        CHROME_PATH="${chrome}" npx --no-install lhci autorun --config=lighthouserc.json
+
+  site:
+    desc: Every Marketing Site check (build, validate, links, audit)
+    cmds:
+      - task: site:validate
+      - task: site:links
+      - task: site:audit
+
+  site:serve:
+    desc: Preview the Marketing Site locally with live reload
+    cmds:
+      - hugo server --source site
+
   ci:fast:
     desc: Pre-push gate (lint + tests)
     cmds:
@@ -166,6 +260,7 @@ tasks:
     desc: The full gate (the required `ci` status check runs exactly this)
     cmds:
       - task: ci:fast
+      - task: site
       - task: secrets
 
   dev:

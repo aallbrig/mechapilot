@@ -9,6 +9,10 @@
 .scratch/
 build/
 node_modules/
+.task/
+.lighthouseci/
+site/.hugo_build.lock
+site/resources/
 *.log
 
 # Project: secrets (never commit)

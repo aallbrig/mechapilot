@@ -1,0 +1,13 @@
+{{- define "main" }}
+<section class="section notfound" aria-labelledby="notfound-title">
+  <div class="wrap cta__inner">
+    <p class="eyebrow">Error 404</p>
+    <h1 id="notfound-title" class="section__title">Lost in the sky</h1>
+    <p>This page left the Play Sphere. Head back to base or jump straight into a run.</p>
+    <div class="hero__actions hero__actions--center">
+      <a class="btn btn--play" href="{{ partial "game-url.html" . }}">Play now</a>
+      <a class="btn btn--ghost" href="{{ site.Home.RelPermalink }}">Back to the home page</a>
+    </div>
+  </div>
+</section>
+{{- end }}

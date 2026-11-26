@@ -1,0 +1,18 @@
+{{- /* schema.org VideoGame description for search engines (data, not script code). */ -}}
+{{- $game := partial "game-url.html" . | absURL -}}
+{{- $data := dict
+  "@context" "https://schema.org"
+  "@type" "VideoGame"
+  "name" site.Title
+  "description" site.Params.description
+  "url" .Permalink
+  "image" ("og-image.png" | absURL)
+  "genre" (slice "Arcade" "Shooter")
+  "gamePlatform" "Web browser"
+  "applicationCategory" "Game"
+  "operatingSystem" "Any"
+  "playMode" "SinglePlayer"
+  "isAccessibleForFree" true
+  "potentialAction" (dict "@type" "PlayAction" "target" $game)
+-}}
+<script type="application/ld+json">{{ $data | jsonify | safeJS }}</script>

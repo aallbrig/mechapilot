@@ -1,0 +1,179 @@
+#!/bin/sh
+# Tests for scripts/site-observe: the pinned Chrome loads each fixture document
+# and must reject every parser-differential PoC from the PR #47 gate-bypass
+# reviews on its own, without the CSP meta tag or the awk pre-filter. Each
+# rejection test asserts the exit status (1 = finding) and the reason printed.
+# Fault tests assert exit status 2 ("could not observe"), never a pass.
+# The third-party host "3p.invalid" is never contacted: requests are aborted.
+
+# Write a page whose body is read from stdin; print the site directory.
+observe_page() {
+  d="$(mktemp -d)"
+  {
+    printf '%s' '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body>'
+    cat
+    printf '%s\n' '</body></html>'
+  } >"${d}/index.html"
+  printf '%s' "${d}"
+}
+
+# Write stdin verbatim to <dir>/$1; print the site directory.
+observe_doc() {
+  d="$(mktemp -d)"
+  cat >"${d}/$1"
+  printf '%s' "${d}"
+}
+
+# Run site-observe on $1 (removed afterwards); print "<exit status> <stderr>".
+observe_out() {
+  rc=0
+  err="$(scripts/site-observe "$1" 2>&1 >/dev/null)" || rc=$?
+  rm -rf "$1"
+  printf '%s %s' "${rc}" "${err}"
+}
+
+# $1: site dir, $2: expected exit status, $3: text the reason must contain.
+expect_observe() {
+  out="$(observe_out "$1")"
+  case "${out}" in
+  "$2 "*"$3"*) return 0 ;;
+  *)
+    printf 'expected exit %s with "%s", got: %s\n' "$2" "$3" "${out}" >&2
+    return 1
+    ;;
+  esac
+}
+
+clean_site() {
+  d="$(mktemp -d)"
+  printf '%s\n' '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body><h1>Hi</h1><img alt="" src="/a.svg"></body></html>' >"${d}/index.html"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' >"${d}/a.svg"
+  printf '%s' "${d}"
+}
+
+test_site_observe_accepts_static_page() {
+  site="$(printf '%s' '<h1>Hi</h1><svg viewBox="0 0 1 1"><rect fill="red" width="1" height="1"/></svg>' | observe_page)"
+  expect_observe "${site}" 0 ""
+}
+
+test_site_observe_accepts_static_svg_and_xml() {
+  d="$(mktemp -d)"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>' >"${d}/a.svg"
+  printf '%s\n' '<?xml version="1.0" encoding="utf-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.com/</loc></url></urlset>' >"${d}/sitemap.xml"
+  expect_observe "${d}" 0 ""
+}
+
+# ---- Round 3 PoCs (HTML) ----
+
+test_site_observe_rejects_abrupt_comment_script() {
+  site="$(printf '%s' '<!--><script>document.title="x"</script><!-- x -->' | observe_page)"
+  expect_observe "${site}" 1 "script parsed"
+}
+
+test_site_observe_rejects_bang_comment_close_img() {
+  site="$(printf '%s' '<!-- a --!><img alt="" src="https://3p.invalid/a.png"><!-- b -->' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_nul_before_script() {
+  site="$(printf 'x\000<script>document.title="x"</script>' | observe_page)"
+  expect_observe "${site}" 1 "script parsed"
+}
+
+test_site_observe_rejects_svg_title_script() {
+  site="$(printf '%s' '<svg><title><script>document.title="x"</script></title></svg>' | observe_page)"
+  expect_observe "${site}" 1 "script parsed"
+}
+
+test_site_observe_rejects_svg_textarea_img() {
+  site="$(printf '%s' '<svg><textarea><img alt="" src="https://3p.invalid/a.png"></textarea></svg>' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_math_title_img() {
+  site="$(printf '%s' '<math><title><img alt="" src="https://3p.invalid/a.png"></title></math>' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_control_char_url() {
+  site="$(printf '%s' '<img alt="" src="&#11;https://3p.invalid/a.png">' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_control_char_protocol_relative_url() {
+  site="$(printf '%s' '<img alt="" src="&#x1f;//3p.invalid/b.png">' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: http://3p.invalid/b.png"
+}
+
+test_site_observe_rejects_svg_mask_url() {
+  site="$(printf '%s' '<svg><rect width="9" height="9" mask="url(https://3p.invalid/m.svg#m)"/></svg>' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/m.svg"
+}
+
+test_site_observe_rejects_svg_set_href() {
+  site="$(printf '%s' '<svg><image width="1" height="1"><set attributeName="href" to="https://3p.invalid/a.png"/></image></svg>' | observe_page)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_csp_violation() {
+  d="$(mktemp -d)"
+  printf '%s\n' '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src '"'none'"'"><title>t</title></head><body><img alt="" src="/a.svg"></body></html>' >"${d}/index.html"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>' >"${d}/a.svg"
+  expect_observe "${d}" 1 "violates the following Content Security Policy"
+}
+
+# ---- Round 4 PoCs (standalone SVG/XML, no CSP) ----
+
+test_site_observe_rejects_svg_xhtml_script_spoofing_pptr_url() {
+  site="$(printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:script>document.documentElement.setAttribute("data-x", "1")
+//# sourceURL=pptr:helper
+</h:script></svg>' | observe_doc x.svg)"
+  expect_observe "${site}" 1 "script parsed: pptr:helper"
+}
+
+test_site_observe_rejects_svg_script_delayed_navigation() {
+  site="$(printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:script>setTimeout(() => { location.href = "https://3p.invalid/"; }, 4000);
+//# sourceURL=pptr:helper
+</s:script></svg>' | observe_doc x.svg)"
+  expect_observe "${site}" 1 "script parsed: pptr:helper"
+}
+
+test_site_observe_rejects_xml_xhtml_script() {
+  site="$(printf '%s\n' '<feed xmlns:h="http://www.w3.org/1999/xhtml"><h:script>document.documentElement.setAttribute("data-x", "1")</h:script></feed>' | observe_doc feed.xml)"
+  expect_observe "${site}" 1 "script parsed"
+}
+
+test_site_observe_rejects_xml_entity_script() {
+  site="$(printf '%s\n' '<!DOCTYPE r [<!ENTITY e "<h:script xmlns:h='"'http://www.w3.org/1999/xhtml'"'>document.documentElement.setAttribute(&#34;data-x&#34;, &#34;1&#34;)</h:script>">]><r>&e;</r>' | observe_doc feed.xml)"
+  expect_observe "${site}" 1 "script parsed"
+}
+
+test_site_observe_rejects_xml_entity_image() {
+  site="$(printf '%s\n' '<!DOCTYPE r [<!ENTITY e "<h:img xmlns:h='"'http://www.w3.org/1999/xhtml'"' src='"'https://3p.invalid/a.png'"'/>">]><r>&e;</r>' | observe_doc feed.xml)"
+  expect_observe "${site}" 1 "request to another origin: https://3p.invalid/a.png"
+}
+
+test_site_observe_rejects_data_url_in_xml() {
+  site="$(printf '%s\n' '<r xmlns:h="http://www.w3.org/1999/xhtml"><h:img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="/></r>' | observe_doc feed.xml)"
+  expect_observe "${site}" 1 "request to another origin: data:image/png"
+}
+
+# ---- Round 5: an incomplete observation must exit 2, never pass ----
+
+test_site_observe_fails_closed_when_renderer_crashes() {
+  site="$(clean_site)"
+  out="$(SITE_OBSERVE_FAULT=renderer observe_out "${site}")"
+  case "${out}" in "2 "*"renderer crashed"*) ;; *) return 1 ;; esac
+}
+
+test_site_observe_fails_closed_when_browser_dies() {
+  site="$(clean_site)"
+  out="$(SITE_OBSERVE_FAULT=browser observe_out "${site}")"
+  case "${out}" in "2 "*"could not observe"*) ;; *) return 1 ;; esac
+}
+
+test_site_observe_fails_closed_when_load_never_fires() {
+  site="$(clean_site)"
+  out="$(SITE_OBSERVE_FAULT=hang SITE_OBSERVE_LOAD_TIMEOUT_MS=3000 observe_out "${site}")"
+  case "${out}" in "2 "*"load event did not fire"*) ;; *) return 1 ;; esac
+}
