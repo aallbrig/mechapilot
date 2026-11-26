@@ -78,6 +78,16 @@ tasks:
       - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
       - check-jsonschema --check-metaschema schemas/aws-eval-inventory.schema.json schemas/aws-eval-report.schema.json
       - check-jsonschema --schemafile schemas/aws-eval-inventory.schema.json tests/fixtures/aws-eval/inventory-*.json
+      - |
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "${tmp}"' EXIT
+        for skill in .claude/skills/*/SKILL.md; do
+          [ -f "${skill}" ] || continue
+          name="$(basename "$(dirname "${skill}")")"
+          yq --front-matter=extract -o=json '.' "${skill}" >"${tmp}/${name}.json"
+          [ "$(jq -r '.name' "${tmp}/${name}.json")" = "${name}" ] || { echo "${skill}: name must match its directory"; exit 1; }
+          check-jsonschema --schemafile schemas/claude-skill-frontmatter.schema.json "${tmp}/${name}.json"
+        done
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
