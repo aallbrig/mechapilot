@@ -977,7 +977,8 @@ test_supervisor_runs_no_git_hooks() {
     chmod +x "${d}/.githooks/${hook}"
   done
   printf 'state/\nbin/\n*.json\ncalls\ntoken\n' >"${d}/.gitignore"
-  git -C "${d}" init -q
+  # An explicit main branch: CI runners default to another initial branch name.
+  git -C "${d}" init -q -b main
   git -C "${d}" config user.email t@example.invalid
   git -C "${d}" config user.name t
   git -C "${d}" add .githooks .gitignore
