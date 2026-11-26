@@ -383,7 +383,9 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
   jq -e --arg r "Read(/${rt}/**)" '.permissions.allow | index($r)' "${settings}" >/dev/null || return 1
   # What task ci would download was installed outside the sandbox and copied in.
   [ -f "${d}/worktree/node_modules/.package-lock.json" ] || return 1
-  [ -x "${d}/worktree/build/browsers/chrome/chrome" ] || return 1
+  # No browser is installed for the session: the Chrome steps run only in the ci check.
+  [ ! -e "${d}/worktree/build/browsers" ] || return 1
+  ! grep -q '^npx ' "${d}/calls" || return 1
   [ -f "${d}/worktree/.agent-loop/cache/npm/index" ] || return 1
   grep -q '^npm ci --ignore-scripts --no-audit --no-fund$' "${d}/calls" || return 1
   grep -qx 'npm_config_offline=true' "${launcher}" || return 1
@@ -709,17 +711,21 @@ test_agent_loop_settings_sandbox_the_session() {
   expect true jq '.sandbox.enabled and .sandbox.failIfUnavailable and (.sandbox.allowUnsandboxedCommands == false)
     and (.sandbox.autoAllowBashIfSandboxed == false) and .sandbox.network.strictAllowlist and .disableClaudeAiConnectors' "${f}" || return 1
   home='~' # the literal tilde the sandbox expands, not this shell's home
-  for p in "${home}/.aws" "${home}/.ssh" "${home}/.config/gh" "${home}/.config/mechafighter-agent-loop" "${home}/.claude/.credentials.json"; do
+  for p in "${home}/.aws" "${home}/.ssh" "${home}/.config/gh" "${home}/.config/mechafighter-agent-loop" "${home}/.claude/.credentials.json" "${home}/.claude/ide"; do
     jq -e --arg p "${p}" '.sandbox.filesystem.denyRead | index($p)' "${f}" >/dev/null || return 1
   done
   expect '["aallbrig.github.io","api.github.com","game.mechafighter.com","github.com","mechafighter.com"]' \
     jq -c '.sandbox.network.allowedDomains | sort' "${f}" || return 1
   expect true jq '(.sandbox.network.allowAllUnixSockets == false) and (.sandbox.network.allowUnixSockets == [])' "${f}" || return 1
+  # Local binding stays off: on macOS it opens every localhost port and listens
+  # on all interfaces (IDE bridges, the Godot editor, the LAN).
+  expect false jq '.sandbox.network.allowLocalBinding // false' "${f}" || return 1
   for rule in 'Bash(git push *)' 'Bash(gh api *)' 'Bash(gh pr merge *)' 'Bash(git commit -n*)' 'Bash(git commit *--no-verify*)' \
     'Bash(mise *)' 'Bash(curl *)' 'Bash(*--upload-pack*)' 'Bash(*--exec*)' 'Bash(find *-exec*)' 'Bash(git rebase *)' \
     'Bash(git config *)' 'Bash(git -c *)' 'Bash(task loop:start*)' 'Bash(task loop:stop*)' 'Bash(task infra:*)' \
     'Bash(gh workflow *)' 'Bash(scripts/agent-loop-supervisor *)' 'Read(~/.config/gh/**)' \
-    'Bash(task loop:pin*)' 'Bash(task loop:confirm-token*)' 'Bash(scripts/checks/prod-smoke*)' 'Bash(tmux *)'; do
+    'Bash(task loop:pin*)' 'Bash(task loop:confirm-token*)' 'Bash(scripts/checks/prod-smoke*)' 'Bash(tmux *)' \
+    'Bash(task ci)' 'Bash(task site:validate*)' 'Bash(task site:audit*)' 'Bash(scripts/site-observe*)'; do
     jq -e --arg r "${rule}" '.permissions.deny | index($r)' "${f}" >/dev/null || {
       printf 'missing deny rule: %s\n' "${rule}"
       return 1
@@ -855,12 +861,13 @@ test_skill_commands_match_the_allowlist() {
   d="$(mktemp -d)"
   bt="$(printf '\140')"
   # A command the rules deny, an env-prefixed command, and one they never allow all fail.
-  for cmd in "git tag -l 'v*'" "ACCEPTANCE_RECORD=x scripts/verify-acceptance 1" "curl -sS https://mechafighter.com/" "gh api repos/o/r -XPUT"; do
+  for cmd in "git tag -l 'v*'" "ACCEPTANCE_RECORD=x scripts/verify-acceptance 1" "curl -sS https://mechafighter.com/" "gh api repos/o/r -XPUT" \
+    "git log -1 & curl x" "cat \$(curl x)" "cat x > /tmp/y" "jq . < x" "task ci"; do
     skill_doc "${d}/skill.md" "Run ${bt}${cmd}${bt}."
     ! scripts/checks/agent-loop-skill-commands "${d}/skill.md" >/dev/null || return 1
   done
   # Mentions in the Human-only reference section are not commands.
-  skill_doc "${d}/ok.md" "Run ${bt}task ci${bt}."
+  skill_doc "${d}/ok.md" "Run ${bt}task ci:sandbox${bt}."
   scripts/checks/agent-loop-skill-commands "${d}/ok.md" >/dev/null || return 1
   # Deny beats allow, and a compound command needs every part allowed.
   skill_doc "${d}/compound.md" "Run ${bt}git status --short && git push origin main${bt}."

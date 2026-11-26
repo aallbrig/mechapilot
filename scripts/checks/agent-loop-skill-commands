@@ -7,15 +7,19 @@
 # Usage: scripts/checks/agent-loop-skill-commands [SKILL.md] [settings.json]
 #
 # A command is a backticked span, outside the Human-only reference section,
-# whose first word runs a program: git, gh, task, test, cat, tail, head, jq,
-# ls, grep, or a repo script (scripts/...). Placeholders such as <n> or
-# <head SHA> are filled with sample values.
+# that starts with an environment assignment (VAR=...), a repo script
+# (scripts/... or ./...), or a common program name (see the list below). A
+# span naming a program outside the list is not checked, so keep the list
+# generous. Placeholders such as <n> or <head SHA> are filled with sample values.
 #
 # Matching follows Claude Code's Bash rules (code.claude.com/docs/en/permissions):
 #   - Bash(<pattern>) where * matches any characters, so "Bash(git log *)"
 #     matches "git log -1" but not "git log" alone;
-#   - a compound command (&&, ||, ;, |) needs every part allowed;
+#   - a compound command (&&, ||, &, ;, | or a newline) needs every part allowed;
 #   - deny rules win over allow rules.
+# A skill command may not use command substitution ($(...) or backticks) or
+# redirection (< or >): those run or write things no rule names, so they
+# fail outright.
 set -eu
 
 skill="${1:-.claude/skills/agent-loop/SKILL.md}"
@@ -42,7 +46,7 @@ awk '
     }
   }
 ' "${skill}" |
-  grep -E '^(git|gh|task|test|cat|tail|head|jq|ls|grep|scripts/[A-Za-z0-9_./-]+)( |$)' |
+  grep -E '^([A-Za-z_][A-Za-z0-9_]*=|\./|scripts/|(git|gh|task|test|cat|tail|head|jq|yq|ls|grep|sed|awk|find|cut|tr|sort|uniq|wc|diff|cp|mv|rm|mkdir|touch|chmod|ln|sleep|date|printf|echo|env|xargs|sh|bash|zsh|curl|wget|nc|ssh|scp|rsync|python|python3|node|npm|npx|mise|tofu|terraform|aws|docker|tmux|open|kill|pkill|sudo|claude|shellcheck|shfmt|yamllint|actionlint|check-jsonschema|gdformat|gdlint|godot|hugo|lychee|gitleaks|trivy|tflint)( |$))' |
   sed -e 's/<head SHA>/0123456789abcdef0123456789abcdef01234567/g' -e 's/<[^>]*>/x1/g' |
   sort -u >"${work}/commands"
 
@@ -55,16 +59,18 @@ jq -R . "${work}/commands" | jq -s . >"${work}/commands.json"
 jq -r --slurpfile cmds "${work}/commands.json" -f /dev/stdin "${settings}" >"${work}/report" <<'JQ'
 def rx: "^" + (gsub("(?<c>[.+?^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*")) + "$";
 def bash_patterns($list): [$list[]? | select(startswith("Bash(") and endswith(")")) | .[5:-1] | rx];
-def parts: [splits("\\s*(&&|\\|\\||;|\\|)\\s*")] | map(select(length > 0));
+def parts: [splits("\\s*(&&|\\|\\||&|;|\\||\n)\\s*")] | map(select(length > 0));
 bash_patterns(.permissions.allow) as $allow
 | bash_patterns(.permissions.deny) as $deny
 | $cmds[0][]
 | . as $cmd
-| [parts[] | . as $p
+| if test("\\$\\(|`|[<>]") then "FAIL  \($cmd)  (command substitution or redirection)" else
+  [parts[] | . as $p
     | if any($deny[]; . as $r | $p | test($r)) then "denied: \($p)"
       elif any($allow[]; . as $r | $p | test($r)) then empty
       else "not allowed: \($p)" end] as $problems
 | if ($problems | length) == 0 then "PASS  \($cmd)" else "FAIL  \($cmd)  (\($problems | join("; ")))" end
+  end
 JQ
 
 cat "${work}/report"

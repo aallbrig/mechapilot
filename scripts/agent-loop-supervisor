@@ -34,11 +34,11 @@
 #     loop:start records origin/main once; task loop:pin -- <sha> moves it).
 #     Never a newer origin/main: a PR the session got merged cannot change
 #     what runs unsandboxed until a human pins it.
-#   - Tools task ci needs from the network (npm packages, the pinned Chrome,
-#     OpenTofu providers) are installed by the Supervisor, outside the
-#     sandbox, from the pinned commit's lockfiles, then copied into the
-#     session's checkout. The sandbox's network allowlist stays GitHub, QA and
-#     Production only.
+#   - Tools task ci:sandbox needs from the network (npm packages, OpenTofu
+#     providers) are installed by the Supervisor, outside the sandbox, from the
+#     pinned commit's lockfiles, then copied into the session's checkout. The
+#     sandbox's network allowlist stays GitHub, QA and Production only, and
+#     local binding stays off; the Chrome steps run only in the ci check.
 #   - claude runs with --restricted (no user, project or local settings files),
 #     --strict-mcp-config (no MCP servers) and --permission-mode dontAsk.
 #   - GH_TOKEN comes from AGENT_LOOP_TOKEN_FILE (default
@@ -380,7 +380,7 @@ runtime_paths() {
   git -C "${runtime_repo}" ls-tree -r --name-only "$1" -- \
     scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
     .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md \
-    package.json package-lock.json scripts/site-chrome infra
+    package.json package-lock.json infra
 }
 
 # refresh_runtime: export the pinned commit's settings, status line, hooks,
@@ -491,12 +491,12 @@ place() {
   rm -rf "${stage}" "${trash}"
 }
 
-# provision_ci: install what task ci downloads (npm packages from the pinned
-# package-lock.json with --ignore-scripts, the Chrome for Testing that
-# scripts/site-chrome pins, OpenTofu providers from the pinned lockfiles) once
-# per pin, outside the sandbox, then copy them into the session's checkout.
-# Pinning a commit trusts its scripts/site-chrome and tofu init steps with
-# full user access (docs/agent-loop.md). The record of what was provisioned
+# provision_ci: install what task ci:sandbox downloads (npm packages from the
+# pinned package-lock.json with --ignore-scripts, OpenTofu providers from the
+# pinned lockfiles) once per pin, outside the sandbox, then copy them into the
+# session's checkout. No browser is installed: the Chrome steps run only in the
+# ci check. Pinning a commit trusts its npm and tofu init steps with full user
+# access (docs/agent-loop.md). The record of what was provisioned
 # lives in the state dir, never in the checkout.
 provision_ci() {
   pin="$(pinned_sha)"
@@ -508,9 +508,6 @@ provision_ci() {
     chmod -R u+w "${deps}"
     if [ -f "${deps}/package-lock.json" ]; then
       (cd "${deps}" && npm_config_cache="${deps}/npm-cache" npm ci --ignore-scripts --no-audit --no-fund >/dev/null)
-    fi
-    if [ -x "${deps}/scripts/site-chrome" ]; then
-      (cd "${deps}" && scripts/site-chrome >/dev/null)
     fi
     if [ -d "${deps}/infra" ]; then
       for tf_dir in $(find "${deps}/infra" -name .terraform -prune -o -type f -name '*.tf' -print | sed 's|/[^/]*$||' | sort -u); do
@@ -524,7 +521,6 @@ provision_ci() {
   if [ "${provisioned}" = "${pin} ${worktree}" ]; then return 0; fi
   if [ -d "${deps}/node_modules" ]; then place "${deps}/node_modules" node_modules; fi
   if [ -d "${deps}/npm-cache" ]; then place "${deps}/npm-cache" .agent-loop/cache/npm; fi
-  if [ -d "${deps}/build/browsers" ]; then place "${deps}/build/browsers" build/browsers; fi
   if [ -d "${deps}/infra" ]; then
     for tf in $(cd "${deps}" && find infra -type d -name .terraform -prune -print); do
       tf_parent="$(dirname "${tf}")"

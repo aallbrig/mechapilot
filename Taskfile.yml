@@ -218,13 +218,18 @@ tasks:
         done
       - scripts/site-budget build/site/qa/mechapilot build/site/production
 
-  site:validate:
-    desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
+  site:static:
+    desc: Build the site and validate every page with html-validate (no browser, no network, no localhost)
     cmds:
       - task: site:deps
       - task: site:build
       - scripts/site-no-overrides
       - npx --no-install html-validate --max-warnings 0 "build/site/**/*.html"
+
+  site:validate:
+    desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
+    cmds:
+      - task: site:static
       - scripts/site-observe build/site/qa build/site/production
 
   site:links:
@@ -275,6 +280,14 @@ tasks:
     cmds:
       - task: lint
       - task: test
+
+  ci:sandbox:
+    desc: "Agent Loop session gate: task ci minus the Chrome steps that bind localhost (site-observe, Lighthouse); the ci check runs them"
+    cmds:
+      - task: ci:fast
+      - task: site:static
+      - task: site:links
+      - task: secrets
 
   ci:
     desc: The full gate (the required `ci` status check runs exactly this)

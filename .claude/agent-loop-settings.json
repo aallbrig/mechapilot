@@ -14,6 +14,7 @@
         "~/.config/gh",
         "~/.config/mechafighter-agent-loop",
         "~/.claude/.credentials.json",
+        "~/.claude/ide",
         "~/.netrc",
         "~/.npmrc",
         "~/.docker",
@@ -24,7 +25,6 @@
       "strictAllowlist": true,
       "allowAllUnixSockets": false,
       "allowUnixSockets": [],
-      "allowLocalBinding": true,
       "allowedDomains": [
         "github.com",
         "api.github.com",
@@ -40,8 +40,12 @@
       "Agent",
       "WebFetch(domain:mechafighter.com)",
       "WebFetch(domain:game.mechafighter.com)",
-      "Bash(task ci)",
       "Bash(task ci:fast)",
+      "Bash(task ci:sandbox)",
+      "Bash(task site:static)",
+      "Bash(task site:build)",
+      "Bash(task site:links)",
+      "Bash(task site:deps)",
       "Bash(task lint)",
       "Bash(task lint:*)",
       "Bash(task test)",
@@ -49,8 +53,6 @@
       "Bash(task fmt)",
       "Bash(task doctor)",
       "Bash(task secrets)",
-      "Bash(task site)",
-      "Bash(task site:*)",
       "Bash(task godot:*)",
       "Bash(task dev:check)",
       "Bash(task verify:acceptance *)",
@@ -205,7 +207,14 @@
       "Bash(scripts/checks/prod-smoke*)",
       "Bash(npm *)",
       "Bash(npx *)",
-      "Bash(tmux *)"
+      "Bash(tmux *)",
+      "Bash(task ci)",
+      "Bash(task site)",
+      "Bash(task site:validate*)",
+      "Bash(task site:audit*)",
+      "Bash(task site:serve*)",
+      "Bash(scripts/site-observe*)",
+      "Read(~/.claude/ide/**)"
     ]
   }
 }
