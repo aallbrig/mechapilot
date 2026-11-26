@@ -1,0 +1,34 @@
+#!/bin/sh
+# Tests for scripts/install-godot (run by scripts/test-shell). A restored CI cache
+# or a tampered install must never be trusted on its marker alone.
+
+# A private copy of the real pinned install; sets d (a MECHAPILOT_TOOLS root).
+copied_install() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  tag="$(tr -d '[:space:]' <.godot-version)"
+  src="${MECHAPILOT_TOOLS:-${XDG_CACHE_HOME:-${HOME}/.cache}/mechapilot}/godot/${tag}"
+  mkdir -p "${d}/godot"
+  cp -R "${src}" "${d}/godot/${tag}"
+}
+
+test_install_godot_verifies_a_pinned_install() {
+  copied_install
+  MECHAPILOT_TOOLS="${d}" scripts/install-godot --verify
+}
+
+test_install_godot_rejects_a_tampered_install() {
+  copied_install
+  for f in "${d}/godot/${tag}/Godot.app/Contents/MacOS/Godot" "${d}/godot/${tag}"/Godot_v*_linux.*; do
+    if [ -f "${f}" ]; then printf 'x' >>"${f}"; fi
+  done
+  ! MECHAPILOT_TOOLS="${d}" scripts/install-godot --verify 2>/dev/null
+}
+
+test_install_godot_rejects_tampered_templates() {
+  copied_install
+  for f in "${d}/godot/${tag}"/editor_data/export_templates/*/web_nothreads_release.zip; do
+    printf 'x' >>"${f}"
+  done
+  ! MECHAPILOT_TOOLS="${d}" scripts/install-godot --verify 2>/dev/null
+}

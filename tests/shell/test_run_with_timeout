@@ -1,0 +1,62 @@
+#!/bin/sh
+# Tests for scripts/run-with-timeout (run by scripts/test-shell). The odd sleep
+# lengths make each test's processes unique, so pgrep finds only its own.
+
+no_process() {
+  ! pgrep -f "^sleep $1\$" >/dev/null 2>&1
+}
+
+test_run_with_timeout_returns_promptly_with_piped_stderr() {
+  start="$(date +%s)"
+  scripts/run-with-timeout 4711 sleep 1 2>&1 | cat
+  elapsed=$(($(date +%s) - start))
+  [ "${elapsed}" -lt 5 ] && no_process 4711
+}
+
+test_run_with_timeout_kills_overrunning_command() {
+  start="$(date +%s)"
+  rc=0
+  scripts/run-with-timeout 1 sleep 4712 2>/dev/null || rc=$?
+  elapsed=$(($(date +%s) - start))
+  [ "${rc}" -ne 0 ] && [ "${elapsed}" -lt 5 ] && no_process 4712
+}
+
+test_run_with_timeout_passes_exit_status() {
+  rc=0
+  scripts/run-with-timeout 4713 sh -c 'exit 3' || rc=$?
+  [ "${rc}" -eq 3 ] && no_process 4713
+}
+
+# A detached child the command starts must not outlive it.
+test_run_with_timeout_kills_leftover_children() {
+  scripts/run-with-timeout 30 sh -c 'sleep 4714 >/dev/null 2>&1 &'
+  sleep 1
+  no_process 4714
+}
+
+# A command that ignores TERM (or spins forever) is KILLed 5 s after the limit.
+test_run_with_timeout_kills_command_ignoring_term() {
+  start="$(date +%s)"
+  rc=0
+  scripts/run-with-timeout 1 sh -c 'trap "" TERM; while :; do :; done' 2>/dev/null || rc=$?
+  elapsed=$(($(date +%s) - start))
+  [ "${rc}" -ne 0 ] && [ "${elapsed}" -lt 12 ]
+}
+
+# A signal sent to the wrapper reaches the command's group (no orphans), well
+# before the limit. (INT uses the same trap, but a non-interactive shell starts
+# background jobs with INT ignored, so it can't be delivered from here.)
+test_run_with_timeout_forwards_signals_to_the_command() {
+  for sig in TERM HUP; do
+    start="$(date +%s)"
+    scripts/run-with-timeout 60 sleep 4721 &
+    wrapper=$!
+    sleep 1
+    kill -s "${sig}" "${wrapper}"
+    rc=0
+    wait "${wrapper}" || rc=$?
+    elapsed=$(($(date +%s) - start))
+    [ "${rc}" -ne 0 ] && [ "${elapsed}" -lt 15 ] || return 1
+    no_process 4721 || return 1
+  done
+}

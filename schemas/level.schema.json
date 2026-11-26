@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/level.schema.json",
+  "title": "Mecha Fighter Level",
+  "description": "One Level's tuning data (godot/levels/*.json). Units: world units, seconds, degrees. Level 1 holds the parity spec's section 18 values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "id", "name", "player", "camera", "play_sphere", "intro", "spawner", "enemy", "boss", "game_over"],
+  "$defs": {
+    "vec2": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "positive": { "type": "number", "exclusiveMinimum": 0 },
+    "non_negative": { "type": "number", "minimum": 0 },
+    "fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+    "count": { "type": "integer", "minimum": 1 }
+  },
+  "properties": {
+    "$schema": { "const": "../../schemas/level.schema.json" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "name": { "type": "string", "minLength": 1 },
+    "player": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["speed", "coast_factor", "initial_move", "max_health", "fire_interval", "muzzle_offset", "projectile_speed", "projectile_lifetime", "projectile_damage"],
+      "properties": {
+        "speed": { "$ref": "#/$defs/positive" },
+        "coast_factor": { "$ref": "#/$defs/fraction" },
+        "initial_move": { "$ref": "#/$defs/vec2" },
+        "max_health": { "$ref": "#/$defs/count" },
+        "fire_interval": { "$ref": "#/$defs/positive" },
+        "muzzle_offset": { "$ref": "#/$defs/non_negative" },
+        "projectile_speed": { "$ref": "#/$defs/positive" },
+        "projectile_lifetime": { "$ref": "#/$defs/positive" },
+        "projectile_damage": { "$ref": "#/$defs/count" }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fov", "offset_landscape", "offset_portrait", "damping", "far"],
+      "properties": {
+        "fov": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 180 },
+        "offset_landscape": { "$ref": "#/$defs/vec3" },
+        "offset_portrait": { "$ref": "#/$defs/vec3" },
+        "damping": { "$ref": "#/$defs/non_negative" },
+        "far": { "$ref": "#/$defs/positive" }
+      }
+    },
+    "play_sphere": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["radius"],
+      "properties": {
+        "radius": { "$ref": "#/$defs/positive" }
+      }
+    },
+    "intro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration", "text"],
+      "properties": {
+        "duration": { "$ref": "#/$defs/non_negative" },
+        "text": { "type": "string" }
+      }
+    },
+    "spawner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spawn_distance", "pool", "reuse_after_death", "limit_start", "limit_per_death", "delay_min", "delay_max", "buffer_start", "buffer_per_death"],
+      "properties": {
+        "spawn_distance": { "$ref": "#/$defs/positive" },
+        "pool": { "$ref": "#/$defs/count" },
+        "reuse_after_death": { "$ref": "#/$defs/non_negative" },
+        "limit_start": { "$ref": "#/$defs/non_negative" },
+        "limit_per_death": { "$ref": "#/$defs/non_negative" },
+        "delay_min": { "$ref": "#/$defs/non_negative" },
+        "delay_max": { "$ref": "#/$defs/non_negative" },
+        "buffer_start": { "$ref": "#/$defs/non_negative" },
+        "buffer_per_death": { "$ref": "#/$defs/non_negative" }
+      }
+    },
+    "enemy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["health", "speed_min", "speed_max", "detect", "close_enough", "score", "contact_kills"],
+      "properties": {
+        "health": { "$ref": "#/$defs/count" },
+        "speed_min": { "$ref": "#/$defs/positive" },
+        "speed_max": { "$ref": "#/$defs/positive" },
+        "detect": { "$ref": "#/$defs/positive" },
+        "close_enough": { "$ref": "#/$defs/non_negative" },
+        "score": { "type": "integer", "minimum": 0 },
+        "contact_kills": { "type": "boolean" }
+      }
+    },
+    "boss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kills_before_boss"],
+      "properties": {
+        "kills_before_boss": { "$ref": "#/$defs/count" }
+      }
+    },
+    "game_over": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["delay_after_player_death"],
+      "properties": {
+        "delay_after_player_death": { "$ref": "#/$defs/non_negative" }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Launch the pinned Godot editor on godot/ with this repo's own ports, so it can
+# run beside another Godot project that uses the defaults (6005 LSP, 6006 DAP,
+# 6007 debugger). The ports are passed on the command line, never stored in the
+# shared editor settings. `task godot:editor` supplies them from Taskfile vars.
+#
+# Usage: scripts/godot-editor [--dry-run] <lsp-port> <dap-port> <debug-port>
+#   --dry-run   print the command instead of running it
+set -eu
+
+dry_run=no
+if [ "${1:-}" = --dry-run ]; then
+  dry_run=yes
+  shift
+fi
+if [ "$#" -ne 3 ]; then
+  printf 'usage: godot-editor [--dry-run] <lsp-port> <dap-port> <debug-port>\n' >&2
+  exit 64
+fi
+for port in "$@"; do
+  case "${port}" in
+    "" | *[!0-9]*)
+      printf 'godot-editor: port must be a number, got "%s"\n' "${port}" >&2
+      exit 64
+      ;;
+    *) ;;
+  esac
+  if [ "${port}" -lt 1024 ] || [ "${port}" -gt 49151 ]; then
+    printf 'godot-editor: port %s is outside 1024-49151\n' "${port}" >&2
+    exit 64
+  fi
+done
+
+here="$(cd "$(dirname "$0")" && pwd)"
+set -- "${here}/godot" --editor --path godot \
+  --lsp-port "$1" --dap-port "$2" --debug-server "tcp://127.0.0.1:$3"
+if [ "${dry_run}" = yes ]; then
+  printf '%s\n' "$*"
+  exit 0
+fi
+exec "$@"

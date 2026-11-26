@@ -1,0 +1,48 @@
+#!/bin/sh
+# End-to-end web tests (run by scripts/test-shell). The boot test exports the
+# current source into a fresh directory, so a stale build/web can never stand
+# in for it. Each test removes its temp dir (including the export) on exit.
+
+scratch() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+}
+
+test_web_boots_without_console_errors() {
+  scratch
+  scripts/godot-export-web "${d}/web" && scripts/e2e-web "${d}/web"
+}
+
+test_web_smoke_rejects_page_that_never_boots() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas>\n' >"${d}/index.html"
+  ! E2E_BOOT_TIMEOUT_MS=3000 scripts/e2e-web "${d}"
+}
+
+test_web_smoke_rejects_console_errors() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok"); console.error("boom");</script>\n' >"${d}/index.html"
+  ! scripts/e2e-web "${d}"
+}
+
+test_web_smoke_rejects_csp_violations() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok");</script>\n' >"${d}/index.html"
+  ! E2E_BOOT_TIMEOUT_MS=3000 E2E_CSP="default-src 'self'; script-src 'self'" scripts/e2e-web "${d}"
+}
+
+test_web_smoke_reads_game_site_csp_from_infra() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok");</script>\n' >"${d}/index.html"
+  out="$(scripts/e2e-web "${d}" 2>&1)" || return 1
+  case "${out}" in
+  *"serving with CSP: default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval';"*"frame-ancestors 'none'"*) ;;
+  *) return 1 ;;
+  esac
+}
+
+test_web_smoke_accepts_clean_booting_page() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok");</script>\n' >"${d}/index.html"
+  scripts/e2e-web "${d}"
+}

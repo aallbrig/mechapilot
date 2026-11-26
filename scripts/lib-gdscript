@@ -1,0 +1,51 @@
+#!/bin/sh
+# Sourced helper for checks that read GDScript source.
+#
+# gd_code <keep|blank> <file>
+#   Print the file with comments removed, line for line, so line numbers still
+#   match. A `#` inside a string is not a comment. Strings ("..", '..', and
+#   triple-quoted strings that span lines) are kept with "keep" (for checks
+#   on res:// paths) or emptied with "blank" (so words inside strings never
+#   look like code). Escapes inside strings are honoured.
+gd_code() {
+  awk -v mode="$1" '
+    BEGIN { q = "" }
+    {
+      line = $0
+      out = ""
+      n = length(line)
+      i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (q != "") {
+          if (c == "\\") {
+            if (mode == "keep") out = out substr(line, i, 2)
+            i += 2
+            continue
+          }
+          if (substr(line, i, length(q)) == q) {
+            out = out q
+            i += length(q)
+            q = ""
+            continue
+          }
+          if (mode == "keep") out = out c
+          i++
+          continue
+        }
+        if (c == "#") break
+        if (c == "\"" || c == "\047") {
+          t = substr(line, i, 3)
+          if (t == c c c) q = t
+          else q = c
+          out = out q
+          i += length(q)
+          continue
+        }
+        out = out c
+        i++
+      }
+      print out
+    }
+  ' "$2"
+}

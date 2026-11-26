@@ -1,0 +1,5 @@
+# Godot 4: editor cache and generated files (never committed).
+.godot/
+/android/
+# GdUnit4 writes reports here when run from the editor; scripts/godot-test uses a temp dir.
+/reports/

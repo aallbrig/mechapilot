@@ -1,0 +1,269 @@
+#!/bin/sh
+# Run the GdUnit4 suites in godot/tests headless and write build/test-results/godot.xml.
+#
+# GdUnit4 runs tests in the same Godot process as its runner, counters and
+# report writer. What this script guarantees, and what it does not:
+#
+#   - Separate processes. Each suite file runs in its own Godot process with its
+#     own private report dir and process group (killed when it ends), so a suite
+#     cannot reach another suite's in-memory results.
+#   - Filesystem containment (Linux, required in CI). Each Godot process runs
+#     under bubblewrap: the whole filesystem is read-only except a private
+#     per-suite directory (report dir, HOME, XDG dirs and so user://) and a
+#     private copy of godot/.godot; no network; its own PID namespace. A test
+#     cannot write the repo, the harness, the Godot install or another suite's
+#     report. macOS has no such sandbox: there the tree check below is the
+#     containment, which detects tampering but does not prevent it.
+#   - Tamper detection (everywhere). This script runs from a private copy of
+#     itself and its helpers. scripts/tree-guard snapshots the repo, node_modules
+#     and the Godot binary and templates before the first suite and verifies
+#     them after the last. Any change fails every case. The Godot binary is also
+#     checked against its pinned SHA512 before running.
+#   - Exact reports. Each suite's reported testcase names must equal exactly the
+#     func test_* names that scripts/lib-tests discovers in that file.
+#   - Fail closed. A suite whose process exits non-zero, crashes or times out has
+#     every case recorded as failed, plus a failing godot_suite_exit_status case.
+#
+# Not proven: test code forging its own suite's verdict inside its own process.
+# That is prevented by scripts/checks/godot-safe-api (static bans) and review,
+# not made impossible (#41 tracks proving that assertions really run).
+#
+# Usage: scripts/godot-test [out-dir] [project-dir]
+set -eu
+LC_ALL=C
+export LC_ALL
+
+# Run from a private copy, so a test that rewrites the repo's scripts cannot
+# change what this run does next.
+if [ -z "${GODOT_TEST_PRIVATE:-}" ]; then
+  repo="$(cd "$(dirname "$0")/.." && pwd -P)"
+  priv="$(mktemp -d)"
+  mkdir -p "${priv}/scripts"
+  for f in godot-test lib-tests lib-godot run-with-timeout tree-guard; do
+    cp "${repo}/scripts/${f}" "${priv}/scripts/${f}"
+  done
+  cp "${repo}/.godot-version" "${repo}/.godot-sha512sums" "${priv}/"
+  GODOT_TEST_PRIVATE="${priv}" GODOT_TEST_REPO="${repo}" exec sh "${priv}/scripts/godot-test" "$@"
+fi
+
+here="${GODOT_TEST_PRIVATE}/scripts"
+repo="${GODOT_TEST_REPO:?}"
+# shellcheck source=lib-tests
+. "${here}/lib-tests"
+# shellcheck source=lib-godot
+. "${here}/lib-godot"
+
+out_dir="${1:-build/test-results}"
+project="${2:-godot}"
+project_abs="$(cd "${project}" && pwd -P)"
+timeout_secs="${GODOT_TEST_TIMEOUT:-300}"
+# Tests must never write acceptance evidence.
+unset ACCEPTANCE_RECORD ACCEPTANCE_EVIDENCE
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}" "${GODOT_TEST_PRIVATE}"' EXIT
+mkdir -p "${out_dir}"
+tab="$(printf '\t')"
+
+sha512_of() {
+  if command -v sha512sum >/dev/null 2>&1; then
+    sha512sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 512 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# The pinned editor, checked against its pinned SHA512 (not trusted on its marker).
+bin_rel="${godot_bin#"${godot_home}/"}"
+want="$(awk -v f="${bin_rel}" '$2 == f { print $1 }' "${GODOT_TEST_PRIVATE}/.godot-sha512sums")"
+if [ ! -x "${godot_bin}" ] || [ -z "${want}" ]; then
+  printf 'godot-test: pinned Godot %s is not installed (run: task setup)\n' "${godot_tag}" >&2
+  exit 1
+fi
+have="$(sha512_of "${godot_bin}")"
+if [ "${have}" != "${want}" ]; then
+  printf 'godot-test: %s does not match its pinned SHA512\n' "${godot_bin}" >&2
+  exit 1
+fi
+
+# Sandbox: bubblewrap on Linux (required in CI), none elsewhere.
+sandbox=none
+if [ "${godot_os}" = Linux ]; then
+  if command -v bwrap >/dev/null 2>&1; then
+    sandbox=bwrap
+  elif [ -n "${CI:-}" ]; then
+    printf 'godot-test: bubblewrap (bwrap) is required on Linux CI\n' >&2
+    exit 1
+  else
+    printf 'godot-test: warning: bwrap not found; running without the filesystem sandbox\n' >&2
+  fi
+fi
+
+# run_godot <dir> <log> <args...>: run the editor binary with a private HOME, XDG
+# dirs, TMPDIR and godot/.godot copy under <dir>, output to <log>; sets godot_rc.
+# Under bwrap, nothing else is writable.
+run_godot() {
+  box="$1"
+  log="$2"
+  shift 2
+  godot_rc=0
+  mkdir -p "${box}/home" "${box}/data" "${box}/config" "${box}/cache" "${box}/tmp" "${box}/dotgodot"
+  if [ "${sandbox}" = bwrap ]; then
+    "${here}/run-with-timeout" "${timeout_secs}" bwrap --die-with-parent --new-session --unshare-all \
+      --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+      --ro-bind "${godot_home}" "${godot_home}" --ro-bind "${project_abs}" "${project_abs}" \
+      --bind "${box}" "${box}" --bind "${box}/dotgodot" "${project_abs}/.godot" \
+      --setenv HOME "${box}/home" --setenv XDG_DATA_HOME "${box}/data" \
+      --setenv XDG_CONFIG_HOME "${box}/config" --setenv XDG_CACHE_HOME "${box}/cache" \
+      --setenv TMPDIR "${box}/tmp" \
+      -- "${godot_bin}" --headless --path "${project_abs}" "$@" >"${log}" 2>&1 </dev/null || godot_rc=$?
+  else
+    HOME="${box}/home" XDG_DATA_HOME="${box}/data" XDG_CONFIG_HOME="${box}/config" \
+      XDG_CACHE_HOME="${box}/cache" TMPDIR="${box}/tmp" \
+      "${here}/run-with-timeout" "${timeout_secs}" "${godot_bin}" --headless --path "${project_abs}" "$@" \
+      >"${log}" 2>&1 </dev/null || godot_rc=$?
+  fi
+}
+
+# Import once into a private cache, then give every suite its own copy of it.
+# Without the sandbox, Godot uses (and updates) the project's own .godot/.
+mkdir -p "${work}/base/dotgodot"
+if [ "${sandbox}" = bwrap ] && [ -d "${project_abs}/.godot" ]; then
+  cp -R "${project_abs}/.godot/." "${work}/base/dotgodot/"
+fi
+mkdir -p "${project_abs}/.godot"
+run_godot "${work}/base" "${work}/import.log" --import
+rc="${godot_rc}"
+if [ "${rc}" -ne 0 ]; then
+  cat "${work}/import.log" >&2
+  printf 'godot-test: import failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+
+# Snapshot after the import (which may add .uid files for new scripts; no test
+# code runs during it, since godot-safe-api bans @tool scripts).
+"${here}/tree-guard" snapshot "${work}/tree.before" "${repo}"
+# The other runner's evidence in the same out dir (written earlier) must survive.
+if [ -f "${out_dir}/shell.xml" ]; then cp "${out_dir}/shell.xml" "${work}/shell.xml.before"; fi
+
+# rows: classname <TAB> name <TAB> pass|fail <TAB> message
+: >"${work}/rows"
+find "${project}/tests" -type f -name 'test_*.gd' | sort >"${work}/files"
+suites=0
+suite_failures=0
+
+while IFS= read -r file; do
+  suites=$((suites + 1))
+  res="res://${file#"${project}"/}"
+  box="${work}/suite-${suites}"
+  report="${box}/report"
+  mkdir -p "${report}" "${box}/dotgodot"
+  cp -R "${work}/base/dotgodot/." "${box}/dotgodot/"
+  godot_test_names <"${file}" | sort >"${work}/expected"
+
+  run_godot "${box}" "${work}/suite.log" -s -d --remote-debug tcp://127.0.0.1:0 \
+    res://addons/gdUnit4/bin/GdUnitCmdTool.gd --ignoreHeadlessMode -a "${res}" -c -rd "${report}"
+  rc="${godot_rc}"
+
+  # The process (and its group) is gone; copy the report out before reading it.
+  rm -rf "${work}/report-copy"
+  cp -R "${report}" "${work}/report-copy"
+  : >"${work}/reported"
+  find "${work}/report-copy" -name results.xml -type f >"${work}/xmls"
+  nxml="$(wc -l <"${work}/xmls" | tr -d ' ')"
+  if [ "${nxml}" -eq 1 ]; then
+    xml="$(cat "${work}/xmls")"
+    yq -p xml -o json '.' "${xml}" | jq -r '
+      [.. | objects | select(has("testcase")) | (.testcase | if type == "array" then .[] else . end)
+        | [(.["+@name"] // ""),
+           (if (has("failure") or has("error") or has("skipped")) then "fail" else "pass" end),
+           ([.failure, .error, .skipped] | map(select(. != null))
+             | map(if type == "object" then (.["+content"] // .["+@message"] // "") else tostring end)
+             | join(" ") | gsub("[\t\n\r]"; " "))]
+      ] | .[] | @tsv' >"${work}/reported"
+  fi
+  cut -f 1 "${work}/reported" | sort >"${work}/reported-names"
+
+  reason=""
+  if [ "${rc}" -ne 0 ]; then
+    reason="suite process exited ${rc} (crash, timeout or failing tests)"
+  elif [ "${nxml}" -ne 1 ]; then
+    reason="expected one GdUnit4 results.xml, found ${nxml}"
+  elif ! cmp -s "${work}/expected" "${work}/reported-names"; then
+    got_names="$(tr '\n' ' ' <"${work}/reported-names")"
+    want_names="$(tr '\n' ' ' <"${work}/expected")"
+    reason="reported tests (${got_names}) differ from the tests in source (${want_names})"
+  fi
+
+  if [ -z "${reason}" ]; then
+    while IFS="${tab}" read -r name verdict message; do
+      printf '%s\t%s\t%s\t%s\n' "${file}" "${name}" "${verdict}" "${message}" >>"${work}/rows"
+    done <"${work}/reported"
+  else
+    suite_failures=$((suite_failures + 1))
+    printf 'godot-test: %s: %s\n' "${file}" "${reason}" >&2
+    sed 's/\x1b\[[0-9;]*m//g' "${work}/suite.log" | tail -n 40 >&2
+    # A failed run never vouches for anything: every case in the suite fails.
+    while IFS= read -r name; do
+      detail="$(awk -F '\t' -v n="${name}" '$1 == n { print $3 }' "${work}/reported" | head -n 1)"
+      printf '%s\t%s\tfail\t%s %s\n' "${file}" "${name}" "${reason}" "${detail}" >>"${work}/rows"
+    done <"${work}/expected"
+    printf '%s\tgodot_suite_exit_status\tfail\t%s\n' "${file}" "${reason}" >>"${work}/rows"
+  fi
+done <"${work}/files"
+
+# Anything changed outside build/ and godot/.godot/ voids every result.
+tampered=no
+if [ -f "${work}/shell.xml.before" ] && ! cmp -s "${work}/shell.xml.before" "${out_dir}/shell.xml"; then
+  tampered=yes
+  printf 'godot-test: %s/shell.xml changed while the Godot tests ran\n' "${out_dir}" >&2
+fi
+if ! "${here}/tree-guard" verify "${work}/tree.before" "${repo}" >&2; then
+  tampered=yes
+fi
+if [ "${tampered}" = yes ]; then
+  printf 'godot-test: files changed while the Godot tests ran; every case is recorded as failed\n' >&2
+  awk -F '\t' -v OFS='\t' '{ $3 = "fail"; $4 = "shell.xml or files outside build/ changed during the Godot tests " $4; print }' \
+    "${work}/rows" >"${work}/rows.failed"
+  mv -f "${work}/rows.failed" "${work}/rows"
+fi
+
+xml_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+total=0
+failed=0
+: >"${work}/cases"
+while IFS="${tab}" read -r classname name verdict message; do
+  total=$((total + 1))
+  cls="$(printf '%s' "${classname}" | xml_escape)"
+  nm="$(printf '%s' "${name}" | xml_escape)"
+  if [ "${verdict}" = pass ]; then
+    printf '  <testcase classname="%s" name="%s"/>\n' "${cls}" "${nm}" >>"${work}/cases"
+  else
+    failed=$((failed + 1))
+    msg="$(printf '%s' "${message}" | xml_escape)"
+    printf '  <testcase classname="%s" name="%s">\n    <failure message="failed">%s</failure>\n  </testcase>\n' \
+      "${cls}" "${nm}" "${msg}" >>"${work}/cases"
+  fi
+done <"${work}/rows"
+
+status=0
+if [ "${total}" -eq 0 ]; then
+  printf 'godot-test: no test cases were found\n' >&2
+  status=1
+fi
+if [ "${failed}" -ne 0 ] || [ "${suite_failures}" -ne 0 ] || [ "${tampered}" = yes ]; then status=1; fi
+
+{
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+  printf '<testsuite name="godot" tests="%s" failures="%s">\n' "${total}" "${failed}"
+  cat "${work}/cases"
+  printf '</testsuite>\n'
+} >"${work}/godot.xml"
+# Written last, after every suite has run, so test code cannot pre-empt it.
+mv -f "${work}/godot.xml" "${out_dir}/godot.xml"
+
+printf 'godot-test: %s/%s passed in %s suite(s) (sandbox: %s)\n' "$((total - failed))" "${total}" "${suites}" "${sandbox}"
+exit "${status}"

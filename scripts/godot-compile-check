@@ -1,0 +1,57 @@
+#!/bin/sh
+# Load every project .gd and .tscn headless under the project's strict warning
+# settings and exit 1 on any parse or compile error, or any warning below Error.
+#
+# Godot's own `--check-only` exits 0 on warning-as-error parse failures, and a
+# `-s` script that fails to parse also exits 0. So a pass needs exit status 0
+# AND the checker's summary line, AND the number of scripts it compiled must
+# match the number of .gd files on disk (nothing silently skipped).
+#
+# Usage: scripts/godot-compile-check [project-dir]
+set -eu
+LC_ALL=C
+export LC_ALL
+
+project="${1:-godot}"
+here="$(cd "$(dirname "$0")" && pwd)"
+checker="${here}/godot-compile-check.gd"
+timeout_secs="${GODOT_CHECK_TIMEOUT:-300}"
+
+if [ ! -f "${project}/project.godot" ]; then
+  printf 'godot-compile-check: no project.godot in %s\n' "${project}" >&2
+  exit 1
+fi
+
+log="$(mktemp)"
+trap 'rm -f "${log}"' EXIT
+
+# Engine error lines. A scene with a broken ext_resource still loads and
+# instantiates, so these lines are the only signal and always fail the check.
+error_lines='^(ERROR|SCRIPT ERROR|USER ERROR):|Parse Error'
+
+# Import first so class_name and autoload caches exist on a fresh checkout.
+rc=0
+"${here}/run-with-timeout" "${timeout_secs}" "${here}/godot" --headless --path "${project}" --import >"${log}" 2>&1 || rc=$?
+if [ "${rc}" -ne 0 ] || grep -Eq "${error_lines}" "${log}"; then
+  cat "${log}" >&2
+  printf 'godot-compile-check: import failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+
+rc=0
+"${here}/run-with-timeout" "${timeout_secs}" "${here}/godot" --headless --path "${project}" \
+  -s "${checker}" >"${log}" 2>&1 || rc=$?
+grep -E 'compile-check:|SCRIPT ERROR|Parse Error|ERROR:' "${log}" || true
+
+summary="$(sed -n 's/^compile-check: ok scripts=\([0-9]*\) scenes=\([0-9]*\)$/\1/p' "${log}")"
+on_disk="$(find "${project}" -name '*.gd' -type f ! -path "${project}/addons/*" ! -path "${project}/.godot/*" | wc -l | tr -d ' ')"
+
+if [ "${rc}" -ne 0 ] || [ -z "${summary}" ] || grep -Eq "${error_lines}" "${log}"; then
+  printf 'godot-compile-check: FAILED (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+if [ "${summary}" -ne "${on_disk}" ]; then
+  printf 'godot-compile-check: compiled %s scripts but %s are on disk\n' "${summary}" "${on_disk}" >&2
+  exit 1
+fi
+printf 'godot-compile-check: %s scripts compile under maximum strictness\n' "${summary}"

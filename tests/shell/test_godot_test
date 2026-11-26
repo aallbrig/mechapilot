@@ -1,0 +1,114 @@
+#!/bin/sh
+# Tests for scripts/godot-test (run by scripts/test-shell): one Godot process
+# per suite, and a failed or crashed suite never reports a pass.
+
+# A copy of the real project (with GdUnit4) in a temp dir; sets d, p and out,
+# and removes them on exit.
+copy_project() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/godot" "${d}/out"
+  (cd godot && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
+    mkdir -p "${d}/godot/$(dirname "${f}")"
+    cp "godot/${f}" "${d}/godot/${f}"
+  done
+  p="${d}/godot"
+  out="${d}/out"
+}
+
+# verdict_of <name>: pass or fail, as recorded in godot.xml.
+verdict_of() {
+  awk -v n="name=\"$1\"" '
+    index($0, n) { if ($0 ~ /\/>[[:space:]]*$/) print "pass"; else print "fail" }
+  ' "${out}/godot.xml"
+}
+
+test_godot_test_isolates_a_failing_suite() {
+  copy_project
+  printf 'extends GdUnitTestSuite\n\n\nfunc test_really_fails() -> void:\n\tvar _ok: GdUnitAssert = assert_bool(false).is_true()\n' \
+    >"${p}/tests/test_fails.gd"
+  rc=0
+  scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || rc=$?
+  failing="$(verdict_of test_really_fails)"
+  other="$(verdict_of test_events_bus_delivers_typed_signal)"
+  [ "${rc}" -ne 0 ] && [ "${failing}" = fail ] && [ "${other}" = pass ]
+}
+
+test_godot_test_fails_every_case_of_a_hung_suite() {
+  copy_project
+  printf 'extends GdUnitTestSuite\n\n\nfunc test_a_passes() -> void:\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n\n\nfunc test_b_hangs() -> void:\n\tvar n: int = 0\n\twhile n >= 0:\n\t\tn = (n + 1) %% 7\n\tvar _ok: GdUnitAssert = assert_int(n).is_equal(0)\n' \
+    >"${p}/tests/test_hang.gd"
+  rc=0
+  GODOT_TEST_TIMEOUT=40 scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || rc=$?
+  a="$(verdict_of test_a_passes)"
+  b="$(verdict_of test_b_hangs)"
+  [ "${rc}" -ne 0 ] && [ "${a}" = fail ] && [ "${b}" = fail ] &&
+    grep -q 'classname="[^"]*test_hang.gd" name="godot_suite_exit_status"' "${out}/godot.xml" &&
+    ! grep -q 'failures="0"' "${out}/godot.xml"
+}
+
+test_godot_test_reports_real_project_as_repo_paths() {
+  copy_project
+  scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 &&
+    grep -q "classname=\"${p}/tests/test_events.gd\" name=\"test_events_bus_delivers_typed_signal\"/>" "${out}/godot.xml"
+}
+
+# ---- Correctness re-review PoC: a suite rewrites the harness through user:// ----
+
+# A throwaway git repo holding the harness and a copy of the project; sets t.
+mini_repo() {
+  t="$(mktemp -d)"
+  trap 'rm -rf "${t}"' EXIT
+  t="$(cd "${t}" && pwd -P)"
+  mkdir -p "${t}/scripts" "${t}/godot"
+  for f in godot godot-test lib-tests lib-godot run-with-timeout tree-guard; do cp "scripts/${f}" "${t}/scripts/${f}"; done
+  cp .godot-version .godot-sha512sums "${t}/"
+  (cd godot && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
+    mkdir -p "${t}/godot/$(dirname "${f}")"
+    cp "godot/${f}" "${t}/godot/${f}"
+  done
+  printf 'build/\n.godot/\n' >"${t}/.gitignore"
+  printf '#!/bin/sh\necho forged\n' >"${t}/payload.sh"
+  printf 'extends GdUnitTestSuite\n\nconst TARGET: String = "%s/scripts/godot"\nconst PAYLOAD: String = "%s/payload.sh"\n\n\nfunc _escape(abs_path: String) -> String:\n\tvar up: String = ""\n\tfor _i: int in OS.get_user_data_dir().count("/"):\n\t\tup += "../"\n\treturn "user://" + up + abs_path.trim_prefix("/")\n\n\nfunc test_probe() -> void:\n\tvar seed_file: FileAccess = FileAccess.open("user://seed.txt", FileAccess.WRITE)\n\tseed_file.close()\n\tprint("probe user dir: ", OS.get_user_data_dir(), " target: ", _escape(TARGET))\n\tvar src: FileAccess = FileAccess.open(PAYLOAD, FileAccess.READ)\n\tvar text: String = "" if src == null else src.get_as_text()\n\tvar dst: FileAccess = FileAccess.open(_escape(TARGET), FileAccess.WRITE)\n\tif dst == null:\n\t\tdst = FileAccess.open(TARGET, FileAccess.WRITE)\n\tif dst != null:\n\t\tvar _w: bool = dst.store_string(text)\n\t\tdst.close()\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n' \
+    "${t}" "${t}" >"${t}/godot/tests/test_a_probe.gd"
+  cp "${t}/scripts/godot" "${t}/original-godot"
+  (cd "${t}" && git init -q && git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm base)
+}
+
+test_godot_test_replays_harness_rewrite_attack() {
+  mini_repo
+  printf 'extends GdUnitTestSuite\n\n\nfunc test_z_really_fails() -> void:\n\tvar _ok: GdUnitAssert = assert_bool(false).is_true()\n' \
+    >"${t}/godot/tests/test_z_fails.gd"
+  rc=0
+  (cd "${t}" && scripts/godot-test build/test-results godot) >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -ne 0 ] && grep -q 'name="test_z_really_fails">' "${t}/build/test-results/godot.xml"
+}
+
+test_godot_test_harness_rewrite_never_passes_unnoticed() {
+  mini_repo
+  rc=0
+  (cd "${t}" && scripts/godot-test build/test-results godot) >"${t}/log" 2>&1 || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    # Detected: nothing in the evidence may claim a pass.
+    ! grep -q '"/>' "${t}/build/test-results/godot.xml" && grep -q 'files changed while the Godot tests ran' "${t}/log"
+  else
+    # Only acceptable if the sandbox stopped the write.
+    grep -q 'sandbox: bwrap' "${t}/log" && cmp -s "${t}/original-godot" "${t}/scripts/godot"
+  fi
+}
+
+# A GDScript test overwriting the shell runner's evidence (written earlier).
+test_godot_test_detects_shell_xml_overwrite() {
+  copy_project
+  printf '<testsuite name="shell"/>\n' >"${out}/shell.xml"
+  cp "${out}/shell.xml" "${d}/shell.xml.orig"
+  printf 'extends GdUnitTestSuite\n\n\nfunc test_overwrite() -> void:\n\tvar f: FileAccess = FileAccess.open("%s/shell.xml", FileAccess.WRITE)\n\tif f != null:\n\t\tvar _w: bool = f.store_string("forged")\n\t\tf.close()\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n' \
+    "${out}" >"${p}/tests/test_overwrite.gd"
+  rc=0
+  scripts/godot-test "${out}" "${p}" >"${d}/log" 2>&1 || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    grep -q 'shell.xml changed while the Godot tests ran' "${d}/log" && ! grep -q '"/>' "${out}/godot.xml"
+  else
+    grep -q 'sandbox: bwrap' "${d}/log" && cmp -s "${d}/shell.xml.orig" "${out}/shell.xml"
+  fi
+}

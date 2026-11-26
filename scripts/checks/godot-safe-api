@@ -1,0 +1,224 @@
+#!/bin/sh
+# Reject GDScript that could tamper with the test runner, the evidence files or
+# the host. GdUnit4 runs tests in the same VM as its runner, counters and report
+# writer, so this check (together with one Godot process per suite in
+# scripts/godot-test) keeps test verdicts out of reach of project and test code.
+#
+# Everywhere under godot/ except the vendored addons/:
+#   process and host   OS.execute*, OS.create_process/instance, OS.shell_*, OS.kill,
+#                      OS.get_cmdline_*args, OS environment writes, OS.crash, OS.move_to_trash
+#   reflection         the reflective names (get, set, call, callv, get_indexed,
+#                      get_script, get_meta, get_property_list, emit_signal, call_group,
+#                      instance_from_id, ...) as calls *or* as method references
+#                      (`arr.map(obj.get)`), Callable(...), Expression, ClassDB, GDScript,
+#                      JavaScriptBridge, ResourceLoader, ResourceSaver, Engine singletons
+#                      and main loop. Property accessors (`get:`, `set(v):`, `get = _f`)
+#                      are the only allowed uses of get/set.
+#   tree escapes       reaching nodes you were not given: `.root`, get_parent,
+#                      find_parent, owner, get_viewport, get_window, current_scene,
+#                      group lookups, node paths that climb ("..") or are absolute
+#                      ("/root"), outside the (currently empty) autoload allowlist
+#   vendored internals any class_name from godot/addons except the documented test API
+#                      (GdUnitTestSuite, GdUnitSceneRunner, GdUnit*Assert), any `__`
+#                      identifier (GdUnit4's suite internals), and string literals that
+#                      name internals ("gdunit" in any case, an underscore name with
+#                      "report", or a `_`-prefixed member declared in addons/)
+#   paths              every load(), FileAccess.*() and .save*() path is one complete
+#                      string literal, with no "..", no escapes, no concatenation or
+#                      formatting and no variables: load() only "res://...", FileAccess
+#                      only "user://..." (or reading "res://..."), .save*() only "user://..."
+#   path escapes       DirAccess, globalize_path, localize_path and the OS/host
+#                      directory and environment getters (get_user_data_dir,
+#                      get_data_dir, get_executable_path, get_environment, ...), so no
+#                      path can be computed from user:// to anywhere else
+#                      (scripts/tree-guard backs this up after the tests run)
+#   node paths         absolute ("/root...") node paths
+#   scenes             scripts embedded in .tscn/.tres (they would skip every check)
+#   @tool              @tool scripts (they run in the editor and during --import)
+# In tests/ also:
+#   escaping the suite get_tree and Engine
+#   parameterized      test_parameters (each case must be its own func test_*)
+#   no assertion       every func test_* must call an assert_*() function
+#
+# Comments are ignored and strings blanked before matching (scripts/lib-gdscript).
+#
+# Usage: scripts/checks/godot-safe-api [project-dir]   (default: godot)
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-gdscript
+. "$(dirname "$0")/../lib-gdscript"
+
+root="${1:-godot}"
+if [ ! -f "${root}/project.godot" ]; then
+  printf 'godot-safe-api: no project.godot in %s\n' "${root}" >&2
+  exit 1
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+status=0
+
+fail() {
+  detail=""
+  if [ "${3:-}" = hit ]; then
+    IFS= read -r detail <"${work}/hits" || true
+    detail=": ${detail}"
+  fi
+  printf 'godot-safe-api: %s: %s%s\n' "$1" "$2" "${detail}" >&2
+  status=1
+}
+
+(cd "${root}" && find . -type f -name '*.gd' ! -path './addons/*' ! -path './.godot/*') |
+  sed 's|^\./||' | sort >"${work}/files"
+(cd "${root}" && find . -type f \( -name '*.tscn' -o -name '*.tres' \) ! -path './addons/*' ! -path './.godot/*') |
+  sed 's|^\./||' | sort >"${work}/scenes"
+
+# Vendored class names that are not the documented test API.
+: >"${work}/vendored-all"
+if [ -d "${root}/addons" ]; then
+  find "${root}/addons" -type f -name '*.gd' | sort >"${work}/vendored-files"
+  while IFS= read -r f; do
+    gd_code blank "${f}" >"${work}/vendored-code"
+    sed -n 's/^class_name[[:space:]]\{1,\}\([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' "${work}/vendored-code" >>"${work}/vendored-all"
+  done <"${work}/vendored-files"
+fi
+grep -Ev '^(GdUnitTestSuite|GdUnitSceneRunner|GdUnit[A-Za-z0-9]*Assert)$' "${work}/vendored-all" |
+  sort -u >"${work}/vendored" || true
+# Underscore-prefixed members declared by vendored code: naming one in a string is a
+# way to reach it by reflection, so such literals are rejected.
+: >"${work}/internal-names"
+if [ -s "${work}/vendored-files" ]; then
+  while IFS= read -r f; do
+    gd_code blank "${f}" |
+      sed -nE 's/^[[:space:]]*(static[[:space:]]+)?(var|func|const|signal)[[:space:]]+(_[A-Za-z0-9_]*).*/\3/p'
+  done <"${work}/vendored-files" | sort -u >"${work}/internal-names"
+fi
+
+# Autoload files allowed to reach the scene root (none today; add paths here).
+tree_allowlist=''
+
+w='(^|[^A-Za-z0-9_])'
+os_calls="OS[[:space:]]*\\.[[:space:]]*(execute|execute_with_pipe|create_process|create_instance|shell_open|shell_show_in_file_manager|get_cmdline_args|get_cmdline_user_args|kill|set_environment|unset_environment|crash|move_to_trash|set_restart_on_exit)([^A-Za-z0-9_]|$)"
+reflect_words='(get|set|call|callv|call_deferred|set_deferred|get_indexed|set_indexed|emit_signal|get_script|set_script|get_meta|set_meta|has_meta|remove_meta|get_meta_list|get_property_list|get_method_list|get_signal_list|get_signal_connection_list|get_incoming_connections|propagate_call|call_group|call_group_flags|notify_group|notify_group_flags|set_group|set_group_flags|instance_from_id|str_to_var|bytes_to_var_with_objects|dict_to_inst|inst_to_dict)'
+callable_calls="${w}Callable[[:space:]]*[(.]"
+tree_words='(get_parent|find_parent|owner|get_viewport|get_window|current_scene|get_nodes_in_group|get_first_node_in_group|get_root)'
+banned_words='(Expression|ClassDB|GDScript|JavaScriptBridge|ResourceLoader|ResourceSaver|Marshalls|EditorInterface|GDExtensionManager|source_code|DirAccess|ZIPPacker|ZIPReader|PCKPacker|globalize_path|localize_path|get_user_data_dir|get_data_dir|get_config_dir|get_cache_dir|get_executable_path|get_environment|has_environment|get_system_dir|get_temp_dir)'
+engine_calls='Engine[[:space:]]*\.[[:space:]]*(get_main_loop|get_singleton|get_singleton_list|register_singleton|unregister_singleton|get_meta|set_meta|has_meta)'
+test_escape_words='(get_tree|Engine|test_parameters)'
+
+while IFS= read -r f; do
+  gd_code blank "${root}/${f}" >"${work}/code"
+  gd_code keep "${root}/${f}" >"${work}/strings"
+
+  # @tool scripts run inside the editor and during --import, outside every test guard.
+  if grep -En '^[[:space:]]*@tool([^A-Za-z0-9_]|$)' "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no @tool scripts" hit
+  fi
+  if grep -En "${os_calls}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no process or host access" hit
+  fi
+  # Property accessors are the one allowed use of get/set; blank them, then any
+  # reflective name (called or passed as a method reference) is rejected.
+  sed -E -e 's/^([[:space:]]*)(get|set)[[:space:]]*(\([^)]*\))?[[:space:]]*:/\1accessor:/' \
+    -e 's/([:,][[:space:]]*)(get|set)[[:space:]]*=[[:space:]]*/\1accessor = /g' "${work}/code" >"${work}/code-noaccessors"
+  if grep -Ewn "${reflect_words}" "${work}/code-noaccessors" >"${work}/hits"; then
+    fail "${f}" "no reflection (as a call or a method reference)" hit
+  fi
+  if grep -En "${callable_calls}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no Callable(...) built from a name" hit
+  fi
+  if grep -En "${w}__[A-Za-z0-9_]" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no __ identifiers (GdUnit4 internals)" hit
+  fi
+  grep -noE '"[^"]*"' "${work}/strings" | grep -Ei '"[^"]*gdunit|"_[^"]*report' >"${work}/hits" || true
+  if [ -s "${work}/hits" ]; then fail "${f}" "no string literals naming GdUnit4 internals" hit; fi
+  grep -noE '"_[A-Za-z0-9_]*"' "${work}/strings" >"${work}/literals" || true
+  : >"${work}/hits"
+  while IFS= read -r lit_line; do
+    name="${lit_line#*:\"}"
+    name="${name%\"}"
+    if grep -Fxq "${name}" "${work}/internal-names"; then printf '%s\n' "${lit_line}" >>"${work}/hits"; fi
+  done <"${work}/literals"
+  if [ -s "${work}/hits" ]; then fail "${f}" "no string literals naming vendored internal members" hit; fi
+
+  tree_ok=no
+  for allowed in ${tree_allowlist}; do
+    if [ "${f}" = "${allowed}" ]; then tree_ok=yes; fi
+  done
+  if [ "${tree_ok}" = no ]; then
+    if grep -Ewn "${tree_words}" "${work}/code" >"${work}/hits"; then
+      fail "${f}" "no reaching nodes you were not given (parent, root, viewport, groups)" hit
+    fi
+    if grep -En '\.[[:space:]]*root([^A-Za-z0-9_]|$)' "${work}/code" >"${work}/hits"; then
+      fail "${f}" "no access to the scene root" hit
+    fi
+    if grep -En '"\.\.|\$\.\.|\^"\.\.' "${work}/strings" >"${work}/hits"; then
+      fail "${f}" "no node paths that climb the tree" hit
+    fi
+  fi
+  if grep -Ewn "${banned_words}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "banned API" hit
+  fi
+  if grep -En "${engine_calls}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no Engine singletons or main loop" hit
+  fi
+  while IFS= read -r cls; do
+    if grep -Ewn "${cls}" "${work}/code" >"${work}/hits"; then
+      fail "${f}" "vendored internal ${cls} is not part of the test API" hit
+    fi
+  done <"${work}/vendored"
+
+  # Paths: one complete literal per call, no "..", no escapes, nothing appended.
+  lit='"[^"\\]*"[[:space:]]*([,)]|$)'
+  grep -noE "${w}load[[:space:]]*\\([^)]*" "${work}/strings" |
+    grep -Ev "load[[:space:]]*\\([[:space:]]*\"res://${lit#\"}" >"${work}/hits" || true
+  if [ -s "${work}/hits" ]; then fail "${f}" 'load() only of one literal "res://" path' hit; fi
+  grep -noE 'FileAccess[[:space:]]*\.[[:space:]]*[a-z_]+[[:space:]]*\([^)]*\)?' "${work}/strings" |
+    grep -Ev "\\([[:space:]]*\\)|\\([[:space:]]*\"user://${lit#\"}|\\([[:space:]]*\"res://[^\"\\\\]*\"[[:space:]]*,[[:space:]]*FileAccess[[:space:]]*\\.[[:space:]]*READ[[:space:]]*\\)?\$" >"${work}/hits" || true
+  if [ -s "${work}/hits" ]; then fail "${f}" 'FileAccess only on one literal "user://" path (or reading one literal "res://" path)' hit; fi
+  grep -noE '\.[[:space:]]*save[A-Za-z_]*[[:space:]]*\([^)]*' "${work}/strings" |
+    grep -Ev "\\([[:space:]]*\"user://${lit#\"}" >"${work}/hits" || true
+  if [ -s "${work}/hits" ]; then fail "${f}" 'save only to one literal "user://" path' hit; fi
+  if grep -En '"[^"]*\.\.[^"]*"' "${work}/strings" | grep -E '(user|res)://' >"${work}/hits"; then
+    fail "${f}" 'no ".." in user:// or res:// paths' hit
+  fi
+  if grep -En 'FileAccess[[:space:]]*\.[[:space:]]*set_' "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no file attribute changes" hit
+  fi
+
+  if grep -En '[$^]?"/root|\$/root' "${work}/strings" >"${work}/hits"; then
+    fail "${f}" "no absolute node paths" hit
+  fi
+
+  case "${f}" in
+    tests/*)
+      if grep -Ewn "${test_escape_words}" "${work}/code" >"${work}/hits"; then
+        fail "${f}" "tests may not leave their suite (or be parameterized)" hit
+      fi
+      awk '
+        /^func[[:space:]]+test_[A-Za-z0-9_]*[[:space:]]*\(/ {
+          if (name != "" && !asserted) print name
+          name = $2; sub(/\(.*/, "", name); asserted = 0; next
+        }
+        /^[^[:space:]]/ { if (name != "" && !asserted) print name; name = "" ; next }
+        name != "" && /(^|[^A-Za-z0-9_])assert_[a-z_]+[[:space:]]*\(/ { asserted = 1 }
+        END { if (name != "" && !asserted) print name }
+      ' "${work}/code" >"${work}/hits"
+      if [ -s "${work}/hits" ]; then fail "${f}" "every test must assert something" hit; fi
+      ;;
+    *) ;;
+  esac
+done <"${work}/files"
+
+while IFS= read -r s; do
+  if grep -n 'script/source' "${root}/${s}" >"${work}/hits"; then
+    fail "${s}" "embedded scripts are not allowed (use a .gd file)" hit
+  fi
+done <"${work}/scenes"
+
+if [ "${status}" -eq 0 ]; then
+  count="$(wc -l <"${work}/files" | tr -d ' ')"
+  printf 'godot-safe-api: ok (%s scripts)\n' "${count}"
+fi
+exit "${status}"

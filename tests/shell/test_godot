@@ -1,0 +1,212 @@
+#!/bin/sh
+# Tests for the Godot tooling: scripts/godot-compile-check,
+# scripts/checks/godot-architecture, scripts/checks/godot-addons and
+# scripts/godot-editor (run by scripts/test-shell). Each test runs in its own
+# shell; the helpers remove their temp dirs when it exits.
+
+# A throwaway project with the real strict project.godot, Events bus and types; sets d.
+strict_project() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  cp godot/project.godot godot/main.gd godot/main.tscn "${d}/"
+  for dir in autoload types ui; do
+    mkdir -p "${d}/${dir}"
+    cp "godot/${dir}"/*.gd "${d}/${dir}/"
+  done
+}
+
+# compile_rejects <file>: the check fails, and names that file as the reason.
+compile_rejects() {
+  out="$(scripts/godot-compile-check "${d}" 2>&1)" && return 1
+  case "${out}" in
+    *"$1"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+test_compile_check_rejects_broken_script() {
+  strict_project
+  printf 'extends Node\n\nvar untyped = 1\n' >"${d}/warning.gd"
+  compile_rejects warning.gd || return 1
+  rm -f "${d}/warning.gd"
+  printf 'extends Node\n\n\nfunc broken( -> void:\n\tpass\n' >"${d}/syntax.gd"
+  compile_rejects syntax.gd
+}
+
+test_compile_check_accepts_clean_script() {
+  strict_project
+  printf 'extends Node\n\nvar typed: int = 1\n' >"${d}/clean.gd"
+  scripts/godot-compile-check "${d}"
+}
+
+test_compile_check_rejects_scene_with_missing_script() {
+  strict_project
+  printf '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://missing.gd" id="1"]\n\n[node name="Root" type="Node"]\nscript = ExtResource("1")\n' \
+    >"${d}/broken.tscn"
+  compile_rejects broken.tscn
+}
+
+test_compile_check_rejects_lowered_warning() {
+  strict_project
+  sed 's|^gdscript/warnings/untyped_declaration=2$|gdscript/warnings/untyped_declaration=1|' \
+    godot/project.godot >"${d}/project.godot"
+  ! grep -q 'untyped_declaration=2' "${d}/project.godot" && compile_rejects untyped_declaration
+}
+
+# A throwaway project laid out like godot/ for the architecture check; sets d.
+arch_project() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  printf '[autoload]\n\nEvents="*res://autoload/events.gd"\n' >"${d}/project.godot"
+  mkdir -p "${d}/autoload" "${d}/types" "${d}/core" "${d}/game" "${d}/ui" "${d}/feedback"
+  printf 'class_name Phase\nextends RefCounted\n\nenum Id { A, B }\n' >"${d}/types/phase.gd"
+  printf 'class_name EventBus\nextends Node\n\nsignal ping(p: Phase.Id)\n' >"${d}/autoload/events.gd"
+  printf 'class_name Ledger\nextends RefCounted\n\nvar _bus: EventBus\nvar _rng: RandomNumberGenerator\nvar _p: Phase.Id\n' >"${d}/core/ledger.gd"
+  printf 'extends Control\n\nvar _p: Phase.Id\n' >"${d}/ui/hud.gd"
+  printf 'extends Node\n\nvar _ledger: Ledger = Ledger.new()\n' >"${d}/main.gd"
+}
+
+# core_rules <body line>: a core/ class whose one function has that line.
+core_rules() {
+  printf 'class_name Rules\nextends RefCounted\n\n\nfunc f() -> void:\n\t%s\n' "$1" >"${d}/core/rules.gd"
+}
+
+arch_rejects() {
+  ! scripts/checks/godot-architecture "${d}" 2>/dev/null
+}
+
+test_architecture_accepts_layered_project() {
+  arch_project
+  scripts/checks/godot-architecture "${d}"
+}
+
+test_architecture_rejects_core_node_access() {
+  arch_project
+  core_rules 'var _n: Node = Engine.get_main_loop().root.get_node("Enemy")'
+  arch_rejects
+}
+
+test_architecture_rejects_core_node_path_syntax() {
+  arch_project
+  dollar="$(printf '\044')"
+  core_rules "print(${dollar}Player)"
+  grep -q 'print(.Player)' "${d}/core/rules.gd" && arch_rejects
+}
+
+test_architecture_rejects_core_autoload_use() {
+  arch_project
+  core_rules 'print(Events)'
+  arch_rejects
+}
+
+test_architecture_rejects_core_nondeterminism() {
+  for line in 'print(randi())' 'randomize()' 'print(Time.get_ticks_msec())' 'print(OS.get_name())' \
+    'print(Input.is_action_pressed("x"))' 'var _r: RandomNumberGenerator = RandomNumberGenerator.new()' \
+    'var _o: Object = ClassDB.instantiate("Node")' 'var _s: Resource = load("res://x.tres")'; do
+    arch_project
+    core_rules "${line}"
+    arch_rejects || return 1
+    rm -rf "${d}"
+  done
+}
+
+test_architecture_rejects_code_hidden_after_hash_in_string() {
+  arch_project
+  core_rules 'print("#"); get_tree()'
+  arch_rejects
+}
+
+test_architecture_ignores_forbidden_words_in_comments_and_strings() {
+  arch_project
+  printf 'class_name Rules\nextends RefCounted\n# Never call get_node or get_tree from here.\nconst HINT: String = "get_tree() is off limits"\n' >"${d}/core/rules.gd"
+  scripts/checks/godot-architecture "${d}"
+}
+
+test_architecture_rejects_core_not_refcounted() {
+  arch_project
+  printf 'class_name Rules\nextends Resource\n' >"${d}/core/rules.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_impure_types() {
+  arch_project
+  printf 'class_name Phase\nextends RefCounted\n\nenum Id { A, B }\n\n\nfunc now() -> int:\n\treturn Time.get_ticks_msec()\n' >"${d}/types/phase.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_types_using_core() {
+  arch_project
+  printf 'class_name Phase\nextends RefCounted\n\nenum Id { A, B }\nvar _l: Ledger\n' >"${d}/types/phase.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_ui_importing_core() {
+  arch_project
+  printf 'extends Control\n\nvar _ledger: Ledger\n' >"${d}/ui/hud.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_core_importing_game() {
+  arch_project
+  printf 'class_name Mech\nextends Node3D\n' >"${d}/game/mech.gd"
+  printf 'class_name Rules\nextends RefCounted\n\nconst M: Script = preload("res://game/mech.gd")\n' >"${d}/core/rules.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_game_constructing_core() {
+  arch_project
+  printf 'extends Node3D\n\nvar _ledger: Ledger = Ledger.new()\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_direct_event_emit() {
+  arch_project
+  printf 'extends Node3D\n\n\nfunc _ready() -> void:\n\tEvents.ping.emit(Phase.Id.A)\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_script_outside_layout() {
+  arch_project
+  mkdir -p "${d}/misc"
+  printf 'extends Node\n' >"${d}/misc/stray.gd"
+  arch_rejects
+}
+
+test_addons_check_rejects_extra_file() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/addons/gdUnit4"
+  printf 'x\n' >"${d}/addons/gdUnit4/a.gd"
+  scripts/checks/godot-addons --print "${d}" >"${d}/addons.sha256"
+  scripts/checks/godot-addons "${d}" || return 1
+  printf 'extends Node\n' >"${d}/addons/sneaky.gd"
+  ! scripts/checks/godot-addons "${d}" 2>/dev/null
+}
+
+test_addons_check_rejects_changed_file() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/addons/gdUnit4"
+  printf 'x\n' >"${d}/addons/gdUnit4/a.gd"
+  scripts/checks/godot-addons --print "${d}" >"${d}/addons.sha256"
+  printf 'y\n' >"${d}/addons/gdUnit4/a.gd"
+  ! scripts/checks/godot-addons "${d}" 2>/dev/null
+}
+
+# This repo's editor must not collide with another Godot project on the defaults
+# (6005-6007): it uses the Taskfile's ports, which are 6305-6307.
+test_godot_editor_uses_configured_ports() {
+  lsp="$(yq '.vars.GODOT_LSP_PORT' Taskfile.yml)"
+  dap="$(yq '.vars.GODOT_DAP_PORT' Taskfile.yml)"
+  dbg="$(yq '.vars.GODOT_DEBUG_PORT' Taskfile.yml)"
+  [ "${lsp}" = 6305 ] && [ "${dap}" = 6306 ] && [ "${dbg}" = 6307 ] || return 1
+  out="$(task --silent godot:editor -- --dry-run)"
+  case "${out}" in
+  *"/godot --editor --path godot --lsp-port 6305 --dap-port 6306 --debug-server tcp://127.0.0.1:6307") ;;
+  *) return 1 ;;
+  esac
+}
+
+test_godot_editor_rejects_bad_port() {
+  ! scripts/godot-editor --dry-run 6305 6306 80 && ! scripts/godot-editor --dry-run 6305 x 6307
+}
