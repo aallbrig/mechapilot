@@ -181,6 +181,6 @@ agent_loop_default_state_dir() {
     printf '%s\n' "${AGENT_LOOP_STATE_DIR}"
     return 0
   fi
-  common="$(git -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir)" || return 1
+  common="$(git -c core.hooksPath=/dev/null -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir)" || return 1
   printf '%s/.agent-loop\n' "$(dirname "${common}")"
 }

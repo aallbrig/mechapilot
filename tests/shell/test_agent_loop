@@ -959,3 +959,66 @@ test_skill_commands_match_the_allowlist() {
   out="$(scripts/checks/agent-loop-skill-commands "${d}/compound.md")" && return 1
   printf '%s\n' "${out}" | grep -q 'denied: git push origin main'
 }
+
+test_supervisor_runs_no_git_hooks() {
+  # origin/main carries post-checkout and reference-transaction hooks, and the
+  # repository's own config points core.hooksPath at them (as task setup does
+  # in a human checkout). Creating the session's clone, fetching and checking
+  # out must run none of them.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/.githooks" "${d}/state"
+  for hook in post-checkout reference-transaction post-merge pre-commit; do
+    printf '#!/bin/sh\n: >>"%s/marker-%s"\n' "${d}" "${hook}" >"${d}/.githooks/${hook}"
+    chmod +x "${d}/.githooks/${hook}"
+  done
+  printf 'state/\nbin/\n*.json\ncalls\ntoken\n' >"${d}/.gitignore"
+  git -C "${d}" init -q
+  git -C "${d}" config user.email t@example.invalid
+  git -C "${d}" config user.name t
+  git -C "${d}" add .githooks .gitignore
+  git -C "${d}" -c core.hooksPath=/dev/null commit -q -m hooks
+  git -C "${d}" config core.hooksPath .githooks
+  git -C "${d}" remote add origin "${d}"
+  git -C "${d}" -c core.hooksPath=/dev/null fetch -q origin
+  rm -f "${d}"/marker-*
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  printf '[{"pid":4242,"status":"idle","sessionId":"s1","name":"mechafighter.com dev loop","startedAt":1795700000000,"cwd":"/w"}]\n' \
+    >"${d}/agents-after-start.json"
+  # The checkout does not exist yet: this tick creates the clone (first start).
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  [ -d "${d}/worktree/.git" ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  for marker in "${d}"/marker-*; do
+    if [ -e "${marker}" ]; then
+      printf 'a hook ran outside the sandbox: %s\n' "${marker}"
+      return 1
+    fi
+  done
+  # No repo-relative hooksPath is stored in the clone.
+  ! git -C "${d}/worktree" config --local --get core.hooksPath >/dev/null
+}
+
+test_supervisor_kills_only_the_recorded_session_process() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # Detached (its parent exits), so it is reaped as soon as it is killed.
+  victim="$(sh -c 'sleep 300 >/dev/null 2>&1 & echo $!')"
+  started="$(ps -o lstart= -p "${victim}")"
+  # A recorded pid whose start time no longer matches (pid reuse) is left alone.
+  printf '%s\t%s|%s\n' "${victim}" "Thu Jan  1 00:00:00 1970" "sleep" >"${d}/state/session-pid"
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  kill -0 "${victim}" 2>/dev/null || return 1
+  # The same pid, start time and command name: it is the session, so it is stopped.
+  rm -f "${d}/state/last-start" "${d}/state/pane" "${d}/pane-alive" "${d}/agents.json"
+  printf '%s\t%s|%s\n' "${victim}" "${started}" "sleep" >"${d}/state/session-pid"
+  supervisor "${d}" once >/dev/null 2>&1 || return 1
+  i=0
+  while kill -0 "${victim}" 2>/dev/null && [ "${i}" -lt 20 ]; do
+    i=$((i + 1))
+    sleep 1
+  done
+  ! kill -0 "${victim}" 2>/dev/null
+}

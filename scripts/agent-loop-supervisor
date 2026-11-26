@@ -69,6 +69,18 @@
 # AGENT_LOOP_RETRY_SECONDS (5) is the pause between retries.
 set -eu
 
+# Every git command this script runs (clone, fetch, checkout, archive,
+# rev-parse, and so on) runs no hooks and no fsmonitor: configuration from the
+# environment overrides every repository's config, so a hook carried by a
+# fetched commit, or a hooksPath in a repo's config, never runs outside the
+# sandbox. This is set once, here, so no git call can miss it.
+GIT_CONFIG_COUNT=2
+GIT_CONFIG_KEY_0=core.hooksPath
+GIT_CONFIG_VALUE_0=/dev/null
+GIT_CONFIG_KEY_1=core.fsmonitor
+GIT_CONFIG_VALUE_1=false
+export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 repo_root="$(cd "${script_dir}/.." && pwd -P)"
 # shellcheck source=agent-loop-lib
@@ -345,7 +357,6 @@ ensure_worktree() {
     origin_url="$(git -C "${main_root}" remote get-url origin)"
     git clone --quiet --no-checkout "${main_root}" "${worktree}"
     git -C "${worktree}" remote set-url origin "${origin_url}"
-    git -C "${worktree}" config core.hooksPath .githooks
     retry 3 git -C "${worktree}" fetch --quiet origin main
     git -C "${worktree}" checkout --quiet --detach origin/main
     log "created the Agent Loop checkout ${worktree}"
@@ -493,11 +504,39 @@ kill_tree() {
   kill -TERM -- "-${root}" 2>/dev/null || true
 }
 
+# process_identity <pid>: "<start time>|<command name>" of a live process, or
+# nothing. A pid plus its start time names one process, even after pid reuse.
+process_identity() {
+  case "$1" in "" | *[!0-9]*) return 0 ;; *) ;; esac
+  started="$(ps -o lstart= -p "$1" 2>/dev/null || true)"
+  command_name="$(ps -o comm= -p "$1" 2>/dev/null || true)"
+  if [ -n "${started}" ]; then printf '%s|%s\n' "${started}" "${command_name##*/}"; fi
+}
+
+# record_session <pid>: remember the session's claude process by pid, start
+# time and command name, so a later kill can prove it is the same process.
+record_session() {
+  identity="$(process_identity "$1")"
+  if [ -n "${identity}" ]; then printf '%s\t%s\n' "$1" "${identity}" >"${state_dir}/session-pid"; fi
+}
+
 # kill_previous_session: before provisioning, nothing the last session started
-# may still be running with write access to the checkout.
+# may still be running with write access to the checkout. The recorded pid is
+# killed only while it is still the same process (pid, start time and command
+# name all match); a reused pid is never killed.
 kill_previous_session() {
-  old="$(read_or "${state_dir}/session-pid" '')"
-  if [ -n "${old}" ]; then kill_tree "${old}"; fi
+  if [ -s "${state_dir}/session-pid" ]; then
+    tab="$(printf '\t')"
+    recorded="$(head -n 1 "${state_dir}/session-pid")"
+    old="${recorded%%"${tab}"*}"
+    want="${recorded#*"${tab}"}"
+    have="$(process_identity "${old}")"
+    if [ -n "${have}" ] && [ "${have}" = "${want}" ]; then
+      kill_tree "${old}"
+    elif [ -n "${have}" ]; then
+      log "not killing pid ${old}: it is no longer the session's process (${have})"
+    fi
+  fi
   rm -f "${state_dir}/session-pid"
 }
 
@@ -615,9 +654,6 @@ do_start() {
   fi
   t="$(now)"
   printf '%s\n' "${p}" >"${state_dir}/pane"
-  # The launcher execs claude, so the pane's pid is the session's process.
-  pane_pid="$(tmux display-message -p -t "${p}" '#{pane_pid}' 2>/dev/null || true)"
-  printf '%s\n' "${pane_pid}" >"${state_dir}/session-pid"
   printf '%s\n' "${t}" >"${state_dir}/last-start"
   printf '%s\n' "${t}" >"${state_dir}/started-at"
   rm -f "${state_dir}/episode-nudges"
@@ -630,6 +666,8 @@ do_start() {
     row="$(session_row)"
     status="$(printf '%s\n' "${row}" | jq -r '.status // empty')"
     if [ "${status}" = idle ]; then
+      session_pid="$(printf '%s\n' "${row}" | jq -r '.pid // empty')"
+      record_session "${session_pid}"
       prompt="$(loop_prompt)"
       send "${prompt}"
       log "started the session in pane ${p}"
@@ -975,7 +1013,12 @@ start() {
     tmux split-window -d -t '=mechafighter:loops' -c "${repo_root}" "'${script_dir}/agent-loop-supervisor' run"
     printf 'loop:start: the Supervisor starts in the loops window (task dev to watch)\n'
   else
-    "${repo_root}/scripts/dev/session" start-detached
+    # A new tmux server inherits this environment; the human's panes must keep
+    # their own git hooks, so drop the Supervisor's hook-free git config first.
+    (
+      unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+      "${repo_root}/scripts/dev/session" start-detached
+    )
     printf 'loop:start: started the dev session; its loops window runs the Supervisor (task dev to watch)\n'
   fi
 }
