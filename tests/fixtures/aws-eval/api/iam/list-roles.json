@@ -36,6 +36,34 @@
           }
         ]
       }
+    },
+    {
+      "RoleName": "fake-object-statement",
+      "Arn": "arn:aws:iam::111122223333:role/fake-object-statement",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      }
+    },
+    {
+      "RoleName": "fake-star-principal",
+      "Arn": "arn:aws:iam::111122223333:role/fake-star-principal",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
     }
   ]
 }

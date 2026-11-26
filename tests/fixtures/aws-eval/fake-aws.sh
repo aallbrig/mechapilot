@@ -1,6 +1,6 @@
 #!/bin/sh
 # A fake `aws` CLI for the aws-eval tests: never touches AWS.
-# Logs "<service> <operation>" to $FAKE_AWS_LOG and answers from $FAKE_AWS_DIR:
+# Logs "<service> <operation>" to $FAKE_AWS_LOG (endpoint env to $FAKE_AWS_LOG.env) and answers from $FAKE_AWS_DIR:
 #   <service>/<operation>.<key>.json|.err  (key = slug of --bucket, --id, ... value)
 #   <service>/<operation>.json|.err
 # A .json file is printed to stdout; a .err file to stderr with exit 254.
@@ -18,6 +18,8 @@ service="${1:?no service}"
 operation="${2:?no operation}"
 shift 2
 printf '%s %s\n' "${service}" "${operation}" >>"${FAKE_AWS_LOG:?}"
+# The endpoint-related environment the call saw, for the aws-ro tests.
+env | grep -E '^AWS_(ENDPOINT_URL|IGNORE_CONFIGURED_ENDPOINT_URLS)' >>"${FAKE_AWS_LOG}.env" || true
 
 key=""
 while [ "$#" -gt 0 ]; do

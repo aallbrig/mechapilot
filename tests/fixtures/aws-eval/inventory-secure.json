@@ -12,19 +12,39 @@
         "BlockPublicPolicy": true,
         "RestrictPublicBuckets": true
       },
-      "policy_status": { "IsPublic": false },
-      "encryption": {
-        "Rules": [{ "ApplyServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }]
+      "policy_status": {
+        "IsPublic": false
       },
-      "versioning": { "Status": "Enabled" },
-      "logging": { "LoggingEnabled": { "TargetBucket": "fake-private-logs", "TargetPrefix": "s3/" } }
+      "encryption": {
+        "Rules": [
+          {
+            "ApplyServerSideEncryptionByDefault": {
+              "SSEAlgorithm": "AES256"
+            }
+          }
+        ]
+      },
+      "versioning": {
+        "Status": "Enabled"
+      },
+      "logging": {
+        "LoggingEnabled": {
+          "TargetBucket": "fake-private-logs",
+          "TargetPrefix": "s3/"
+        }
+      }
     }
   ],
   "distributions": [
     {
       "id": "E2FAKEDIST0002",
       "config": {
-        "Aliases": { "Quantity": 1, "Items": ["game.mechafighter.com"] },
+        "Aliases": {
+          "Quantity": 1,
+          "Items": [
+            "game.mechafighter.com"
+          ]
+        },
         "Origins": {
           "Quantity": 1,
           "Items": [
@@ -32,7 +52,9 @@
               "Id": "site",
               "DomainName": "fake-private-site.s3.us-east-1.amazonaws.com",
               "OriginAccessControlId": "E3FAKEOAC00003",
-              "S3OriginConfig": { "OriginAccessIdentity": "" }
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
             }
           ]
         },
@@ -41,13 +63,20 @@
           "ViewerProtocolPolicy": "redirect-to-https",
           "ResponseHeadersPolicyId": "00000000-0000-4000-8000-0000000000cc"
         },
-        "CacheBehaviors": { "Quantity": 0 },
+        "CacheBehaviors": {
+          "Quantity": 0
+        },
         "ViewerCertificate": {
           "ACMCertificateArn": "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000aa",
           "MinimumProtocolVersion": "TLSv1.2_2021",
           "SSLSupportMethod": "sni-only"
         },
-        "Logging": { "Enabled": true, "Bucket": "fake-private-logs.s3.amazonaws.com", "Prefix": "cf/", "IncludeCookies": false }
+        "Logging": {
+          "Enabled": true,
+          "Bucket": "fake-private-logs.s3.amazonaws.com",
+          "Prefix": "cf/",
+          "IncludeCookies": false
+        }
       },
       "response_headers_policies": [
         {
@@ -88,7 +117,7 @@
             "Condition": {
               "StringEquals": {
                 "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-                "token.actions.githubusercontent.com:sub": "repo:aallbrig/mechapilot:environment:production"
+                "token.actions.githubusercontent.com:sub": "repo:aallbrig/mechapilot:environment:prod*"
               }
             }
           }
@@ -97,6 +126,18 @@
     }
   ],
   "hosted_zones": [],
-  "log_groups": [{ "name": "/fake/app", "retention_days": 90 }],
-  "trivy": { "Results": [{ "Target": "main.tf", "Misconfigurations": [] }] }
+  "log_groups": [
+    {
+      "name": "/fake/app",
+      "retention_days": 90
+    }
+  ],
+  "trivy": {
+    "Results": [
+      {
+        "Target": "main.tf",
+        "Misconfigurations": []
+      }
+    ]
+  }
 }

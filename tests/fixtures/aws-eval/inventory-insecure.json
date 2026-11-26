@@ -7,7 +7,9 @@
     {
       "name": "fake-public-assets-111122223333",
       "public_access_block": null,
-      "policy_status": { "IsPublic": true },
+      "policy_status": {
+        "IsPublic": true
+      },
       "encryption": null,
       "versioning": {},
       "logging": {}
@@ -20,11 +22,21 @@
         "BlockPublicPolicy": false,
         "RestrictPublicBuckets": true
       },
-      "policy_status": { "IsPublic": false },
-      "encryption": {
-        "Rules": [{ "ApplyServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }]
+      "policy_status": {
+        "IsPublic": false
       },
-      "versioning": { "Status": "Enabled" },
+      "encryption": {
+        "Rules": [
+          {
+            "ApplyServerSideEncryptionByDefault": {
+              "SSEAlgorithm": "AES256"
+            }
+          }
+        ]
+      },
+      "versioning": {
+        "Status": "Enabled"
+      },
       "logging": {}
     }
   ],
@@ -32,7 +44,12 @@
     {
       "id": "E1FAKEDIST0001",
       "config": {
-        "Aliases": { "Quantity": 1, "Items": ["mechafighter.com"] },
+        "Aliases": {
+          "Quantity": 1,
+          "Items": [
+            "mechafighter.com"
+          ]
+        },
         "Origins": {
           "Quantity": 2,
           "Items": [
@@ -40,26 +57,82 @@
               "Id": "s3-assets",
               "DomainName": "fake-public-assets-111122223333.s3.us-east-1.amazonaws.com",
               "OriginAccessControlId": "",
-              "S3OriginConfig": { "OriginAccessIdentity": "" }
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
             },
             {
               "Id": "website",
               "DomainName": "fake-public-assets-111122223333.s3-website-us-east-1.amazonaws.com",
               "OriginAccessControlId": "",
-              "CustomOriginConfig": { "OriginProtocolPolicy": "http-only" }
+              "CustomOriginConfig": {
+                "OriginProtocolPolicy": "http-only"
+              }
             }
           ]
         },
-        "DefaultCacheBehavior": { "TargetOriginId": "s3-assets", "ViewerProtocolPolicy": "allow-all" },
-        "CacheBehaviors": { "Quantity": 0 },
+        "DefaultCacheBehavior": {
+          "TargetOriginId": "s3-assets",
+          "ViewerProtocolPolicy": "allow-all"
+        },
+        "CacheBehaviors": {
+          "Quantity": 0
+        },
         "ViewerCertificate": {
           "ACMCertificateArn": "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-4000-8000-0000000000aa",
           "MinimumProtocolVersion": "TLSv1.2_2019",
           "SSLSupportMethod": "sni-only"
         },
-        "Logging": { "Enabled": false, "Bucket": "", "Prefix": "", "IncludeCookies": false }
+        "Logging": {
+          "Enabled": false,
+          "Bucket": "",
+          "Prefix": "",
+          "IncludeCookies": false
+        }
       },
       "response_headers_policies": []
+    },
+    {
+      "id": "E4FAKEDIST0004",
+      "config": {
+        "Origins": {
+          "Quantity": 1,
+          "Items": [
+            {
+              "Id": "legacy",
+              "DomainName": "fake-private-logs.s3.dualstack.us-east-1.amazonaws.com",
+              "OriginAccessControlId": "",
+              "S3OriginConfig": {
+                "OriginAccessIdentity": "origin-access-identity/cloudfront/E5FAKEOAI00005"
+              }
+            }
+          ]
+        },
+        "DefaultCacheBehavior": {
+          "TargetOriginId": "legacy",
+          "ViewerProtocolPolicy": "https-only"
+        },
+        "CacheBehaviors": {
+          "Quantity": 0
+        },
+        "ViewerCertificate": {
+          "MinimumProtocolVersion": "TLSv1.2_2021",
+          "SSLSupportMethod": "sni-only"
+        },
+        "Logging": {
+          "Enabled": true
+        }
+      },
+      "response_headers_policies": [
+        {
+          "SecurityHeadersConfig": {
+            "StrictTransportSecurity": {
+              "Override": true,
+              "AccessControlMaxAgeSec": 31536000
+            }
+          }
+        }
+      ]
     }
   ],
   "certificates": [
@@ -90,7 +163,9 @@
             },
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {
-              "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" }
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              }
             }
           }
         ]
@@ -109,7 +184,9 @@
             },
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {
-              "StringLike": { "token.actions.githubusercontent.com:sub": "repo:aallbrig/*" }
+              "StringLike": {
+                "token.actions.githubusercontent.com:sub": "repo:aallbrig/*"
+              }
             }
           }
         ]
@@ -128,11 +205,68 @@
             },
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {
-              "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-              "StringLike": { "token.actions.githubusercontent.com:sub": "repo:aallbrig/mechapilot:*" }
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              },
+              "StringLike": {
+                "token.actions.githubusercontent.com:sub": "repo:aallbrig/mechapilot:*"
+              }
             }
           }
         ]
+      }
+    },
+    {
+      "name": "fake-oidc-negated",
+      "arn": "arn:aws:iam::111122223333:role/fake-oidc-negated",
+      "trust_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Federated": "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              },
+              "StringNotEquals": {
+                "token.actions.githubusercontent.com:sub": "repo:someone/else:ref:refs/heads/main"
+              }
+            }
+          },
+          {
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    },
+    {
+      "name": "fake-oidc-object-statement",
+      "arn": "arn:aws:iam::111122223333:role/fake-oidc-object-statement",
+      "trust_policy": {
+        "Version": "2012-10-17",
+        "Statement": {
+          "Effect": "Allow",
+          "Principal": {
+            "Federated": [
+              "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+            ]
+          },
+          "Action": "sts:AssumeRoleWithWebIdentity",
+          "Condition": {
+            "StringEqualsIfExists": {
+              "token.actions.githubusercontent.com:sub": "repo:aallbrig/mechapilot:ref:refs/heads/main"
+            },
+            "StringEquals": {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+            }
+          }
+        }
       }
     }
   ],
@@ -145,12 +279,20 @@
         {
           "Name": "mechafighter.com.",
           "Type": "A",
-          "AliasTarget": { "DNSName": "d111111abcdef8.cloudfront.net.", "HostedZoneId": "Z2FDTNDATAQYW2" }
+          "AliasTarget": {
+            "DNSName": "d111111abcdef8.cloudfront.net.",
+            "HostedZoneId": "Z2FDTNDATAQYW2"
+          }
         }
       ]
     }
   ],
-  "log_groups": [{ "name": "/fake/app", "retention_days": null }],
+  "log_groups": [
+    {
+      "name": "/fake/app",
+      "retention_days": null
+    }
+  ],
   "trivy": {
     "Results": [
       {

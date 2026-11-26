@@ -23,14 +23,14 @@ use_fake_aws() {
   fake="$(mktemp -d)"
   mkdir -p "${fake}/bin"
   ln -s "${PWD}/${fixtures}/fake-aws.sh" "${fake}/bin/aws"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/gh.log"\n' "${fake}" >"${fake}/bin/gh"
-  chmod +x "${fake}/bin/gh"
+  ln -s "${PWD}/${fixtures}/fake-gh.sh" "${fake}/bin/gh"
   cp -R "${fixtures}/api" "${fake}/api"
   : >"${fake}/aws.log"
   FAKE_AWS_DIR="${fake}/api"
   FAKE_AWS_LOG="${fake}/aws.log"
+  FAKE_GH_LOG="${fake}/gh.log"
   PATH="${fake}/bin:${PATH}"
-  export FAKE_AWS_DIR FAKE_AWS_LOG PATH
+  export FAKE_AWS_DIR FAKE_AWS_LOG FAKE_GH_LOG PATH
 }
 
 # A throwaway git repo that ignores .scratch/, like this one.
@@ -45,7 +45,10 @@ identifiers_input() {
   printf 'account 111122223333 owns arn:aws:iam::111122223333:role/fake-deploy\n'
   printf 'distribution E1FAKEDIST0001 zone Z0FAKEZONE00001 cert 00000000-0000-4000-8000-0000000000aa\n'
   printf 'mail someone@example.com host d111111abcdef8.cloudfront.net internal fake-build-01.corp.example.net\n'
-  printf 'iam key %s\n' "AKIA$(printf 'FAKE%.0s' 1 2 3 4)"
+  printf 'iam key %s role id %s\n' "AKIA$(printf 'FAKE%.0s' 1 2 3 4)" "AROA$(printf 'FAKE%.0s' 1 2 3 4)9"
+  printf 'console 1111-2222-3333 bill 1111 2222 3333\n'
+  printf 'origin 203.0.113.7 v6 2001:db8::7 full 2001:0db8:0000:0000:0000:0000:0000:0001\n'
+  printf 'hosts build.corp.sh notes.corp.md main.corp.tf x.corp.gd shop.xn--p1ai\n'
   printf 'again 111122223333 E1FAKEDIST0001\n'
 }
 
@@ -53,14 +56,41 @@ test_aws_eval_redacts_identifiers() {
   out="$(identifiers_input | scripts/aws-eval/redact --no-known)" || return 1
   printf '%s\n' "${out}"
   for leaked in 111122223333 arn:aws E1FAKEDIST0001 Z0FAKEZONE00001 00000000-0000-4000-8000-0000000000aa \
-    someone@example.com cloudfront.net corp.example.net AKIAFAKE; do
+    someone@example.com cloudfront.net corp.example.net AKIAFAKE AROAFAKE 1111-2222 '1111 2222' \
+    203.0.113 2001:db8 2001:0db8 corp.sh corp.md corp.tf corp.gd xn--p1ai; do
     if printf '%s' "${out}" | grep -qF "${leaked}"; then
       printf 'leaked: %s\n' "${leaked}"
       return 1
     fi
   done
   # Stable: the repeated account and distribution get the same placeholders.
-  printf '%s\n' "${out}" | grep -qxF 'again [account-1] [resource-id-2]'
+  printf '%s\n' "${out}" | grep -qxF 'again [account-1] [resource-id-2]' || return 1
+  # The separated forms are the same account as the plain one.
+  printf '%s\n' "${out}" | grep -qxF 'console [account-1] bill [account-1]'
+}
+
+test_aws_eval_redact_keeps_file_paths_but_not_hosts_like_them() {
+  out="$(printf 'see infra/main.tf, docs/a.md, scripts/aws-eval/redact.awk and https://evil.sh/x\n' |
+    scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = 'see infra/main.tf, docs/a.md, scripts/aws-eval/redact.awk and https://[host-1]/x' ]
+}
+
+test_aws_eval_redact_keeps_timestamps() {
+  in='generated_at 2026-11-26T12:00:00Z, 10:30:00 and TLSv1.2_2021 with jq 1.8.2'
+  out="$(printf '%s\n' "${in}" | scripts/aws-eval/redact --no-known)" || return 1
+  [ "${out}" = "${in}" ]
+}
+
+test_aws_eval_redact_rescan_fails_closed_on_what_awk_misses() {
+  # The awk pass matches ARNs case-sensitively; the rescan ignores case, so an
+  # upper-cased ARN is refused rather than half-redacted.
+  out="$(printf 'ARN:AWS:S3:::fake-bucket\n' | scripts/aws-eval/redact --no-known 2>/dev/null)" && return 1
+  [ -z "${out}" ]
+}
+
+test_aws_eval_redact_rejects_bare_tld_domain() {
+  ! printf 'x\n' | AWS_EVAL_DOMAIN=com scripts/aws-eval/redact --no-known 2>/dev/null || return 1
+  ! printf 'x\n' | scripts/aws-eval/redact --check --domain com 2>/dev/null
 }
 
 test_aws_eval_redact_keeps_public_domain_and_prose() {
@@ -146,6 +176,31 @@ test_aws_eval_flags_oidc_trust_without_sub() {
   has_finding "${r}" OIDC_TRUST_WITHOUT_SUB critical arn:aws:iam::111122223333:role/fake-oidc-no-sub
 }
 
+test_aws_eval_flags_oidc_trust_pinned_only_by_negation() {
+  # "Every repository except one" (StringNotEquals) pins nothing, and neither does
+  # ...IfExists; a single-object Statement and a Principal of "*" are handled.
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" OIDC_TRUST_WITHOUT_SUB critical arn:aws:iam::111122223333:role/fake-oidc-negated &&
+    has_finding "${r}" OIDC_TRUST_WITHOUT_SUB critical arn:aws:iam::111122223333:role/fake-oidc-object-statement
+}
+
+test_aws_eval_star_under_string_equals_is_literal() {
+  s="$(scored inventory-secure.json)" || return 1
+  ! jq -e 'any(.findings[]; .id | startswith("OIDC_"))' "${s}" >/dev/null
+}
+
+test_aws_eval_flags_legacy_oai_on_dualstack_origin() {
+  r="$(scored inventory-insecure.json)" || return 1
+  has_finding "${r}" CF_S3_ORIGIN_LEGACY_OAI medium E4FAKEDIST0004 || return 1
+  ! jq -e 'any(.findings[]; .id == "CF_S3_ORIGIN_WITHOUT_OAC" and .resource == "E4FAKEDIST0004")' "${r}" >/dev/null
+}
+
+test_aws_eval_score_fails_on_unparseable_timestamp() {
+  inv="$(mktemp)"
+  jq '.certificates[0].NotAfter = "next tuesday"' "${fixtures}/inventory-secure.json" >"${inv}" || return 1
+  ! scripts/aws-eval/score --now "${now}" "${inv}" >/dev/null 2>&1
+}
+
 test_aws_eval_flags_oidc_wildcard_repo() {
   r="$(scored inventory-insecure.json)" || return 1
   has_finding "${r}" OIDC_TRUST_WILDCARD_REPO critical arn:aws:iam::111122223333:role/fake-oidc-wildcard &&
@@ -175,7 +230,7 @@ test_aws_eval_maps_trivy_failures() {
 
 test_aws_eval_score_counts_and_floors() {
   r="$(scored inventory-insecure.json)" || return 1
-  jq -e '.score == 0 and .counts.critical == 4 and
+  jq -e '.score == 0 and .counts.critical == 6 and
     (.counts | .critical + .high + .medium + .low) == (.findings | length)' "${r}" >/dev/null
 }
 
@@ -197,9 +252,37 @@ test_aws_eval_aws_ro_refuses_writes() {
     refused s3 cp a s3://x &&
     refused s3api get-bucket-policy-status --endpoint-url=http://x &&
     refused s3api list-buckets --cli-input-json file://x || return 1
+  # The CLI accepts unambiguous prefixes of its options; every one is refused.
+  refused s3api list-buckets --endpoint=http://x &&
+    refused s3api list-buckets --endpoint-u=http://x &&
+    refused s3api list-buckets --cli-input-j=file://x &&
+    refused s3api list-buckets --cli-input-y=file://x &&
+    refused s3api list-buckets --generate-cli-sk &&
+    refused s3api list-buckets --debu &&
+    refused s3api list-buckets --cli-auto-prompt &&
+    refused s3api list-buckets --profile other &&
+    refused s3api get-bucket-logging --bucket=x &&
+    refused s3api get-bucket-logging --bucket &&
+    refused s3api get-bucket-logging --bucket --debug || return 1
   # Refused calls never reach aws.
   [ ! -s "${FAKE_AWS_LOG}" ] || return 1
   scripts/aws-eval/aws-ro s3api list-buckets >/dev/null && grep -qx 's3api list-buckets' "${FAKE_AWS_LOG}"
+}
+
+test_aws_eval_aws_ro_drops_endpoint_environment() {
+  use_fake_aws
+  AWS_ENDPOINT_URL=http://127.0.0.1:9 AWS_ENDPOINT_URL_S3=http://127.0.0.1:9 \
+    AWS_CONFIG_FILE=/nonexistent scripts/aws-eval/aws-ro s3api list-buckets >/dev/null || return 1
+  ! grep -q '^AWS_ENDPOINT_URL' "${FAKE_AWS_LOG}.env" || return 1
+  grep -qx 'AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true' "${FAKE_AWS_LOG}.env"
+}
+
+test_aws_eval_aws_ro_refuses_config_endpoint_url() {
+  use_fake_aws
+  config="$(mktemp)"
+  printf '[profile fake]\nregion = us-east-1\nservices = fake\n[services fake]\ns3 =\n  endpoint_url = http://127.0.0.1:9\n' >"${config}"
+  ! AWS_CONFIG_FILE="${config}" scripts/aws-eval/aws-ro s3api list-buckets 2>/dev/null || return 1
+  [ ! -s "${FAKE_AWS_LOG}" ]
 }
 
 test_aws_eval_collect_builds_valid_inventory() {
@@ -263,6 +346,32 @@ test_aws_eval_check_profile_rejects_inline_policy() {
   ! scripts/aws-eval/check-profile 2>/dev/null
 }
 
+test_aws_eval_file_issue_refuses_empty_or_missing_inventory() {
+  use_fake_aws
+  body="$(mktemp)"
+  printf 'Bucket [bucket-1] is public.\n' >"${body}"
+  empty="$(mktemp)"
+  jq '.buckets = [] | .distributions = [] | .certificates = [] | .oidc_roles = [] | .hosted_zones = [] | .log_groups = []' \
+    "${fixtures}/inventory-secure.json" >"${empty}" || return 1
+  ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${empty}" 2>/dev/null || return 1
+  ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" /nonexistent.json 2>/dev/null || return 1
+  : >"${empty}"
+  ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${empty}" 2>/dev/null || return 1
+  [ ! -f "${FAKE_GH_LOG}" ]
+}
+
+test_aws_eval_file_issue_skips_an_already_open_issue() {
+  use_fake_aws
+  body="$(mktemp)"
+  printf 'Bucket [bucket-1] is public.\n' >"${body}"
+  FAKE_GH_LIST="$(mktemp)"
+  export FAKE_GH_LIST
+  printf '[{"number": 7, "title": "S3 bucket is public"}]\n' >"${FAKE_GH_LIST}"
+  out="$(scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json")" || return 1
+  printf '%s\n' "${out}" | grep -q 'already open as #7' || return 1
+  ! grep -q '^issue create' "${FAKE_GH_LOG}"
+}
+
 test_aws_eval_file_issue_refuses_identifiers() {
   use_fake_aws
   body="$(mktemp)"
@@ -271,7 +380,7 @@ test_aws_eval_file_issue_refuses_identifiers() {
   # The inventory name alone (no account ID) is refused too.
   printf 'Bucket fake-private-logs is public.\n' >"${body}"
   ! scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json" 2>/dev/null || return 1
-  [ ! -f "${fake}/gh.log" ]
+  [ ! -f "${FAKE_GH_LOG}" ]
 }
 
 test_aws_eval_file_issue_files_clean_body_as_needs_triage() {
@@ -279,5 +388,8 @@ test_aws_eval_file_issue_files_clean_body_as_needs_triage() {
   body="$(mktemp)"
   printf 'Bucket [bucket-1] is public (critical).\n' >"${body}"
   scripts/aws-eval/file-issue 'S3 bucket is public' "${body}" "${fixtures}/inventory-insecure.json" || return 1
-  grep -q -- '--label needs-triage' "${fake}/gh.log"
+  grep -q '^issue create .*--label needs-triage' "${FAKE_GH_LOG}" || return 1
+  # gh posts the private checked copy, never the caller's file.
+  ! grep -qF -- "--body-file ${body}" "${FAKE_GH_LOG}" || return 1
+  cmp -s "${body}" "${FAKE_GH_LOG}.body"
 }

@@ -13,7 +13,8 @@ def finding($id; $severity; $title; $resource; $detail; $remediation):
 def epoch:
   if type == "number" then .
   else
-    capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:[.][0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$") as $m
+    . as $raw
+    | (capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:[.][0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$") // error("unparseable AWS timestamp: \($raw)")) as $m
     | ($m.base + "Z" | fromdateiso8601)
       - (if $m.tz == "Z" then 0
          else ($m.tz[0:1]) as $sign
@@ -63,7 +64,7 @@ def tls_ok: . as $v | (tls_order | index($v)) as $i | $i != null and $i >= (tls_
 
 def behaviors: [.DefaultCacheBehavior] + (.CacheBehaviors.Items // []);
 
-def s3_origin: (.S3OriginConfig != null) or (.DomainName | test("[.]s3([.-](?!website)[a-z0-9-]+)?[.]amazonaws[.]com$"));
+def s3_origin: (.S3OriginConfig != null) or (.DomainName | test("[.]s3([.-](?!website)[a-z0-9-]+)*[.]amazonaws[.]com$"));
 
 def cloudfront_rules:
   .distributions[] as $d
@@ -84,9 +85,15 @@ def cloudfront_rules:
          "Attach a response headers policy with HSTS (max-age at least one year, includeSubdomains).")
      else empty end),
     ($c.Origins.Items[]? | select(s3_origin and ((.OriginAccessControlId // "") == ""))
-     | finding("CF_S3_ORIGIN_WITHOUT_OAC"; "high"; "CloudFront S3 origin has no Origin Access Control"; $d.id;
-         "Origin \(.Id) reads S3 without OAC, so the bucket must be readable by others.";
-         "Attach an Origin Access Control and grant only this distribution in the bucket policy.")),
+     | if (.S3OriginConfig.OriginAccessIdentity // "") != "" then
+         finding("CF_S3_ORIGIN_LEGACY_OAI"; "medium"; "CloudFront S3 origin uses a legacy Origin Access Identity"; $d.id;
+           "Origin \(.Id) reads S3 through an OAI, which AWS has superseded with OAC (no SSE-KMS, no newer regions).";
+           "Migrate the origin to an Origin Access Control and drop the OAI grant from the bucket policy.")
+       else
+         finding("CF_S3_ORIGIN_WITHOUT_OAC"; "high"; "CloudFront S3 origin has no Origin Access Control"; $d.id;
+           "Origin \(.Id) reads S3 with neither OAC nor OAI, so the bucket must be readable by anyone.";
+           "Attach an Origin Access Control and grant only this distribution in the bucket policy.")
+       end),
     ($c.Origins.Items[]? | select(.DomainName | test("[.]s3-website[.-]"))
      | finding("CF_S3_WEBSITE_ORIGIN"; "high"; "CloudFront origin is an S3 website endpoint"; $d.id;
          "Origin \(.Id) uses the S3 website endpoint, which needs a public bucket and cannot use OAC.";
@@ -127,39 +134,53 @@ def acm_rules:
 
 def oidc_host: "token.actions.githubusercontent.com";
 
-# All condition values for one key across every operator, as an array of strings.
-def cond_values($key):
-  [(.Condition // {}) | to_entries[] | .value | to_entries[] | select(.key == $key) | .value | if type == "array" then .[] else . end];
+# Values that pin a key, as [{like, value}], taken only from positive operators.
+# Negated operators (StringNotEquals, StringNotLike, ...) allow everything except
+# the value, and ...IfExists or ForAllValues: pass when the key is missing, so none
+# of them pin anything.
+def pinning_values($key):
+  [(.Condition // {}) | to_entries[]
+   | select(.key | test("^(ForAnyValue:)?(StringEquals|StringEqualsIgnoreCase|StringLike)$"))
+   | (.key | test("Like$")) as $like
+   | .value | to_entries[] | select(.key == $key)
+   | .value | (if type == "array" then .[] else . end) | {like: $like, value: .}];
+
+# A policy's statements: AWS allows a single object as well as an array.
+def statements: .Statement | if type == "array" then .[] else . end;
 
 def trusts_github_oidc:
-  ((.Principal.Federated // []) | if type == "array" then . else [.] end) | any(endswith(oidc_host));
+  (.Principal | if type == "object" then (.Federated // []) else [] end)
+  | (if type == "array" then . else [.] end) | any(endswith(oidc_host));
 
+# "repo:<owner>/<name>:<rest>": the owner/name part must be one literal repository.
+# * and ? are wildcards only under a ...Like operator; under StringEquals they are literal.
+def repo_part: .value[5:] | split(":")[0];
 def wildcard_repo:
-  # "repo:<owner>/<name>:<rest>": the owner/name part must be literal.
-  (startswith("repo:") | not)
-  or ((.[5:] | split(":")[0]) | test("[*?]"))
-  or ((.[5:] | split(":")[0]) | contains("/") | not);
+  (.value | startswith("repo:") | not)
+  or (repo_part | contains("/") | not)
+  or (.like and (repo_part | test("[*?]")));
+def wildcard_ref: .like and (.value[5:] | split(":")[1:] | join(":") | test("[*?]"));
 
 def iam_rules:
   .oidc_roles[] as $r
-  | $r.trust_policy.Statement[]
+  | $r.trust_policy | statements
   | select((.Effect // "Allow") == "Allow" and trusts_github_oidc)
-  | cond_values(oidc_host + ":sub") as $subs
-  | cond_values(oidc_host + ":aud") as $auds
+  | pinning_values(oidc_host + ":sub") as $subs
+  | pinning_values(oidc_host + ":aud") as $auds
   | (if ($subs | length) == 0 then
        finding("OIDC_TRUST_WITHOUT_SUB"; "critical"; "GitHub OIDC trust has no sub condition"; $r.arn;
-         "Any repository on GitHub can assume this role.";
+         "No positive (StringEquals or StringLike) sub condition: any repository on GitHub can assume this role.";
          "Add a StringEquals condition on token.actions.githubusercontent.com:sub naming this repository.")
      elif ($subs | any(wildcard_repo)) then
        finding("OIDC_TRUST_WILDCARD_REPO"; "critical"; "GitHub OIDC trust allows a wildcard repository"; $r.arn;
          "A sub condition does not pin one repository.";
          "Pin the sub condition to repo:<owner>/<name>:<ref or environment>.")
-     elif ($subs | any(.[5:] | split(":")[1:] | join(":") | test("[*?]"))) then
+     elif ($subs | any(wildcard_ref)) then
        finding("OIDC_TRUST_ANY_REF"; "medium"; "GitHub OIDC trust allows any branch or pull request"; $r.arn;
          "The sub condition uses a wildcard after the repository, so any ref can assume the role.";
          "Pin the sub condition to the protected branch or a deployment environment.")
      else empty end),
-    (if ($auds | length) == 0 or ($auds | any(. != "sts.amazonaws.com")) then
+    (if ($auds | length) == 0 or ($auds | any(.like or .value != "sts.amazonaws.com")) then
        finding("OIDC_TRUST_AUDIENCE"; "high"; "GitHub OIDC trust does not pin the audience to sts.amazonaws.com"; $r.arn;
          "The aud condition is missing or allows another audience.";
          "Add a StringEquals condition token.actions.githubusercontent.com:aud = sts.amazonaws.com.")

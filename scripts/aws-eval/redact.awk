@@ -22,10 +22,24 @@ function ph(kind, value,    key) {
   return map[key]
 }
 
-function classify(kind, tok,    n, lower, last, parts, prefix) {
+# before = the text just in front of the token, for context.
+function classify(kind, tok, before,    n, lower, last, parts, prefix, digits, path) {
   if (kind == "arn") return ph("arn", tok)
   if (kind == "email") return ph("email", tolower(tok))
   if (kind == "uuid") return ph("resource-id", tolower(tok))
+  if (kind == "ipv4") return ph("ip", tok)
+  if (kind == "ipv6") {
+    # Compressed (::) or full eight-group form; times like 12:00:00 are neither.
+    n = gsub(/:/, ":", tok)
+    if ((index(tok, "::") > 0 && length(tok) > 2) || n == 7) return ph("ip", tolower(tok))
+    return ""
+  }
+  if (kind == "account-sep") {
+    # 1234-5678-9012 and 1234 5678 9012, as the console and bills print them.
+    digits = tok
+    gsub(/[^0-9]/, "", digits)
+    return ph("account", digits)
+  }
   if (kind == "digits") {
     n = length(tok)
     if (n == 12) return ph("account", tok)
@@ -35,7 +49,8 @@ function classify(kind, tok,    n, lower, last, parts, prefix) {
   if (kind == "upper") {
     n = length(tok)
     prefix = substr(tok, 1, 4)
-    if (n == 20 && (prefix in iam_prefix)) return ph("iam-id", tok)
+    # Access key IDs are 20 characters; role, user and group unique IDs 21.
+    if ((n == 20 || n == 21) && (prefix in iam_prefix)) return ph("iam-id", tok)
     # CloudFront distribution, OAC and key IDs.
     if (substr(tok, 1, 1) == "E" && (n == 13 || n == 14)) return ph("resource-id", tok)
     # Route 53 hosted zone IDs.
@@ -46,10 +61,16 @@ function classify(kind, tok,    n, lower, last, parts, prefix) {
     lower = tolower(tok)
     n = split(lower, parts, ".")
     last = parts[n]
-    if (length(last) < 2 || last !~ /^[a-z]+$/) return ""
-    if (last in file_ext) return ""
+    # A label of letters, or a punycode label (xn--...), can be a TLD.
+    if (length(last) < 2 || (last !~ /^[a-z]+$/ && last !~ /^xn--[a-z0-9-]+$/)) return ""
     if (lower == domain || substr(lower, length(lower) - length(domain)) == "." domain) return ""
     if (lower in safe_host) return ""
+    # File names, decided by context: a path component (after "/", but not the
+    # "//" of a URL) keeps any extension; elsewhere only extensions that are not
+    # also TLDs (report.json stays; SKILL.md or build.corp.sh is redacted).
+    path = substr(before, length(before), 1) == "/" && substr(before, length(before) - 1, 1) != "/"
+    if (path && (last in file_ext || last in tld_ext)) return ""
+    if (last in file_ext) return ""
     return ph("host", lower)
   }
   return ""
@@ -59,8 +80,9 @@ function scan(s, re, kind,    out, tok, r) {
   out = ""
   while (match(s, re)) {
     tok = substr(s, RSTART, RLENGTH)
-    r = classify(kind, tok)
-    out = out substr(s, 1, RSTART - 1) (r == "" ? tok : r)
+    out = out substr(s, 1, RSTART - 1)
+    r = classify(kind, tok, out)
+    out = out (r == "" ? tok : r)
     s = substr(s, RSTART + RLENGTH)
   }
   return out s
@@ -97,14 +119,21 @@ BEGIN {
   split("amazonaws.com sts.amazonaws.com s3.amazonaws.com cloudfront.net aws.amazon.com docs.aws.amazon.com " \
     "token.actions.githubusercontent.com github.com", a, " ")
   for (i in a) safe_host[a[i]] = 1
-  # Dotted names that are file names, not hosts (several are also real TLDs).
-  split("json md sh jq awk txt yml yaml toml tf tfvars hcl html htm js mjs css gd png svg jpg xml tsv csv log", a, " ")
+  # File extensions that are not TLDs: never a hostname.
+  split("json jq awk txt yml yaml toml tfvars hcl html htm js mjs css png svg jpg xml tsv csv", a, " ")
   for (i in a) file_ext[a[i]] = 1
+  # File extensions that are also TLDs: a file name only in a path.
+  split("md sh tf gd log", a, " ")
+  for (i in a) tld_ext[a[i]] = 1
 
   h = "[0-9A-Fa-f]"
+  d = "[0-9]"
   re_uuid = rep(h, 8) "-" rep(h, 4) "-" rep(h, 4) "-" rep(h, 4) "-" rep(h, 12)
+  re_account_sep = rep(d, 4) "[- ]" rep(d, 4) "[- ]" rep(d, 4)
   re_arn = "arn:aws[-a-z]*:[^ \t\"'`,<>(){}|]*"
   re_email = "[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+"
+  re_ipv4 = "[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+"
+  re_ipv6 = "[0-9A-Fa-f:]+"
   re_host = "[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+"
 }
 
@@ -113,6 +142,9 @@ BEGIN {
   s = scan(s, re_arn, "arn")
   s = scan(s, re_email, "email")
   s = scan(s, re_uuid, "uuid")
+  s = scan(s, re_ipv4, "ipv4")
+  s = scan(s, re_ipv6, "ipv6")
+  s = scan(s, re_account_sep, "account-sep")
   s = scan(s, re_host, "host")
   s = scan(s, "[A-Z0-9]+", "upper")
   s = scan(s, "[0-9]+", "digits")

@@ -3,8 +3,8 @@
 # Usage:
 #   scripts/aws-eval/redact (--known <inventory.json> | --no-known) [--domain <d>] <in >out
 #   scripts/aws-eval/redact --check [--known <inventory.json>] [--domain <d>] <in
-# Replaces 12-digit account IDs, ARNs, resource IDs (CloudFront, Route 53, IAM
-# unique IDs, UUIDs), emails and hostnames outside the public domain with stable
+# Replaces account IDs (also as 1234-5678-9012), ARNs, resource IDs (CloudFront, Route 53, IAM
+# unique IDs, UUIDs), IPv4/IPv6 addresses, emails and hostnames outside the public domain with stable
 # placeholders ([account-1], [host-2], ...). --known adds every resource name in
 # a collected inventory (bucket, role and log group names) as an exact literal.
 # Fails closed: if the output still matches any pattern, nothing is printed and
@@ -44,6 +44,13 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+# The public domain must be a registrable name, never a bare TLD such as "com",
+# which would exempt every host under it.
+domain="$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')"
+if ! printf '%s\n' "${domain}" | grep -qxE '[a-z0-9-]+([.][a-z0-9-]+)+'; then
+  printf 'redact: the public domain must have at least two labels (got "%s")\n' "${domain}" >&2
+  exit 64
+fi
 if [ "${mode}" = "redact" ] && [ "${known_set}" -eq 0 ]; then
   printf 'redact: pass --known <inventory.json> (or --no-known when there is no inventory)\n' >&2
   exit 64
@@ -73,16 +80,31 @@ fi
 # Sets residual=1 when anything is left.
 check() {
   residual=0
+  # kind:flags:regex. The rescan is deliberately broader than the awk pass
+  # (arn and email ignore case), so a near miss fails closed instead of leaking.
   for pattern in \
-    'account:[0-9]{12}' \
-    'arn:arn:aws[-a-z]*:' \
-    'email:[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+[.][A-Za-z]' \
-    'iam-id:(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]{16}' \
-    'resource-id:(^|[^A-Z0-9])E[A-Z0-9]{12,13}([^A-Z0-9]|$)' \
-    'resource-id:(^|[^A-Z0-9])Z[A-Z0-9]{9,31}([^A-Z0-9]|$)' \
-    'resource-id:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'; do
-    if grep -qE "${pattern#*:}" "$1"; then
-      printf 'redact: residual %s\n' "${pattern%%:*}" >&2
+    'account::[0-9]{12}' \
+    'account::[0-9]{4}[- ][0-9]{4}[- ][0-9]{4}' \
+    'arn:i:arn:aws[-a-z]*:' \
+    'email:i:[a-z0-9._%+-]+@[a-z0-9-]+[.][a-z]' \
+    'iam-id::(AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA|APKA|ABIA|ACCA)[A-Z0-9]{16}' \
+    'resource-id::(^|[^A-Z0-9])E[A-Z0-9]{12,13}([^A-Z0-9]|$)' \
+    'resource-id::(^|[^A-Z0-9])Z[A-Z0-9]{9,31}([^A-Z0-9]|$)' \
+    'resource-id::[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+    'ip::[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+' \
+    'ip::[0-9A-Fa-f]::|::[0-9A-Fa-f]|([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}'; do
+    kind="${pattern%%:*}"
+    rest="${pattern#*:}"
+    flags="${rest%%:*}"
+    regex="${rest#*:}"
+    found=0
+    if [ "${flags}" = "i" ]; then
+      grep -qiE "${regex}" "$1" && found=1
+    else
+      grep -qE "${regex}" "$1" && found=1
+    fi
+    if [ "${found}" -eq 1 ]; then
+      printf 'redact: residual %s\n' "${kind}" >&2
       residual=1
     fi
   done
