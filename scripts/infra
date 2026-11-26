@@ -1,12 +1,15 @@
 #!/bin/sh
 # OpenTofu checks and human-only operations for infra/.
 #
-# Usage: scripts/infra validate|lint|scan|plan|apply [stack]
+# Usage: scripts/infra validate|lint|scan|modules|plan|apply [stack]
 #   validate  tofu fmt -check, then init -backend=false and validate for every
 #             module and stack (offline apart from the provider download; the
 #             committed lock file is read-only)
 #   lint      tflint (terraform "all" preset + the pinned AWS ruleset)
-#   scan      trivy config: no HIGH or CRITICAL misconfigurations
+#   scan      install (tofu get) and check the modules of every module and stack,
+#             then trivy config: no HIGH or CRITICAL misconfigurations
+#   modules   check the modules tofu installed (.terraform/modules/modules.json)
+#             in every module and stack: each must be a local path inside infra/
 #   plan      human only: init with backend.hcl and plan a stack (default prod)
 #   apply     human only: apply the saved plan of a stack
 # validate, lint and scan never touch AWS.
@@ -15,7 +18,7 @@ LC_ALL=C
 export LC_ALL
 
 root="infra"
-cmd="${1:?usage: scripts/infra validate|lint|scan|plan|apply [stack]}"
+cmd="${1:?usage: scripts/infra validate|lint|scan|modules|plan|apply [stack]}"
 
 # The tools take settings from the environment (TRIVY_SKIP_FILES,
 # TRIVY_MISCONFIG_SCANNERS, TFLINT_*, TF_CLI_ARGS_*, ...), which a mise [env]
@@ -28,10 +31,52 @@ for v in TF_CLI_CONFIG_FILE TF_PLUGIN_CACHE_DIR TF_DATA_DIR TF_WORKSPACE; do
   unset "${v}"
 done
 
-# Every directory under infra/ that holds .tf files, sorted, one per line.
+# Every directory under infra/ that holds configuration, sorted, one per line.
 tf_dirs() {
-  find "${root}" -name .terraform -prune -o -type f -name '*.tf' -print |
+  find "${root}" -name .terraform -prune -o -type f \( -name '*.tf' -o -name '*.tofu' \) -print |
     sed 's|/[^/]*$||' | sort -u
+}
+
+init_offline() {
+  tofu -chdir="$1" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+}
+
+# Authoritative module check, from tofu's own resolution: every module that
+# `tofu init` installed for <dir> must come from a local path ("./" or "../")
+# and live inside infra/. Inline-ignore and config checks only cover infra/,
+# so a module from anywhere else would escape them.
+check_modules() {
+  manifest="$1/.terraform/modules/modules.json"
+  [ -f "${manifest}" ] || return 0
+  infra_abs="$(cd "${root}" && pwd -P)"
+  bad=0
+  entries="$(jq -r '.Modules[] | select(.Key != "") | [.Key, .Source, .Dir] | @tsv' "${manifest}")" || {
+    printf 'infra modules: %s: unreadable module manifest\n' "$1" >&2
+    return 1
+  }
+  tab="$(printf '\t')"
+  while IFS="${tab}" read -r key src dir; do
+    [ -n "${key}" ] || continue
+    case "${src}" in
+      ./* | ../*) ;;
+      *)
+        printf 'infra modules: %s: module %s has a non-local source (%s)\n' "$1" "${key}" "${src}" >&2
+        bad=1
+        continue
+        ;;
+    esac
+    abs="$(cd "$1" 2>/dev/null && cd "${dir}" 2>/dev/null && pwd -P || true)"
+    case "${abs}" in
+      "${infra_abs}" | "${infra_abs}"/*) ;;
+      *)
+        printf 'infra modules: %s: module %s resolves outside infra/ (%s)\n' "$1" "${key}" "${dir}" >&2
+        bad=1
+        ;;
+    esac
+  done <<EOF
+${entries}
+EOF
+  return "${bad}"
 }
 
 human_only() {
@@ -46,8 +91,14 @@ case "${cmd}" in
     tofu fmt -check -recursive -diff "${root}"
     for d in $(tf_dirs); do
       printf 'infra validate: %s\n' "${d}"
-      tofu -chdir="${d}" init -backend=false -input=false -lockfile=readonly -no-color >/dev/null
+      init_offline "${d}"
+      check_modules "${d}"
       tofu -chdir="${d}" validate -no-color
+    done
+    ;;
+  modules)
+    for d in $(tf_dirs); do
+      check_modules "${d}"
     done
     ;;
   lint)
@@ -71,6 +122,11 @@ case "${cmd}" in
     # (--ignorefile ""). Inline ignores are rejected by
     # scripts/checks/infra-no-suppressions. The flags repeat the config so a
     # config edit can never relax them.
+    # tofu get installs modules only (no providers), so this works offline.
+    for d in $(tf_dirs); do
+      tofu -chdir="${d}" get -no-color >/dev/null
+      check_modules "${d}"
+    done
     trivy config --config "${root}/trivy.yaml" \
       --quiet --disable-telemetry --skip-check-update \
       --ignorefile "" \

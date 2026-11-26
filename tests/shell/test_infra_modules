@@ -1,0 +1,86 @@
+#!/bin/sh
+# Tests for the authoritative module check in scripts/infra: after `tofu init`,
+# every module in .terraform/modules/modules.json must come from a local path
+# inside infra/. Each test works in a throwaway tree with the committed
+# scripts/infra; nothing here needs a provider or the network.
+
+infra_tree() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts" "${d}/infra/stacks/a" "${d}/infra/modules/ok" "${d}/mods/x"
+  cp "${root}/scripts/infra" "${d}/scripts/infra"
+  printf 'variable "v" {\n  type = string\n}\n' >"${d}/infra/modules/ok/main.tf"
+  printf 'variable "v" {\n  type = string\n}\n' >"${d}/mods/x/main.tf"
+  printf '%s' "${d}"
+}
+
+# stack <tree> <source>: one module call, written in canonical tofu fmt style.
+stack() {
+  printf 'module "m" {\n  source = "%s"\n  v      = "x"\n}\n' "$2" >"$1/infra/stacks/a/main.tf"
+}
+
+# infra_rc <tree> <command>: exit status of scripts/infra <command> in <tree>.
+infra_rc() {
+  rc=0
+  (cd "$1" && scripts/infra "$2" >/dev/null 2>&1) || rc=$?
+  printf '%s' "${rc}"
+}
+
+# manifest <tree> <key> <source> <dir>: a modules.json as tofu init writes it.
+manifest() {
+  mkdir -p "$1/infra/stacks/a/.terraform/modules"
+  printf '{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"%s","Source":"%s","Dir":"%s"}]}\n' \
+    "$2" "$3" "$4" >"$1/infra/stacks/a/.terraform/modules/modules.json"
+}
+
+test_infra_validate_accepts_module_inside_infra() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  rc="$(infra_rc "${t}" validate)"
+  rm -rf "${t}"
+  [ "${rc}" = 0 ]
+}
+
+test_infra_validate_rejects_local_module_outside_infra() {
+  t="$(infra_tree)"
+  stack "${t}" ../../../mods/x
+  rc="$(infra_rc "${t}" validate)"
+  rm -rf "${t}"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_modules_rejects_remote_module_with_unquoted_label() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  manifest "${t}" hidden 'git::https://example.invalid/x.git' .terraform/modules/hidden
+  mkdir -p "${t}/infra/stacks/a/.terraform/modules/hidden"
+  rc="$(infra_rc "${t}" modules)"
+  rm -rf "${t}"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_modules_rejects_remote_module_with_quoted_label() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  manifest "${t}" m registry.opentofu.org/example/y/aws .terraform/modules/m
+  mkdir -p "${t}/infra/stacks/a/.terraform/modules/m"
+  rc="$(infra_rc "${t}" modules)"
+  rm -rf "${t}"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_modules_rejects_module_dir_outside_infra() {
+  t="$(infra_tree)"
+  stack "${t}" ../../modules/ok
+  manifest "${t}" m ../../modules/ok ../../../mods/x
+  rc="$(infra_rc "${t}" modules)"
+  rm -rf "${t}"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_modules_accepts_committed_infra() {
+  rc=0
+  scripts/infra validate >/dev/null 2>&1 || rc=$?
+  [ "${rc}" = 0 ] || return 1
+  scripts/infra modules
+}

@@ -11,12 +11,22 @@
 render_trust() {
   d="$(mktemp -d)"
   cp infra/modules/github-deploy-trust/*.tf "${d}/"
-  tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null || return 1
+  if ! tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null; then
+    rm -rf "${d}"
+    return 1
+  fi
   tofu -chdir="${d}" apply -auto-approve -input=false -no-color \
     -var oidc_provider_arn=arn:aws:iam::provider/token.actions.githubusercontent.com \
     -var github_owner=octo -var github_owner_id=11 \
-    -var github_repository=game -var github_repository_id=22 >/dev/null || return 1
-  tofu -chdir="${d}" output -raw policy_json
+    -var github_repository=game -var github_repository_id=22 >/dev/null || {
+    rm -rf "${d}"
+    return 1
+  }
+  rc=0
+  tofu -chdir="${d}" output -raw policy_json || rc=$?
+  # The scratch copy holds the module, .terraform and the local state file.
+  rm -rf "${d}"
+  return "${rc}"
 }
 
 sub_key='token.actions.githubusercontent.com:sub'

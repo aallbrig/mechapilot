@@ -25,13 +25,19 @@ EOF
   printf '%s' "${d}"
 }
 
-# scan_rc <dir> [VAR=value ...]: exit status of scripts/infra scan in <dir>.
+# scan_rc <dir> [VAR=value ...]: exit status of scripts/infra scan in <dir>,
+# or "no-finding" if the scan didn't fail because trivy reported the planted
+# rule (so a failure elsewhere, e.g. in tofu, can't pass these tests).
 scan_rc() {
   dir="$1"
   shift
   rc=0
-  (cd "${dir}" && env "$@" scripts/infra scan >/dev/null 2>&1) || rc=$?
-  printf '%s' "${rc}"
+  out="$(cd "${dir}" && env "$@" scripts/infra scan 2>&1)" || rc=$?
+  rm -rf "${dir}"
+  case "${out}" in
+  *"AWS-0107 (HIGH)"*) printf '%s' "${rc}" ;;
+  *) printf 'no-finding' ;;
+  esac
 }
 
 test_infra_scan_fails_on_planted_finding() {

@@ -135,3 +135,60 @@ test_infra_no_suppressions_rejects_json_configuration() {
   rc="$(check_in "${r}")"
   [ "${rc}" = 1 ]
 }
+
+# stack_raw <repo> <file content>: write the stack verbatim and track everything.
+stack_raw() {
+  printf '%s\n' "$2" >"$1/infra/stacks/a/main.tf"
+  git -C "$1" add -A
+}
+
+test_infra_no_suppressions_rejects_unquoted_remote_module() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module hidden {
+  source = "git::https://example.invalid/x.git"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_quoted_remote_module() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module "hidden" {
+  source = "registry.example.invalid/x/y/aws"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_rejects_unquoted_local_module_outside_infra() {
+  r="$(module_repo)"
+  stack_raw "${r}" 'module   hidden{
+  source="../../../mods/x"
+}'
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 1 ]
+}
+
+test_infra_no_suppressions_fails_closed_on_unusual_module_forms() {
+  r="$(module_repo)"
+  for body in 'module "m" { source = "../../modules/ok" }' \
+    'module "m" {
+  source = <<EOT
+../../../mods/x
+EOT
+}' \
+    'module "m" {
+  source = local.where
+}' \
+    'module
+"m" {
+  source = "../../../mods/x"
+}'; do
+    stack_raw "${r}" "${body}"
+    rc="$(check_in "${r}")"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${body}"
+      return 1
+    fi
+  done
+}

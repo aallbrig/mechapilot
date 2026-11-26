@@ -34,10 +34,18 @@ fail() {
 }
 
 # Print the source of every module block in a .tf/.tofu file, one per line,
-# or "<unparsed>" for a module block whose source is not a plain string.
+# or "<unparsed>" for a module block whose source is not a plain string on its
+# own line (heredoc, expression, one-line block) or a module keyword line this
+# parser does not recognise. scripts/infra re-checks with tofu's own
+# resolution (.terraform/modules/modules.json) after init.
 module_sources() {
   awk '
-    /^[[:space:]]*module[[:space:]]+"[^"]*"[[:space:]]*\{/ { inmod = 1; depth = 0; found = 0 }
+    # A module block opens with a quoted or a bare label: module "x" { / module x {.
+    !inmod && /^[[:space:]]*module([[:space:]]*"[^"]*"|[[:space:]]+[A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*\{/ {
+      inmod = 1; depth = 0; found = 0
+    }
+    # Anything else that starts with the module keyword is not understood: fail closed.
+    !inmod && /^[[:space:]]*module([[:space:]"{]|$)/ { print "<unparsed>"; next }
     inmod {
       line = $0
       if (depth == 1 && match(line, /^[[:space:]]*source[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$/)) {
