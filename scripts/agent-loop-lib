@@ -31,11 +31,13 @@ def work:
       prod_down: (.prod.expected and (.prod.ok | not) and (.prod.incident_open | not))
     };
 def last_sign_of_life: [.last_activity_at // 0, .session.started_at] | max;
+# A tool call may run silently up to its timeout, so a running tool extends the limit.
+def silence_limit: .config.stall_seconds + (if .tool_running then .config.tool_timeout_seconds else 0 end);
 def class:
   if .session == null then "none"
   elif .session.status == "waiting" then "stalled"
   elif .session.status == "idle" then "idle"
-  elif (.now - last_sign_of_life) > .config.stall_seconds then "stalled"
+  elif (.now - last_sign_of_life) > silence_limit then "stalled"
   else "working" end;
 JQ
 }
@@ -60,7 +62,8 @@ agent_loop_work() {
 # agent_loop_classify <snapshot-file>: the session's state, one word.
 #   none     no Agent Loop session is running
 #   working  busy (or unknown), with a sign of life (heartbeat, status line or
-#            start) within config.stall_seconds
+#            start) within config.stall_seconds, plus config.tool_timeout_seconds
+#            while a tool call is running (the PreToolUse heartbeat says so)
 #   stalled  busy with no sign of life for longer, or waiting on a prompt
 #   idle     the turn ended and nothing is running
 agent_loop_classify() {
@@ -72,7 +75,9 @@ agent_loop_classify() {
 
 # agent_loop_decide <snapshot-file>: one line "<action>\t<reason>".
 #   exit          the stop file is set and no session runs
-#   start         work exists and no session runs (outside the start cooldown)
+#   start         work exists and no session runs (outside the start cooldown,
+#                 and not held after config.max_escalations escalations in
+#                 the current stall episode)
 #   nudge         stalled, or idle with work; config.nudge_gap_seconds apart
 #   escalate      still stalled after config.max_nudges nudges within
 #                 config.nudge_window_seconds: file an agent-loop-stall issue
@@ -95,8 +100,12 @@ agent_loop_decide() {
    else ($w.mine | length) > 0 or ($w.unclaimed | length) > 0 or $w.prod_down end) as $has_work
 | ($s | class) as $class
 | ($s.context_pct // 0) as $pct
-| [$s.nudges[] | select($s.now - . < $c.nudge_window_seconds)] as $recent
-| ($recent | max) as $last_nudge
+# A nudge that was followed by a sign of life worked, so only nudges newer
+# than the last sign of life count toward escalation.
+| [$s.nudges[] | select($s.now - . < $c.nudge_window_seconds)] as $window
+| ($s | last_sign_of_life) as $alive
+| [$window[] | select(. > $alive)] as $recent
+| ($window | max) as $last_nudge
 | def nudge_or_escalate($why):
     if $last_nudge != null and ($s.now - $last_nudge) < $c.nudge_gap_seconds then
       ["wait", "nudged \($s.now - $last_nudge)s ago (\($why))"]
@@ -105,6 +114,8 @@ agent_loop_decide() {
 if $class == "none" then
   if $s.stop_requested then ["exit", "stop file set"]
   elif ($has_work | not) then ["wait", "no work"]
+  elif $s.escalations >= $c.max_escalations then
+    ["wait", "held after \($s.escalations) stalls; a human checks the agent-loop-stall issue, then runs task loop:start"]
   elif $s.last_start_at != null and ($s.now - $s.last_start_at) < $c.start_cooldown_seconds then
     ["wait", "start cooldown, started \($s.now - $s.last_start_at)s ago"]
   else ["start", "mine=\($w.mine) unclaimed=\($w.unclaimed) prod_down=\($w.prod_down)"] end

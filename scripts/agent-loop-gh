@@ -1,5 +1,6 @@
 #!/bin/sh
-# The Agent Loop Supervisor's only door to GitHub (#20). Tests stub `gh` on PATH.
+# The Agent Loop's read-mostly door to GitHub (#20). The Supervisor uses all of
+# it; the session's allowlist permits only `blockers`. Tests stub `gh` on PATH.
 #
 # Usage:
 #   agent-loop-gh issues <label> <cache-dir>
@@ -7,11 +8,14 @@
 #       {number, labels, assignees, blocked_by}, pull requests dropped.
 #       Conditional request: the ETag is kept in <cache-dir>, and a
 #       304 Not Modified (which costs no rate limit) reuses the cached copy.
+#   agent-loop-gh blockers <number>
+#       Print the issue's open blocker count, or "unknown".
 #   agent-loop-gh issue-state <number>
 #       Print "open", "completed" or "not_planned".
 #   agent-loop-gh file-stall <title> <body-file>
-#       File an issue labelled agent-loop-stall and ready-for-agent (any
-#       machine may fix it), or comment on the open one with the same title.
+#       File an issue labelled agent-loop-stall and ready-for-human (the fix
+#       may touch the loop's permissions, which only a human changes), or
+#       comment once on the open one with the same title.
 set -eu
 
 die() {
@@ -62,6 +66,14 @@ issues() {
        blocked_by: (.issue_dependencies_summary.blocked_by // null)}]' "${body_file}"
 }
 
+blockers() {
+  case "$1" in
+    "" | *[!0-9]*) die "bad issue number: $1" ;;
+    *) ;;
+  esac
+  gh api "repos/{owner}/{repo}/issues/$1" --jq '.issue_dependencies_summary.blocked_by // "unknown"'
+}
+
 issue_state() {
   case "$1" in
     "" | *[!0-9]*) die "bad issue number: $1" ;;
@@ -74,14 +86,14 @@ file_stall() {
   title="$1"
   body="$2"
   [ -f "${body}" ] || die "no body file: ${body}"
-  gh label create agent-loop-stall --color B60205 --description "The Agent Loop stalled; fix the loop itself" >/dev/null 2>&1 || true
+  gh label create agent-loop-stall --color B60205 --description "The Agent Loop stalled; a human reviews it" >/dev/null 2>&1 || true
   open_stalls="$(gh issue list --state open --label agent-loop-stall --json number,title)"
   existing="$(printf '%s\n' "${open_stalls}" | jq -r --arg t "${title}" '[.[] | select(.title == $t)][0].number // empty')"
   if [ -n "${existing}" ]; then
     gh issue comment "${existing}" --body-file "${body}" >/dev/null
     printf 'commented on #%s\n' "${existing}"
   else
-    gh issue create --title "${title}" --body-file "${body}" --label agent-loop-stall --label ready-for-agent
+    gh issue create --title "${title}" --body-file "${body}" --label agent-loop-stall --label ready-for-human
   fi
 }
 
@@ -89,10 +101,11 @@ cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "${cmd}" in
   issues) issues "${1:?label}" "${2:?cache dir}" ;;
+  blockers) blockers "${1:?issue number}" ;;
   issue-state) issue_state "${1:?issue number}" ;;
   file-stall) file_stall "${1:?title}" "${2:?body file}" ;;
   *)
-    printf 'usage: agent-loop-gh issues <label> <cache-dir> | issue-state <n> | file-stall <title> <body-file>\n' >&2
+    printf 'usage: agent-loop-gh issues <label> <cache-dir> | blockers <n> | issue-state <n> | file-stall <title> <body-file>\n' >&2
     exit 64
     ;;
 esac

@@ -1,0 +1,32 @@
+#!/bin/sh
+# The Agent Loop session's only way to push (#20): HEAD to
+# refs/heads/agent-loop/<alias>/<issue> on origin, as a plain fast-forward
+# push. No refspec, tag, force or hook option can be passed through, because
+# the session's allowlist permits this script and denies `git push`.
+#
+# Usage: scripts/agent-loop-push <issue-number>
+# The alias is AGENT_LOOP_MACHINE (set by the Supervisor for the session).
+set -eu
+
+[ "$#" -eq 1 ] || {
+  printf 'usage: agent-loop-push <issue-number>\n' >&2
+  exit 64
+}
+case "$1" in
+  "" | 0* | *[!0-9]*)
+    printf 'agent-loop-push: not an issue number: %s\n' "$1" >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+alias_name="${AGENT_LOOP_MACHINE:-}"
+case "${alias_name}" in
+  m-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *)
+    printf 'agent-loop-push: AGENT_LOOP_MACHINE is not an m-<6 hex> alias\n' >&2
+    exit 1
+    ;;
+esac
+ref="refs/heads/agent-loop/${alias_name}/$1"
+git push origin "HEAD:${ref}"
+printf 'agent-loop-push: pushed HEAD to %s\n' "${ref}"

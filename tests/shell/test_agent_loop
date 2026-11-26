@@ -56,14 +56,19 @@ work() {
   )
 }
 
-# stubs <dir>: fake claude, gh and tmux in <dir>/bin that record every call in
-# <dir>/calls.
+# stubs <dir>: fake claude, gh, tmux and sandbox tools in <dir>/bin that record
+# every call in <dir>/calls, plus a 0600 token file at <dir>/token.
 #   claude agents --json  prints <dir>/agents.json (or [])
 #   gh api --include ...  answers 200 with <dir>/issues.json and an ETag, or
 #                         304 when sent If-None-Match
 #   gh api repos/.../issues/<n> --jq ...  prints <dir>/issue-state (or completed)
+#   gh api (preflight)    the repo reads; branch protection and secrets fail
+#                         under GH_TOKEN unless <dir>/token-is-admin exists; a
+#                         v* tag ruleset (absent with <dir>/no-ruleset); a
+#                         production reviewer
 #   tmux split-window/new-session  print %9, mark the pane alive and, if
-#                         <dir>/agents-after-start.json exists, make it the agents list
+#                         <dir>/agents-after-start.json exists, make it the
+#                         agents list; fail while <dir>/tmux-broken exists
 #   tmux display-message  prints 0 while <dir>/pane-alive exists
 #   tmux send-keys -l /exit and kill-pane  end the pane
 stubs() {
@@ -82,6 +87,14 @@ printf 'gh %s\n' "\$*" >>"$1/calls"
 case "\$*" in
   *If-None-Match*) printf 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n\r\n'; exit 1 ;;
   "api --include "*) printf 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\n\r\n'; cat "$1/issues.json" ;;
+  "api repos/{owner}/{repo}") printf '{"full_name":"o/r"}\n' ;;
+  "api repos/{owner}/{repo}/branches/main/protection" | "api repos/{owner}/{repo}/actions/secrets")
+    if [ -n "\${GH_TOKEN:-}" ] && [ ! -e "$1/token-is-admin" ]; then exit 1; fi
+    printf '{}\n' ;;
+  "api repos/{owner}/{repo}/rulesets?targets=tag")
+    if [ -e "$1/no-ruleset" ]; then printf '[]\n'; else printf '[{"id":1,"target":"tag","enforcement":"active"}]\n'; fi ;;
+  "api repos/{owner}/{repo}/rulesets/1") printf '{"conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}\n' ;;
+  "api repos/{owner}/{repo}/environments/production") printf '{"protection_rules":[{"type":"required_reviewers"}]}\n' ;;
   "api repos/"*) if [ -f "$1/issue-state" ]; then cat "$1/issue-state"; else printf 'completed\n'; fi ;;
   "issue list"*) printf '[]\n' ;;
   *) ;;
@@ -92,6 +105,7 @@ EOF
 printf 'tmux %s\n' "\$*" >>"$1/calls"
 case "\$1" in
   split-window | new-session | new-window)
+    [ ! -e "$1/tmux-broken" ] || exit 1
     : >"$1/pane-alive"
     if [ -f "$1/agents-after-start.json" ]; then cp "$1/agents-after-start.json" "$1/agents.json"; fi
     printf '%%9\n' ;;
@@ -102,17 +116,25 @@ case "\$1" in
   *) ;;
 esac
 EOF
-  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux"
+  for tool in sandbox-exec bwrap socat; do
+    printf '#!/bin/sh\nexit 0\n' >"${bin}/${tool}"
+  done
+  chmod +x "${bin}/claude" "${bin}/gh" "${bin}/tmux" "${bin}/sandbox-exec" "${bin}/bwrap" "${bin}/socat"
   : >"$1/calls"
   printf '[]\n' >"$1/issues.json"
+  printf 'fake-token\n' >"$1/token"
+  chmod 600 "$1/token"
 }
 
-# supervisor <dir> <args...>: run the Supervisor against stubs and a private state dir.
+# supervisor <dir> <args...>: run the Supervisor against stubs and a private
+# state dir. The session's runtime files come from HEAD (not origin/main, so
+# nothing is fetched).
 supervisor() {
   d="$1"
   shift
   PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
-    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=1 TMUX_PANE='%1' \
+    AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RUNTIME_REF=HEAD AGENT_LOOP_RETRY_SECONDS=0 \
+    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=0 TMUX_PANE='%1' \
     scripts/agent-loop-supervisor "$@"
 }
 
@@ -166,6 +188,11 @@ test_supervisor_classifies_stale_heartbeat_as_stall() {
   # A session the Supervisor cannot see in `claude agents` (status unknown) is judged the same way.
   s="$(snap snapshot-busy-session.json '.session.status = "unknown" | .last_activity_at = .now - 901')" || return 1
   expect stalled classify "${s}" || return 1
+  # A tool call that is still running may be silent up to its timeout (600s) on top.
+  s="$(snap snapshot-busy-session.json '.tool_running = true | .last_activity_at = .now - 1400')" || return 1
+  expect working classify "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.tool_running = true | .last_activity_at = .now - 1501')" || return 1
+  expect stalled classify "${s}" || return 1
   # Waiting on a prompt is a stall too.
   s="$(snap snapshot-busy-session.json '.session.status = "waiting" | .session.waiting_for = "permission prompt"')" || return 1
   expect stalled classify "${s}" || return 1
@@ -175,6 +202,12 @@ test_supervisor_classifies_stale_heartbeat_as_stall() {
   expect wait decision "${s}" || return 1
   s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 2000 | .nudges = [.now - 900, .now - 400]')" || return 1
   expect escalate decision "${s}" || return 1
+  # Nudges that were followed by a sign of life worked, so they do not count:
+  # nudges at -1500 and -900, a heartbeat at -400, stalled again: nudge, not escalate.
+  s="$(snap snapshot-busy-session.json '.session.status = "idle" | .last_activity_at = .now - 400 | .nudges = [.now - 1500, .now - 900]')" || return 1
+  expect nudge decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 950 | .nudges = [.now - 1750, .now - 1000, .now - 600]')" || return 1
+  expect nudge decision "${s}" || return 1
   # Nudges older than the 30-minute window do not count.
   s="$(snap snapshot-busy-session.json '.last_activity_at = .now - 4000 | .nudges = [.now - 3000, .now - 2500]')" || return 1
   expect nudge decision "${s}"
@@ -272,20 +305,96 @@ test_supervisor_starts_a_named_session_in_its_worktree() {
   grep -q "^tmux split-window -d -P -F #{pane_id} -t %1 -c ${d}/worktree " "${d}/calls" || return 1
   grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
   launcher="${d}/state/launch"
-  grep -qx "exec claude --name 'mechafighter.com dev loop' --remote-control 'mechafighter.com dev loop' --permission-mode dontAsk --settings '${d}/state/session-settings.json'" "${launcher}" || return 1
+  rt="${d}/state/runtime"
   sh -n "${launcher}" || return 1
-  # The session's settings are valid Claude Code settings with the status line,
-  # the heartbeat hooks and the committed allowlist.
-  check-jsonschema --schemafile schemas/claude-code-settings.schema.json "${d}/state/session-settings.json" >/dev/null || return 1
-  settings="${d}/state/session-settings.json"
-  expect "'${d}/worktree/scripts/claude-statusline'" jq -r '.statusLine.command' "${settings}" || return 1
+  grep -qx "  --restricted --strict-mcp-config --tools 'Bash,Read,Edit,Write,Glob,Grep,Agent,WebFetch,Skill' \\\\" "${launcher}" || return 1
+  grep -qx "  --settings '${rt}/session-settings.json'" "${launcher}" || return 1
+  grep -qx "exec claude --name 'mechafighter.com dev loop' --remote-control 'mechafighter.com dev loop' --permission-mode dontAsk \\\\" "${launcher}" || return 1
+  # The token is read at launch from its file, never written into the launcher or settings.
+  grep -qx "GH_TOKEN=\"\\\$(cat '${d}/token')\" || exit 1" "${launcher}" || return 1
+  grep -qx "GH_CONFIG_DIR='${d}/worktree/.agent-loop/gh-config'" "${launcher}" || return 1
+  ! grep -rq fake-token "${launcher}" "${rt}" || return 1
+  # Settings, status line and hooks come from the read-only runtime copy.
+  settings="${rt}/session-settings.json"
+  check-jsonschema --schemafile schemas/claude-code-settings.schema.json "${settings}" >/dev/null || return 1
+  [ ! -w "${settings}" ] && [ ! -w "${rt}/scripts/agent-loop-heartbeat" ] || return 1
+  expect "'${rt}/scripts/claude-statusline'" jq -r '.statusLine.command' "${settings}" || return 1
+  expect "'${rt}/scripts/agent-loop-heartbeat' pre" jq -r '.hooks.PreToolUse[0].hooks[0].command' "${settings}" || return 1
   expect true jq -r '.hooks.PostToolUse[0].hooks[0].async' "${settings}" || return 1
   expect "${d}/state" jq -r '.env.AGENT_LOOP_STATE_DIR' "${settings}" || return 1
-  jq -e '.permissions.deny | index("Bash(gh pr merge *)")' "${settings}" >/dev/null || return 1
+  expect m-a1b2c3 jq -r '.env.AGENT_LOOP_MACHINE' "${settings}" || return 1
+  expect true jq -r '.sandbox.enabled and (.sandbox.allowUnsandboxedCommands == false) and .sandbox.failIfUnavailable' "${settings}" || return 1
+  real_dir="$(cd "${d}" && pwd -P)"
+  jq -e --arg t "/${real_dir}" '.sandbox.filesystem.denyRead | index($t)' "${settings}" >/dev/null || return 1
+  ! grep -q '/worktree/' "${settings}" || return 1
   expect '"m-a1b2c3"' jq -c 'select(.event == "session_start") | .machine' "${d}/state/metrics.jsonl" || return 1
   # The snapshot it decided from matches its schema, with the PR dropped.
   check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${d}/state/snapshot.json" >/dev/null || return 1
   expect '[101]' jq -c '[.issues[].number]' "${d}/state/snapshot.json"
+}
+
+test_supervisor_refuses_to_start_without_the_token() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  # A token readable by others is refused like a missing one.
+  chmod 644 "${d}/token"
+  out="$(supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'refusing to start a session: no least-privilege token' || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  rm -f "${d}/token"
+  supervisor "${d}" once >/dev/null || return 1
+  ! grep -q '^tmux ' "${d}/calls" || return 1
+  [ ! -e "${d}/state/launch" ]
+}
+
+test_preflight_requires_the_human_steps() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  out="$(supervisor "${d}" preflight)" || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -qx 'preflight: 0 failed' || return 1
+  # The token probes run with the token and an empty gh config.
+  grep -qx 'gh api repos/{owner}/{repo}/branches/main/protection' "${d}/calls" || return 1
+  # A token that can read branch protection (an admin token) fails.
+  : >"${d}/token-is-admin"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read branch protection (no Administration permission)' || return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read Actions secrets (no Secrets permission)' || return 1
+  rm -f "${d}/token-is-admin"
+  # No tag ruleset fails.
+  : >"${d}/no-ruleset"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating v\* tags' || return 1
+  rm -f "${d}/no-ruleset"
+  # No token fails, and the Supervisor will not run.
+  rm -f "${d}/token"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  token file ' || return 1
+  ! supervisor "${d}" run >/dev/null 2>&1 || return 1
+  ! supervisor "${d}" start >/dev/null 2>&1
+}
+
+test_supervisor_survives_a_failing_tick() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  : >"${d}/tmux-broken"
+  out="$(AGENT_LOOP_MAX_TICKS=2 supervisor "${d}" run 2>&1)" || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  failed_ticks="$(printf '%s\n' "${out}" | grep -c 'tick failed' || true)"
+  [ "${failed_ticks}" -eq 2 ] || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -q 'retrying (1/2): tmux split-window' || return 1
+  [ ! -e "${d}/state/supervisor.pid" ]
 }
 
 test_supervisor_files_a_stall_issue_after_failed_nudges() {
@@ -305,10 +414,32 @@ test_supervisor_files_a_stall_issue_after_failed_nudges() {
   # Two nudges already in the window: file the issue and kill the session.
   printf '1795699000\n1795699500\n' >"${d}/state/nudges"
   supervisor "${d}" once >/dev/null || return 1
-  grep -q '^gh issue create --title Agent Loop stalled: session busy with no heartbeat --body-file .* --label agent-loop-stall --label ready-for-agent$' "${d}/calls" || return 1
+  grep -q '^gh issue create --title Agent Loop stalled: session busy with no heartbeat --body-file .* --label agent-loop-stall --label ready-for-human$' "${d}/calls" || return 1
   grep -qx 'tmux kill-pane -t %9' "${d}/calls" || return 1
   expect 'busy, no heartbeat for 2000s' jq -r 'select(.event == "stall") | .reason' "${d}/state/metrics.jsonl" || return 1
-  [ ! -e "${d}/state/nudges" ]
+  [ ! -e "${d}/state/nudges" ] || return 1
+  # A heartbeat after the nudges means they worked: nudge again, never escalate.
+  printf '%%9\n' >"${d}/state/pane"
+  : >"${d}/pane-alive"
+  printf '[{"pid":4242,"status":"busy","sessionId":"s2","name":"mechafighter.com dev loop","startedAt":1795690000000,"cwd":"/w"}]\n' >"${d}/agents.json"
+  printf '1795698000\n1795698500\n' >"${d}/state/nudges"
+  printf '{"session_id":"s2","at":1795698900,"phase":"post"}\n' >"${d}/state/heartbeat"
+  : >"${d}/calls"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux send-keys -t %9 -l /agent-loop' "${d}/calls" || return 1
+  ! grep -q '^gh issue' "${d}/calls" || return 1
+  # A second escalation in the same episode writes nothing to GitHub.
+  printf '1795699000\n1795699500\n' >"${d}/state/nudges"
+  : >"${d}/calls"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -qx 'tmux kill-pane -t %9' "${d}/calls" || return 1
+  ! grep -q '^gh issue' "${d}/calls" || return 1
+  expect 2 cat "${d}/state/stall-episode" || return 1
+  # After two escalations the loop is held: work exists, but no new session.
+  s="$(snap snapshot-no-session.json '.escalations = 2')" || return 1
+  expect wait decision "${s}" || return 1
+  s="$(snap snapshot-no-session.json '.escalations = 1')" || return 1
+  expect start decision "${s}"
 }
 
 test_supervisor_records_delivered_issues() {
@@ -435,9 +566,13 @@ test_statusline_reports_context_for_the_supervisor() {
 
 test_heartbeat_hook_records_progress() {
   d="$(mktemp -d)"
+  printf '{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Bash"}' |
+    AGENT_LOOP_STATE_DIR="${d}" TMUX_PANE=%9 scripts/agent-loop-heartbeat pre || return 1
+  expect '["s1","pre","%9"]' jq -c '[.session_id, .phase, .pane]' "${d}/heartbeat" || return 1
   printf '{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash"}' |
-    AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat || return 1
-  expect s1 jq -r '.session_id' "${d}/heartbeat" || return 1
+    AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat post || return 1
+  expect post jq -r '.phase' "${d}/heartbeat" || return 1
+  ! printf '{}' | AGENT_LOOP_STATE_DIR="${d}" scripts/agent-loop-heartbeat sideways 2>/dev/null || return 1
   now="$(date +%s)"
   at="$(jq -r '.at' "${d}/heartbeat")"
   [ $((now - at)) -le 5 ]
@@ -465,4 +600,45 @@ test_agent_loop_skill_check_rejects_reordered_passes() {
   grep -vF 'task merge-gate' .claude/skills/agent-loop/SKILL.md >"${d}/no-gate.md"
   out="$(scripts/checks/agent-loop-skill "${d}/no-gate.md")" && return 1
   printf '%s\n' "${out}" | grep -qF 'missing: task merge-gate -- <pr> --merge'
+}
+
+test_agent_loop_push_pushes_only_its_branch() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nprintf "git %%s\\n" "$*" >>"%s/calls"\n' "${d}" >"${d}/bin/git"
+  chmod +x "${d}/bin/git"
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push 42 >/dev/null || return 1
+  expect 'git push origin HEAD:refs/heads/agent-loop/m-a1b2c3/42' cat "${d}/calls" || return 1
+  # No refspec, tag, option or extra argument gets through.
+  for bad in 'x:refs/tags/v1' '+42' '42 --force' '-n' '042' ''; do
+    ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push "${bad}" 2>/dev/null || return 1
+  done
+  ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=m-a1b2c3 scripts/agent-loop-push 42 --force 2>/dev/null || return 1
+  ! PATH="${d}/bin:${PATH}" AGENT_LOOP_MACHINE=laptop scripts/agent-loop-push 42 2>/dev/null || return 1
+  expect 1 wc -l <"${d}/calls"
+}
+
+test_agent_loop_settings_sandbox_the_session() {
+  f=.claude/agent-loop-settings.json
+  expect true jq '.sandbox.enabled and .sandbox.failIfUnavailable and (.sandbox.allowUnsandboxedCommands == false)
+    and (.sandbox.autoAllowBashIfSandboxed == false) and .sandbox.network.strictAllowlist and .disableClaudeAiConnectors' "${f}" || return 1
+  home='~' # the literal tilde the sandbox expands, not this shell's home
+  for p in "${home}/.aws" "${home}/.ssh" "${home}/.config/gh" "${home}/.config/mechafighter-agent-loop" "${home}/.claude/.credentials.json"; do
+    jq -e --arg p "${p}" '.sandbox.filesystem.denyRead | index($p)' "${f}" >/dev/null || return 1
+  done
+  expect '["aallbrig.github.io","api.github.com","game.mechafighter.com","github.com","googlechromelabs.github.io","mechafighter.com","registry.npmjs.org","storage.googleapis.com"]' \
+    jq -c '.sandbox.network.allowedDomains | sort' "${f}" || return 1
+  for rule in 'Bash(git push *)' 'Bash(gh api *)' 'Bash(gh pr merge *)' 'Bash(git commit -n*)' 'Bash(git commit *--no-verify*)' \
+    'Bash(mise *)' 'Bash(curl *)' 'Bash(*--upload-pack*)' 'Bash(*--exec*)' 'Bash(find *-exec*)' 'Bash(git rebase *)' \
+    'Bash(git config *)' 'Bash(git -c *)' 'Bash(task loop:start*)' 'Bash(task loop:stop*)' 'Bash(task infra:*)' \
+    'Bash(gh workflow *)' 'Bash(scripts/agent-loop-supervisor *)' 'Read(~/.config/gh/**)'; do
+    jq -e --arg r "${rule}" '.permissions.deny | index($r)' "${f}" >/dev/null || {
+      printf 'missing deny rule: %s\n' "${rule}"
+      return 1
+    }
+  done
+  # Nothing in the allowlist pushes, calls the API directly, fetches arbitrary URLs or runs mise.
+  expect '[]' jq -c '[.permissions.allow[] | select(test("^Bash\\((git push|gh api|curl|wget|mise|task loop:start|task loop:stop|scripts/agent-loop-supervisor)"))]' "${f}" || return 1
+  # The session's settings never point at the worktree: hooks and the status line are added from the runtime copy.
+  expect 'false' jq 'has("hooks") or has("statusLine")' "${f}"
 }
