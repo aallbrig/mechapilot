@@ -104,6 +104,7 @@ tasks:
       - |
         if [ ! -d godot ]; then echo "test: no Godot project yet"; exit 0; fi
         task godot:test
+      - scripts/checks/test-results-clean
 
   ci:fast:
     desc: Pre-push gate (lint + tests)

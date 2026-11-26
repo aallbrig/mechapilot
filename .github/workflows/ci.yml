@@ -52,14 +52,24 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          issues="$(gh pr view "${PR_NUMBER}" --json closingIssuesReferences --jq '.closingIssuesReferences[].number')"
+          repo_url="https://github.com/${GITHUB_REPOSITORY}/issues/"
+          gh pr view "${PR_NUMBER}" --json closingIssuesReferences >"${RUNNER_TEMP}/links.json"
+          foreign="$(jq -r --arg url "${repo_url}" '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${RUNNER_TEMP}/links.json")"
+          if [ "${foreign}" -ne 0 ]; then echo "::error::Linked issues must be in this repository."; exit 1; fi
+          issues="$(jq -r '.closingIssuesReferences[].number' "${RUNNER_TEMP}/links.json")"
           if [ -z "${issues}" ]; then
             case "${PR_AUTHOR}" in
               "dependabot[bot]") echo "Dependabot PR: no linked issue required."; exit 0 ;;
               *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
             esac
           fi
-          for n in ${issues}; do ACCEPTANCE_RECORD=build/test-results/acceptance.tsv scripts/verify-acceptance "${n}"; done
+          # Record outside build/ so nothing the tests write can pre-seed it.
+          record="${RUNNER_TEMP}/acceptance.tsv"
+          : >"${record}"
+          rc=0
+          for n in ${issues}; do ACCEPTANCE_RECORD="${record}" scripts/verify-acceptance "${n}" || rc=1; done
+          cp "${record}" build/test-results/acceptance.tsv
+          exit "${rc}"
 
       - name: Upload test results
         if: always()

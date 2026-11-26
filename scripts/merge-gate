@@ -22,13 +22,14 @@ fail() {
 
 ref="refs/merge-gate/${pr}"
 git fetch --quiet --force origin main "+pull/${pr}/head:${ref}"
-for s in scripts/verify-acceptance scripts/checks/verification-guard scripts/review-verdicts; do
+for s in scripts/verify-acceptance scripts/lib-tests scripts/checks/verification-guard scripts/review-verdicts; do
   mkdir -p "${gate}/main/$(dirname "${s}")"
   git show "origin/main:${s}" >"${gate}/main/${s}" 2>/dev/null || fail "main has no ${s}"
   chmod +x "${gate}/main/${s}"
 done
 
 owner="$(gh repo view --json owner --jq .owner.login)"
+repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 # This must be main's own copy of the gate, run from main.
 git show origin/main:scripts/merge-gate >"${gate}/self" 2>/dev/null || fail "main has no scripts/merge-gate"
 cmp -s "${gate}/self" "$0" || fail "run main's copy of scripts/merge-gate (this file differs from origin/main)"
@@ -45,12 +46,17 @@ author="$(jq -r .author.login "${gate}/pr.json")"
 cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
 [ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
 
-# 1. The ci check from GitHub Actions passed on exactly this head commit.
+# 1. Every ci check from GitHub Actions on exactly this head commit passed.
 ci="$(gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" --jq \
-  '[.check_runs[] | select(.name == "ci" and .app.slug == "github-actions")] | sort_by(.completed_at) | last | .conclusion // "missing"')"
+  '[.check_runs[] | select(.name == "ci" and .app.slug == "github-actions")]
+   | if length == 0 then "missing" elif all(.conclusion == "success") then "success" else "not-green" end')"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
 # 2. Acceptance: judged by main's verifier from the ci run's recorded evidence.
+# Linked issues must live in this repository (no cross-repo references).
+foreign="$(jq -r --arg url "https://github.com/${repo}/issues/" \
+  '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${gate}/pr.json")"
+[ "${foreign}" -eq 0 ] || fail "PR links issues outside ${repo}"
 issues="$(jq -r '.closingIssuesReferences[].number' "${gate}/pr.json")"
 if [ -z "${issues}" ]; then
   case "${author}" in
@@ -59,6 +65,8 @@ if [ -z "${issues}" ]; then
   esac
 else
   for n in ${issues}; do
+    issue_state="$(gh issue view "${n}" --json state --jq .state)"
+    [ "${issue_state}" = OPEN ] || fail "linked issue #${n} is ${issue_state} (already delivered)"
     labels="$(gh issue view "${n}" --json labels --jq '[.labels[].name] | join(",")')"
     case ",${labels}," in
       *,ready-for-agent,*) ;;

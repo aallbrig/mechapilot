@@ -42,3 +42,12 @@ test_large_files_handles_spaces_in_names() {
   printf '0123456789' >"${d}/big file.bin"
   ! LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${d}/big file.bin"
 }
+
+test_test_results_clean_rejects_planted_files() {
+  d="$(mktemp -d)"
+  : >"${d}/shell.xml"
+  scripts/checks/test-results-clean "${d}" || return 1
+  : >"${d}/godot.xml"
+  if [ -f godot/project.godot ]; then rm "${d}/godot.xml"; : >"${d}/acceptance.tsv"; fi
+  ! scripts/checks/test-results-clean "${d}"
+}

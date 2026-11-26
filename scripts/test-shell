@@ -2,18 +2,23 @@
 # Run POSIX shell tests in tests/shell/test_* and write JUnit XML.
 # Each test file is a sh script; each function named test_* is one test case.
 set -eu
+# shellcheck source=lib-tests
+. "$(dirname "$0")/lib-tests"
 
 out_dir="${1:-build/test-results}"
 mkdir -p "${out_dir}"
 xml="${out_dir}/shell.xml"
 cases="$(mktemp)"
-trap 'rm -f "${cases}"' EXIT
+staged_xml="$(mktemp)"
+trap 'rm -f "${cases}" "${staged_xml}"' EXIT
+# Tests must never write acceptance evidence.
+unset ACCEPTANCE_RECORD ACCEPTANCE_EVIDENCE
 
 total=0
 failed=0
 for file in tests/shell/test_*; do
   [ -f "${file}" ] || continue
-  names="$(sed -n 's/^\(test_[a-z0-9_]*\)()[[:space:]]*{.*/\1/p' "${file}")"
+  names="$(shell_test_names <"${file}")"
   for name in ${names}; do
     total=$((total + 1))
     log="$(mktemp)"
@@ -40,7 +45,9 @@ done
   printf '<testsuite name="shell" tests="%s" failures="%s">\n' "${total}" "${failed}"
   cat "${cases}"
   printf '</testsuite>\n'
-} >"${xml}"
+} >"${staged_xml}"
+# Written last, after every test has run, so test code cannot pre-empt it.
+mv -f "${staged_xml}" "${xml}"
 
 printf 'test-shell: %s/%s passed\n' "$((total - failed))" "${total}"
 [ "${failed}" -eq 0 ]

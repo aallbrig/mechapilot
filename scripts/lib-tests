@@ -1,0 +1,14 @@
+#!/bin/sh
+# Test discovery shared by the runners and scripts/verify-acceptance, so a test
+# counts as "defined" only if the runner would actually run it.
+# Sourced; reads a test file's source on stdin.
+
+# Names of shell tests: lines exactly like `test_name() {` (no space before the parens).
+shell_test_names() {
+  sed -n 's/^\(test_[a-z0-9_]*\)()[[:space:]]*{.*/\1/p'
+}
+
+# Names of GdUnit4 tests: `func test_name(` at the start of a line.
+godot_test_names() {
+  sed -n 's/^func[[:space:]]\{1,\}\(test_[A-Za-z0-9_]*\)[[:space:]]*(.*/\1/p'
+}

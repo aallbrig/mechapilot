@@ -1,0 +1,27 @@
+#!/bin/sh
+# Fail if build/test-results holds anything but the runners' own result files.
+# Test code runs before the runners write their XML; anything else in the
+# directory (or godot.xml with no Godot project) was planted, not reported.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+dir="${1:-build/test-results}"
+[ -d "${dir}" ] || exit 0
+allowed='shell.xml'
+if [ -f godot/project.godot ]; then allowed="${allowed} godot.xml"; fi
+
+status=0
+for path in "${dir}"/* "${dir}"/.[!.]*; do
+  [ -e "${path}" ] || continue
+  base="${path##*/}"
+  ok=no
+  for a in ${allowed}; do
+    if [ "${base}" = "${a}" ] && [ -f "${path}" ]; then ok=yes; fi
+  done
+  if [ "${ok}" = no ]; then
+    printf 'test-results-clean: unexpected %s\n' "${path}" >&2
+    status=1
+  fi
+done
+exit "${status}"

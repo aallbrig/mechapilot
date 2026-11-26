@@ -26,6 +26,8 @@
 set -eu
 LC_ALL=C
 export LC_ALL
+# shellcheck source=lib-tests
+. "$(dirname "$0")/lib-tests"
 
 issue="${1:?usage: verify-acceptance <issue-number> [junit-dir]}"
 junit_dir="${2:-build/test-results}"
@@ -52,15 +54,15 @@ if [ ! -s "${work}/criteria" ]; then
   exit 1
 fi
 
-# Flatten every JUnit testcase to: classname<TAB>name<TAB>pass|fail
+# Flatten every JUnit testcase to: runner-file<TAB>classname<TAB>name<TAB>pass|fail
 : >"${work}/cases"
 for runner_file in shell.xml godot.xml; do
   xml="${junit_dir}/${runner_file}"
   [ -f "${xml}" ] || continue
-  yq -p xml -o json '.' "${xml}" | jq -r '
+  yq -p xml -o json '.' "${xml}" | jq -r --arg runner "${runner_file}" '
     [.. | objects | .testcase? // empty | if type == "array" then .[] else . end]
     | .[]
-    | [(.["+@classname"] // ""), (.["+@name"] // ""),
+    | [$runner, (.["+@classname"] // ""), (.["+@name"] // ""),
        (if (has("failure") or has("error") or has("skipped")
             or ((.["+@status"] // "") | test("^(skipped|failed|failure|error|disabled)$"; "i"))) then "fail" else "pass" end)]
     | @tsv' >>"${work}/cases"
@@ -88,36 +90,54 @@ prove_test() {
     "" | *[!A-Za-z0-9_]*) return 0 ;;
     *) ;;
   esac
-  awk -F '\t' -v n="${name}" '$2 == n { print $1 "\t" $3 }' "${work}/cases" >"${work}/hits"
+  awk -F '\t' -v n="${name}" '$3 == n' "${work}/cases" >"${work}/hits"
   hits="$(wc -l <"${work}/hits" | tr -d ' ')"
   [ "${hits}" -eq 1 ] || return 0
-  classname="$(cut -f 1 "${work}/hits")"
-  verdict="$(cut -f 2 "${work}/hits")"
+  runner="$(cut -f 1 "${work}/hits")"
+  classname="$(cut -f 2 "${work}/hits")"
+  verdict="$(cut -f 4 "${work}/hits")"
   [ "${verdict}" = pass ] || return 0
-  # The classname is the test file; it must be one the runners discover.
   case "${classname}" in
-    tests/shell/test_* | godot/tests/*test_*.gd) ;;
-    *) return 0 ;;
-  esac
-  case "${classname}" in
-    *..*) return 0 ;;
+    *..* | *//* | *[!A-Za-z0-9_./-]*) return 0 ;;
     *) ;;
   esac
+  # Each results file only vouches for tests in its own runner's directory, and
+  # the classname file must define the test exactly as that runner discovers it.
+  source_of "${classname}" >"${work}/src"
+  case "${runner}" in
+    shell.xml)
+      case "${classname}" in
+        tests/shell/*/*) return 0 ;;
+        tests/shell/test_*) ;;
+        *) return 0 ;;
+      esac
+      shell_test_names <"${work}/src" >"${work}/defined"
+      ;;
+    godot.xml)
+      source_of godot/project.godot >"${work}/project"
+      [ -s "${work}/project" ] || return 0
+      case "${classname}" in
+        godot/tests/*test_*.gd) ;;
+        *) return 0 ;;
+      esac
+      godot_test_names <"${work}/src" >"${work}/defined"
+      ;;
+    *) return 0 ;;
+  esac
+  grep -qx "${name}" "${work}/defined" || return 0
   if [ -n "${suite}" ]; then
     file_base="${classname##*/}"
     [ "${suite}" = "${classname}" ] || [ "${suite}" = "${file_base}" ] || [ "${suite}" = "${file_base%.gd}" ] || return 0
   fi
-  # That file must define the test.
-  source_of "${classname}" >"${work}/src"
-  grep -qE "^(func[[:space:]]+)?${name}[[:space:]]*\\(" "${work}/src" || return 0
   result=pass
 }
 
-# Look up recorded evidence; sets result=pass if "<kind>\t<name>\tpass" exists.
+# Look up recorded evidence; result=pass only if "<kind>\t<name>" was recorded
+# and every record of it is a pass.
 recorded() {
   result=fail
   [ -f "${ACCEPTANCE_EVIDENCE}" ] || return 0
-  found="$(awk -F '\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print $3 }' "${ACCEPTANCE_EVIDENCE}" | tail -n 1)"
+  found="$(awk -F '\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { seen = 1; if ($3 != "pass") bad = 1 } END { print (seen && !bad) ? "pass" : "fail" }' "${ACCEPTANCE_EVIDENCE}")"
   [ "${found}" = pass ] && result=pass
   return 0
 }
@@ -138,7 +158,10 @@ prove_task() {
     return 0
   fi
   rc=0
-  task "$1" >"${work}/out" 2>&1 || rc=$?
+  (
+    unset ACCEPTANCE_RECORD
+    task "$1"
+  ) >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
   record task "$1"
 }
@@ -158,7 +181,10 @@ prove_check() {
   tracked="$(git ls-files -- "${script}")"
   [ "${tracked}" = "${script}" ] || return 0
   rc=0
-  "${script}" >"${work}/out" 2>&1 || rc=$?
+  (
+    unset ACCEPTANCE_RECORD
+    "${script}"
+  ) >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
   record check "$1"
 }

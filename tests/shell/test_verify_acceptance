@@ -134,3 +134,29 @@ test_evidence_mode_fails_on_missing_evidence() {
   f="$(write_body "## Acceptance criteria" "- [ ] y ${bt}task:lint:yaml${bt}")"
   ! ACCEPTANCE_EVIDENCE="$(mktemp)" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "$(mktemp -d)"
 }
+
+test_rejects_definition_runner_would_not_discover() {
+  # `name ()` with a space is not discovered by scripts/test-shell.
+  t="tests/shell/test_zz_tmp_forged_$$"
+  printf '#!/bin/sh\ntest_mech_can_fly () {\n  false\n}\n' >"${t}"
+  d="$(junit_with "<testsuite><testcase classname=\"${t}\" name=\"test_mech_can_fly\"/></testsuite>")"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}test:test_mech_can_fly${bt}")"
+  rc=0
+  VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}" || rc=$?
+  rm -f "${t}"
+  [ "${rc}" -ne 0 ]
+}
+
+test_rejects_shell_tests_vouched_by_godot_results() {
+  d="$(mktemp -d)"
+  printf '<testsuite><testcase classname="tests/shell/test_checks" name="test_large_files_allows_small_file"/></testsuite>\n' >"${d}/godot.xml"
+  f="$(write_body "## Acceptance criteria" "- [x] small ${bt}test:test_large_files_allows_small_file${bt}")"
+  ! VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "${d}"
+}
+
+test_recorded_evidence_with_any_failure_fails() {
+  e="$(mktemp)"
+  printf 'check\tforbidden-paths\tfail\ncheck\tforbidden-paths\tpass\n' >"${e}"
+  f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}check:forbidden-paths${bt}")"
+  ! ACCEPTANCE_EVIDENCE="${e}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
+}
