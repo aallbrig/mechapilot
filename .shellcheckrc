@@ -1,0 +1,5 @@
+# Maximum strictness: every optional check, POSIX sh only.
+shell=sh
+enable=all
+external-sources=true
+source-path=SCRIPTDIR

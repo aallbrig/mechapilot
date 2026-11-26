@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only everywhere: the gate never writes to the repo. Merging is decided by
+# scripts/merge-gate, which re-checks everything with main's copies of the scripts.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          cache: true
+
+      - name: task ci
+        run: task ci
+
+      - name: Verification guard (informational; the merge gate recomputes it)
+        if: github.event_name == 'pull_request'
+        run: |
+          rc=0
+          scripts/checks/verification-guard || rc=$?
+          [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ]
+
+      - name: Acceptance evidence
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          repo_url="https://github.com/${GITHUB_REPOSITORY}/issues/"
+          gh pr view "${PR_NUMBER}" --json closingIssuesReferences >"${RUNNER_TEMP}/links.json"
+          foreign="$(jq -r --arg url "${repo_url}" '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${RUNNER_TEMP}/links.json")"
+          if [ "${foreign}" -ne 0 ]; then echo "::error::Linked issues must be in this repository."; exit 1; fi
+          issues="$(jq -r '.closingIssuesReferences[].number' "${RUNNER_TEMP}/links.json")"
+          if [ -z "${issues}" ]; then
+            case "${PR_AUTHOR}" in
+              "dependabot[bot]") echo "Dependabot PR: no linked issue required."; exit 0 ;;
+              *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
+            esac
+          fi
+          # Record outside build/ so nothing the tests write can pre-seed it.
+          record="${RUNNER_TEMP}/acceptance.tsv"
+          : >"${record}"
+          rc=0
+          for n in ${issues}; do ACCEPTANCE_RECORD="${record}" scripts/verify-acceptance "${n}" || rc=1; done
+          cp "${record}" build/test-results/acceptance.tsv
+          exit "${rc}"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: build/test-results/
+          if-no-files-found: error

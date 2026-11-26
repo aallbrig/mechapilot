@@ -1,0 +1,30 @@
+#!/bin/sh
+# Fail if generated output, editor caches or likely secret files are committed.
+# Args: none (all tracked), --staged, or paths.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+check_paths "$@" >"${list}"
+
+status=0
+while IFS= read -r f; do
+  base="${f##*/}"
+  case "/${f}" in
+    */.godot/* | /build/* | */.import/* | */node_modules/* | /.agent-loop/* | */.idea/* | */.DS_Store) bad=1 ;;
+    *) bad=0 ;;
+  esac
+  case "${base}" in
+    .env | .env.* | *.pem | *.key | id_rsa* | id_ed25519* | *.p12 | *.pfx | credentials | credentials.json) bad=1 ;;
+    *) ;;
+  esac
+  if [ "${bad}" -eq 1 ]; then
+    printf 'forbidden-paths: %s must not be committed\n' "${f}" >&2
+    status=1
+  fi
+done <"${list}"
+exit "${status}"

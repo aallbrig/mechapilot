@@ -1,0 +1,53 @@
+#!/bin/sh
+# Tests for scripts/checks/* (run by scripts/test-shell).
+
+test_forbidden_paths_rejects_godot_cache() {
+  ! scripts/checks/forbidden-paths godot/.godot/imported/x.ctex
+}
+
+test_forbidden_paths_rejects_env_file() {
+  ! scripts/checks/forbidden-paths site/.env.production
+}
+
+test_forbidden_paths_allows_source() {
+  scripts/checks/forbidden-paths godot/project.godot scripts/test-shell
+}
+
+test_large_files_rejects_oversized_file() {
+  f="$(mktemp)"
+  printf '0123456789' >"${f}"
+  ! LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${f}"
+}
+
+test_large_files_allows_small_file() {
+  f="$(mktemp)"
+  printf '0123' >"${f}"
+  LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${f}"
+}
+
+test_list_files_finds_posix_scripts() {
+  scripts/list-files sh | grep -qx 'scripts/verify-acceptance'
+}
+
+test_safe_filenames_rejects_quotes_and_spaces() {
+  ! scripts/checks/safe-filenames "it's.txt" && ! scripts/checks/safe-filenames "a b.txt"
+}
+
+test_forbidden_paths_rejects_non_ascii_names() {
+  ! scripts/checks/forbidden-paths "build/café.txt" && ! scripts/checks/forbidden-paths "naïve.pem"
+}
+
+test_large_files_handles_spaces_in_names() {
+  d="$(mktemp -d)"
+  printf '0123456789' >"${d}/big file.bin"
+  ! LARGE_FILE_LIMIT_BYTES=5 scripts/checks/large-files "${d}/big file.bin"
+}
+
+test_test_results_clean_rejects_planted_files() {
+  d="$(mktemp -d)"
+  : >"${d}/shell.xml"
+  scripts/checks/test-results-clean "${d}" || return 1
+  : >"${d}/godot.xml"
+  if [ -f godot/project.godot ]; then rm "${d}/godot.xml"; : >"${d}/acceptance.tsv"; fi
+  ! scripts/checks/test-results-clean "${d}"
+}

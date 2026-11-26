@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fail if any file exceeds the size limit. Args: none (all tracked), --staged, or paths.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-paths
+. "$(dirname "$0")/../lib-paths"
+
+limit_bytes="${LARGE_FILE_LIMIT_BYTES:-5242880}"
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+check_paths "$@" >"${list}"
+
+status=0
+while IFS= read -r f; do
+  [ -f "${f}" ] || continue
+  size="$(wc -c <"${f}" | tr -d ' ')"
+  if [ "${size}" -gt "${limit_bytes}" ]; then
+    printf 'large-files: %s is %s bytes (limit %s)\n' "${f}" "${size}" "${limit_bytes}" >&2
+    status=1
+  fi
+done <"${list}"
+exit "${status}"

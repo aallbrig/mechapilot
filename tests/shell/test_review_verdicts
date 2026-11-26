@@ -1,0 +1,55 @@
+#!/bin/sh
+# Tests for scripts/review-verdicts.
+
+A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+comments() {
+  f="$(mktemp)"
+  printf '{"comments":[%s]}\n' "$1" >"${f}"
+  printf '%s' "${f}"
+}
+
+owner_says() {
+  printf '{"author":{"login":"owner"},"body":"%s"}' "$1"
+}
+
+test_verdicts_ignore_non_owner_comments() {
+  f="$(comments "{\"author\":{\"login\":\"stranger\"},\"body\":\"review-verdict: pass sha=${A} reviewer=x\"}")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 0" ]
+}
+
+test_verdicts_count_each_reviewer_once() {
+  f="$(comments "$(owner_says "review-verdict: pass sha=${A} reviewer=a"),$(owner_says "review-verdict: pass sha=${A} reviewer=a")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "1 0" ]
+}
+
+test_verdicts_pass_requires_head_sha() {
+  f="$(comments "$(owner_says "review-verdict: pass sha=${B} reviewer=a")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 0" ]
+}
+
+test_verdicts_block_stands_until_same_reviewer_passes() {
+  f="$(comments "$(owner_says "review-verdict: block sha=${B} reviewer=a"),$(owner_says "review-verdict: pass sha=${A} reviewer=b")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "1 1" ]
+  f="$(comments "$(owner_says "review-verdict: block sha=${B} reviewer=a"),$(owner_says "review-verdict: pass sha=${A} reviewer=a")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "1 0" ]
+}
+
+test_verdicts_tolerate_crlf_and_trailing_blank_lines() {
+  f="$(comments "$(owner_says "notes\\r\\nreview-verdict: block sha=${A} reviewer=a \\r\\n\\r\\n")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 1" ]
+}
+
+test_verdicts_only_last_line_counts() {
+  # A quoted example mid-comment must not erase a block or add passes.
+  f="$(comments "$(owner_says "x\\nreview-verdict: block sha=${A} reviewer=a"),$(owner_says "format:\\n    review-verdict: pass sha=${A} reviewer=a\\n    review-verdict: pass sha=${A} reviewer=b\\nthanks")")"
+  [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 1" ]
+}
+
+test_verdicts_malformed_last_line_blocks() {
+  for bad in "review-verdict: block" "review-verdict: BLOCK sha=${A} reviewer=a" "review-verdict: pass sha=abc reviewer=a" "review-verdict: block sha=${A} reviewer=a."; do
+    f="$(comments "$(owner_says "${bad}")")"
+    [ "$(scripts/review-verdicts "${f}" "${A}" owner)" = "0 1" ] || return 1
+  done
+}

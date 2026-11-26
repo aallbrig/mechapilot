@@ -1,0 +1,37 @@
+#!/bin/sh
+# Count adversarial review verdicts on a PR (see AGENTS.md "Delivery").
+#
+# Usage: scripts/review-verdicts <pr.json> <head-sha> <owner-login>
+#   <pr.json>: output of `gh pr view --json comments`
+# Prints "<passes> <blocks>".
+#
+# Only comments authored by <owner-login> count, and only their last non-empty
+# line, which must be the verdict:
+#   review-verdict: pass|block sha=<40-hex sha> reviewer=<tag>
+# Each reviewer's latest verdict counts. A block stands (whatever its sha) until
+# that reviewer passes the current head; a pass counts only for <head-sha>.
+# A last line that starts like a verdict but is malformed counts as a block that
+# never clears (fail closed): fix it by editing or deleting that comment.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+json="${1:?usage: review-verdicts <pr.json> <head-sha> <owner-login>}"
+head_sha="${2:?head sha required}"
+owner="${3:?owner login required}"
+
+latest="$(mktemp)"
+trap 'rm -f "${latest}"' EXIT
+
+jq -r --arg owner "${owner}" '
+  [.comments | to_entries[] | select(.value.author.login == $owner)
+   | {i: .key, line: (.value.body | gsub("\r"; "") | split("\n")
+                      | map(select(test("^[[:space:]]*$") | not)) | last // "")}
+   | select(.line | test("^[[:space:]]*review-verdict:"; "i"))
+   | . as $c | ($c.line | capture("^[[:space:]]*review-verdict:[[:space:]]*(?<v>pass|block)[[:space:]]+sha=(?<s>[0-9a-f]{40})[[:space:]]+reviewer=(?<r>[a-z0-9][a-z0-9-]*)[[:space:]]*$")
+      // {v: "block", s: "malformed", r: "malformed-\($c.i)"})]
+  | group_by(.r) | map(last) | .[] | [.r, .v, .s] | @tsv' "${json}" >"${latest}"
+
+passes="$(awk -F '\t' -v sha="${head_sha}" '$2 == "pass" && $3 == sha' "${latest}" | wc -l | tr -d ' ')"
+blocks="$(awk -F '\t' '$2 == "block"' "${latest}" | wc -l | tr -d ' ')"
+printf '%s %s\n' "${passes}" "${blocks}"

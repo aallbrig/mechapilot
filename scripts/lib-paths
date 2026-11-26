@@ -1,0 +1,16 @@
+#!/bin/sh
+# Sourced helper: print the paths a check should inspect, one per line, unquoted.
+#   (no args)   every tracked file
+#   --staged    files added/copied/modified/renamed in the index
+#   <paths...>  exactly those paths
+# Paths git would still quote (control characters, quotes, backslashes) are
+# printed as-is with their quotes, so safe-filenames rejects them.
+check_paths() {
+  if [ "$#" -eq 0 ]; then
+    git -c core.quotePath=false ls-files
+  elif [ "$1" = "--staged" ]; then
+    git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR
+  else
+    for p in "$@"; do printf '%s\n' "${p}"; done
+  fi
+}

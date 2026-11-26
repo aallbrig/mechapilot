@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+printf 'pre-push: task ci:fast\n'
+task ci:fast

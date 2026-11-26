@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+printf 'pre-merge-commit: task ci\n'
+task ci
