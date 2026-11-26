@@ -224,3 +224,45 @@ EOF
     fi
   done
 }
+
+test_infra_no_suppressions_rejects_committed_tfvars() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in infra/stacks/a/terraform.tfvars infra/stacks/a/prod.auto.tfvars \
+    infra/stacks/a/x.auto.tfvars.json elsewhere/dev.tfvars; do
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf 'lock_down = false\n' >"${r}/${f}"
+    git -C "${r}" add -A
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+  printf 'lock_down = "<placeholder>"\n' >"${r}/infra/stacks/a/prod.auto.tfvars.example"
+  git -C "${r}" add -A
+  rc="$(check_in "${r}")"
+  [ "${rc}" = 0 ]
+}
+
+test_infra_no_suppressions_rejects_cli_config_state_and_working_data() {
+  r="$(module_repo)"
+  stack_with "${r}" 'source = "../../modules/ok"'
+  for f in .terraformrc infra/terraform.rc .tofurc infra/stacks/a/terraform.tfstate \
+    infra/stacks/a/terraform.tfstate.backup infra/stacks/a/current.tfplan \
+    infra/stacks/a/.terraform/terraform.tfstate; do
+    mkdir -p "$(dirname "${r}/${f}")"
+    printf 'provider_installation {\n  dev_overrides {}\n}\n' >"${r}/${f}"
+    git -C "${r}" add -f -A
+    git -C "${r}" add -f "${f}"
+    rc="$(check_in "${r}")"
+    git -C "${r}" rm --quiet --cached "${f}"
+    rm -f "${r}/${f}"
+    if [ "${rc}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+}

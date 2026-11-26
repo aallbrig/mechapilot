@@ -26,15 +26,22 @@ root="infra"
 cmd="${1:?usage: scripts/infra validate|lint|scan|modules|plan|apply [stack]}"
 
 # The tools take settings from the environment (TRIVY_SKIP_FILES,
-# TRIVY_MISCONFIG_SCANNERS, TFLINT_*, TF_CLI_ARGS_*, ...), which a mise [env]
-# block or CI could set silently. Clear them all: only the committed configs
-# and the flags below decide what is checked.
-for v in $(env | sed -n -e 's/^\(TRIVY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TFLINT_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TF_CLI_ARGS[A-Za-z0-9_]*\)=.*/\1/p'); do
+# TRIVY_MISCONFIG_SCANNERS, TFLINT_*, TF_CLI_ARGS_*, TF_VAR_*, ...), which a
+# mise [env] block or CI could set silently. Clear them all: only the
+# committed configs, the tfvars files on disk and the flags below decide what
+# is checked and applied.
+for v in $(env | sed -n -e 's/^\(TRIVY_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TFLINT_[A-Za-z0-9_]*\)=.*/\1/p' \
+  -e 's/^\(TF_CLI_ARGS[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(TF_VAR_[A-Za-z0-9_]*\)=.*/\1/p' \
+  -e 's/^\(TOFU_[A-Za-z0-9_]*\)=.*/\1/p'); do
   unset "${v}"
 done
-for v in TF_CLI_CONFIG_FILE TF_PLUGIN_CACHE_DIR TF_DATA_DIR TF_WORKSPACE; do
+for v in TF_PLUGIN_CACHE_DIR TF_DATA_DIR TF_WORKSPACE TERRAFORM_CONFIG; do
   unset "${v}"
 done
+# An empty CLI config: no ~/.terraformrc, ~/.tofurc or working-dir rc file, so
+# no provider dev_overrides, mirrors or plugin caches can swap what runs.
+TF_CLI_CONFIG_FILE=/dev/null
+export TF_CLI_CONFIG_FILE
 
 # Every directory under infra/ that holds configuration, sorted, one per line.
 tf_dirs() {
@@ -101,12 +108,14 @@ human_only() {
 }
 
 # Files OpenTofu loads that the scanners don't see as written: override files
-# are merged into other resources (trivy scans the unmerged base), and symlinks
-# are followed by tofu but not by trivy.
+# are merged into other resources (trivy scans the unmerged base), symlinks
+# are followed by tofu but not by trivy, and CLI config files can redirect
+# providers (dev_overrides).
 refuse_hidden_config() {
   hidden="$(find "${root}" -name .terraform -prune -o \( -type l -o -name 'override.tf' -o -name '*_override.tf' \
     -o -name 'override.tofu' -o -name '*_override.tofu' -o -name 'override.tf.json' -o -name '*_override.tf.json' \
-    -o -name 'override.tofu.json' -o -name '*_override.tofu.json' \) -print)"
+    -o -name 'override.tofu.json' -o -name '*_override.tofu.json' \
+    -o -name '.terraformrc' -o -name 'terraform.rc' -o -name '.tofurc' -o -name 'tofu.rc' \) -print)"
   if [ -n "${hidden}" ]; then
     printf 'infra: override files and symlinks are not allowed under %s/:\n%s\n' "${root}" "${hidden}" >&2
     exit 1
@@ -156,11 +165,19 @@ case "${cmd}" in
       tofu -chdir="${d}" get -no-color >/dev/null
       check_modules "${d}"
     done
+    # OpenTofu auto-loads terraform.tfvars and *.auto.tfvars, trivy does not.
+    # Committed tfvars are rejected (scripts/checks/infra-no-suppressions);
+    # local ones (a human's real values) are passed in, so the scan judges
+    # what an apply would use.
+    set --
+    for f in $(find "${root}" -name .terraform -prune -o -type f \( -name '*.tfvars' -o -name '*.tfvars.json' \) -print | sort); do
+      set -- "$@" --tf-vars "${f}"
+    done
     trivy config --config "${root}/trivy.yaml" \
       --quiet --disable-telemetry --skip-check-update \
       --ignorefile "" \
       --skip-dirs '**/.terraform' \
-      --severity HIGH,CRITICAL --exit-code 1 "${root}"
+      --severity HIGH,CRITICAL --exit-code 1 "$@" "${root}"
     ;;
   plan | apply)
     human_only "${2:-}"

@@ -1,24 +1,32 @@
 #!/bin/sh
 # Tests for infra/modules/github-deploy-trust: the deploy role's trust policy.
-# The module is rendered offline with `tofu console` (it has no provider, and
-# console only evaluates expressions), then candidate OIDC tokens
+# The module's policy_json output is rendered offline with `tofu console` (it
+# has no provider, and console only evaluates expressions), then candidate OIDC tokens
 # are judged the way IAM would: aud by StringEquals, sub by StringLike and
 # StringNotLike, where `*` (any run of characters, ":" included) and `?` (one
 # character) are the only wildcards. The numeric IDs below are fakes.
 # Subjects use the repo's customization: include_claim_keys repo, ref,
 # environment, with immutable (owner@id/repo@id) subjects.
 
+# Renders the module's policy_json output (exactly what the prod role's
+# assume_role_policy uses) by calling the module from a scratch root config.
 render_trust() {
   d="$(mktemp -d)"
-  cp infra/modules/github-deploy-trust/*.tf "${d}/"
+  here="$(pwd)"
+  cat >"${d}/main.tf" <<EOF
+module "trust" {
+  source               = "${here}/infra/modules/github-deploy-trust"
+  oidc_provider_arn    = "arn:aws:iam::provider/token.actions.githubusercontent.com"
+  github_owner         = "octo"
+  github_owner_id      = "11"
+  github_repository    = "game"
+  github_repository_id = "22"
+}
+EOF
   rc=0
   # tofu console only evaluates expressions: no plan, no apply, no state.
   if tofu -chdir="${d}" init -backend=false -input=false -no-color >/dev/null; then
-    printf 'jsonencode(local.policy)\n' |
-      tofu -chdir="${d}" console -no-color \
-        -var oidc_provider_arn=arn:aws:iam::provider/token.actions.githubusercontent.com \
-        -var github_owner=octo -var github_owner_id=11 \
-        -var github_repository=game -var github_repository_id=22 >"${d}/out" || rc=$?
+    printf 'module.trust.policy_json\n' | tofu -chdir="${d}" console -no-color >"${d}/out" || rc=$?
   else
     rc=1
   fi

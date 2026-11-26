@@ -14,6 +14,9 @@
 #      forms), anywhere in the repo.
 #   4. Module blocks under infra/ whose source is not a local path inside
 #      infra/ (a module elsewhere would escape checks 1 and 2).
+#   5. Anywhere: committed *.tfvars / *.tfvars.json (only .example copies),
+#      CLI config files (.terraformrc, terraform.rc, .tofurc, tofu.rc), state,
+#      plan files and .terraform/ contents.
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -94,6 +97,21 @@ while IFS= read -r f; do
       fail "${f}" "override files are not allowed (edit the block itself)"
       ;;
     *.tf.json | *.tofu.json) fail "${f}" "JSON-syntax configuration is not allowed (write HCL)" ;;
+    *) ;;
+  esac
+
+  # 5. Values and settings that change effective config without changing the
+  #    scanned source: variable files (OpenTofu auto-loads terraform.tfvars and
+  #    *.auto.tfvars; trivy does not), CLI config files (provider
+  #    dev_overrides), state and plan files, and .terraform/ contents.
+  case "${f}" in
+    .terraform/* | */.terraform/*) fail "${f}" "OpenTofu working data must not be committed" ;;
+    *) ;;
+  esac
+  case "${lower}" in
+    *.tfvars | *.tfvars.json) fail "${f}" "variable files must not be committed (commit a .example)" ;;
+    .terraformrc | terraform.rc | .tofurc | tofu.rc) fail "${f}" "CLI config files must not be committed" ;;
+    *.tfstate | *.tfstate.* | *.tfplan) fail "${f}" "state and plan files must not be committed" ;;
     *) ;;
   esac
 

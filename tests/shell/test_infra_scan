@@ -69,3 +69,44 @@ test_infra_scan_ignores_trivy_severity_and_exit_code() {
   rc="$(scan_rc "${d}" TRIVY_SEVERITY=UNKNOWN TRIVY_EXIT_CODE=0 TRIVY_CONFIG=/dev/null)"
   [ "${rc}" = 1 ]
 }
+
+# A secure default that a tfvars value flips: OpenTofu auto-loads
+# terraform.tfvars, so the scan must judge it too.
+tfvars_tree() {
+  d="$(planted_tree)"
+  cat >"${d}/infra/stacks/planted/main.tf" <<'EOF'
+variable "lock_down" {
+  description = "Keep SSH closed to the internet."
+  type        = bool
+  default     = true
+}
+
+resource "aws_security_group_rule" "planted" {
+  description       = "planted finding"
+  type              = "ingress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = var.lock_down ? ["10.0.0.0/8"] : ["0.0.0.0/0"]
+  security_group_id = "sg-planted"
+}
+EOF
+  printf '%s' "${d}"
+}
+
+test_infra_scan_passes_secure_default_without_tfvars() {
+  d="$(tfvars_tree)"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = "no-finding" ]
+}
+
+test_infra_scan_judges_local_tfvars() {
+  d="$(tfvars_tree)"
+  printf 'lock_down = false\n' >"${d}/infra/stacks/planted/terraform.tfvars"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = 1 ] || return 1
+  d="$(tfvars_tree)"
+  printf 'lock_down = false\n' >"${d}/infra/stacks/planted/prod.auto.tfvars"
+  rc="$(scan_rc "${d}")"
+  [ "${rc}" = 1 ]
+}

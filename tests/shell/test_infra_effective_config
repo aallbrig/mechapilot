@@ -1,0 +1,50 @@
+#!/bin/sh
+# Tests that scripts/infra runs OpenTofu only on what is committed plus local
+# tfvars: no environment variable or CLI config file can change values,
+# arguments or providers behind the checks' backs. A fake `tofu` records the
+# environment it was started with; nothing here reaches the real tool or AWS.
+
+effective_tree() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts" "${d}/infra/stacks/a" "${d}/fake" "${d}/home"
+  cp "${root}/scripts/infra" "${d}/scripts/infra"
+  printf 'variable "lock_down" {\n  type    = bool\n  default = true\n}\n' >"${d}/infra/stacks/a/main.tf"
+  printf '#!/bin/sh\nenv >"%s/tofu.env"\nexit 0\n' "${d}" >"${d}/fake/tofu"
+  chmod +x "${d}/fake/tofu"
+  # A home-directory CLI config that would redirect the AWS provider.
+  printf 'provider_installation {\n  dev_overrides {\n    "hashicorp/aws" = "/tmp/evil"\n  }\n  direct {}\n}\n' >"${d}/home/.terraformrc"
+  cp "${d}/home/.terraformrc" "${d}/home/.tofurc"
+  printf '%s' "${d}"
+}
+
+test_infra_clears_variable_and_cli_overrides() {
+  d="$(effective_tree)"
+  rc=0
+  (cd "${d}" && env PATH="${d}/fake:${PATH}" HOME="${d}/home" \
+    TF_VAR_lock_down=false TF_CLI_CONFIG_FILE="${d}/home/.terraformrc" TOFU_CLI_CONFIG_FILE="${d}/home/.tofurc" \
+    TERRAFORM_CONFIG="${d}/home/.terraformrc" TF_CLI_ARGS_validate=-var-file=/tmp/evil.tfvars \
+    TF_CLI_ARGS='-var=lock_down=false' scripts/infra validate >/dev/null 2>&1) || rc=$?
+  seen="$(cat "${d}/tofu.env" 2>/dev/null || true)"
+  rm -rf "${d}"
+  [ "${rc}" = 0 ] || return 1
+  [ -n "${seen}" ] || return 1
+  printf '%s\n' "${seen}" | grep -qx 'TF_CLI_CONFIG_FILE=/dev/null' || return 1
+  ! printf '%s\n' "${seen}" | grep -qE '^(TF_VAR_|TOFU_|TERRAFORM_CONFIG=|TF_CLI_ARGS)'
+}
+
+test_infra_refuses_cli_config_files_under_infra() {
+  for f in .terraformrc terraform.rc .tofurc tofu.rc; do
+    d="$(effective_tree)"
+    cp "${d}/home/.terraformrc" "${d}/infra/stacks/a/${f}"
+    rc_validate=0
+    rc_scan=0
+    (cd "${d}" && env PATH="${d}/fake:${PATH}" scripts/infra validate >/dev/null 2>&1) || rc_validate=$?
+    (cd "${d}" && env PATH="${d}/fake:${PATH}" scripts/infra scan >/dev/null 2>&1) || rc_scan=$?
+    rm -rf "${d}"
+    if [ "${rc_validate}" != 1 ] || [ "${rc_scan}" != 1 ]; then
+      printf 'accepted: %s\n' "${f}"
+      return 1
+    fi
+  done
+}
