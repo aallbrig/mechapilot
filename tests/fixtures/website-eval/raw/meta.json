@@ -1,0 +1,17 @@
+{
+  "target": {
+    "input": "https://mechafighter.com/",
+    "url": "http://mechafighter.com/",
+    "final_url": "https://mechafighter.com/",
+    "kind": "production",
+    "http_status": 200,
+    "measured_at": "2026-11-26T12:00:00Z"
+  },
+  "tools": {
+    "chrome": "158.0.8127.88",
+    "node": "24.22.3",
+    "html_validate": "11.21.1",
+    "lychee": "0.24.2",
+    "curl": "8.5.0"
+  }
+}

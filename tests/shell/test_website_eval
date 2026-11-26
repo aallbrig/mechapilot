@@ -1,0 +1,307 @@
+#!/bin/sh
+# Tests for scripts/website-eval/* (run by scripts/test-shell). Nothing leaves
+# the machine: scoring reads canned tool outputs (tests/fixtures/website-eval/raw,
+# a passing Production run), and the one end-to-end run measures the fixture
+# site served on 127.0.0.1 with the pinned Chrome, Lighthouse, html-validate,
+# lychee and curl.
+
+fixture="tests/fixtures/website-eval/raw"
+schema="schemas/website-eval.schema.json"
+now="2026-11-26T12:00:00Z"
+
+# Copy the passing raw fixture into a temp dir; print its path.
+raw_copy() {
+  d="$(mktemp -d)"
+  cp "${fixture}"/* "${d}/" || return 1
+  printf '%s' "${d}"
+}
+
+# Apply a jq filter to one JSON file of a raw dir, in place.
+edit_json() {
+  jq "$3" "$1/$2" >"$1/$2.new" || return 1
+  mv "$1/$2.new" "$1/$2"
+}
+
+# Replace the final response's headers with the given lines (CRLF, like curl -D),
+# after a redirect whose headers must be ignored.
+set_headers() {
+  d="$1"
+  shift
+  {
+    printf 'HTTP/1.1 301 Moved Permanently\r\nstrict-transport-security: max-age=63072000\r\nLocation: https://mechafighter.com/\r\n\r\n'
+    printf 'HTTP/2 200\r\n'
+    for line in "$@"; do printf '%s\r\n' "${line}"; done
+    printf '\r\n'
+  } >"${d}/headers.txt"
+}
+
+# Print the verdict of one check in the report scored from raw dir $1.
+verdict_of() {
+  scripts/website-eval/score --now "${now}" "$1" |
+    jq -er --arg id "$2" '[.dimensions[].checks[] | select(.id == $id)] | if length == 1 then .[0].verdict else error("expected one check \($id)") end'
+}
+
+expect_verdict() {
+  got="$(verdict_of "$1" "$2")" || return 1
+  [ "${got}" = "$3" ] && return 0
+  printf '%s: expected %s, got %s (%s)\n' "$2" "$3" "${got}" "${4:-}" >&2
+  return 1
+}
+
+# expect_values <file> <jq path> <check> [<value> <verdict>]...
+# Sets the path to each value in a fresh copy and expects the verdict.
+expect_values() {
+  file="$1"
+  path="$2"
+  check="$3"
+  shift 3
+  while [ "$#" -ge 2 ]; do
+    d="$(raw_copy)" || return 1
+    edit_json "${d}" "${file}" "${path} = $1" || return 1
+    expect_verdict "${d}" "${check}" "$2" "${path} = $1" || return 1
+    rm -rf "${d}"
+    shift 2
+  done
+}
+
+# expect_headers <check> <verdict> [<header line>]...
+expect_headers() {
+  check="$1"
+  want="$2"
+  shift 2
+  d="$(raw_copy)" || return 1
+  set_headers "${d}" "$@"
+  expect_verdict "${d}" "${check}" "${want}" "headers: $*" || return 1
+  rm -rf "${d}"
+}
+
+# expect_tls_until <valid_to> <verdict>  (now is ${now})
+expect_tls_until() {
+  expect_values tls.json .valid_to tls.days_remaining "\"$1\"" "$2"
+}
+
+# html-validate JSON for one page with $2 messages of severity $1 (2 error, 1 warning).
+html_messages() {
+  jq -n --argjson sev "$1" --argjson n "$2" '[{filePath: "page.html", messages: [range($n) | {ruleId: "r", severity: $sev, message: "m", line: 1}]}]'
+}
+
+# A full measurement of the fixture site, as a human would run it on a local build.
+test_website_eval_report_matches_schema() {
+  check-jsonschema --check-metaschema "${schema}" || return 1
+  out="$(mktemp -d)"
+  report="$(scripts/website-eval/collect --out "${out}" tests/fixtures/website-eval/site)" || return 1
+  check-jsonschema --schemafile "${schema}" "${report}" || return 1
+  # It measured the served fixture, all of it, with the pinned tools.
+  jq -e '.target.kind == "local" and (.target.url | test("^http://127[.]0[.]0[.]1:[0-9]+/$")) and .target.http_status == 200
+    and .tools.chrome == "158.0.8127.88" and (.tools.lighthouse | length > 0) and (.tools.axe_core | length > 0)
+    and ([.dimensions.lighthouse.checks[].id] | index("lighthouse.accessibility") and index("lighthouse.performance")
+         and index("lighthouse.best-practices") and index("lighthouse.seo"))
+    and .dimensions.links.checks[2].value >= 2 and .dimensions.links.verdict == "pass"
+    and .dimensions.html.verdict == "pass" and .dimensions.accessibility.verdict == "pass"
+    and .dimensions.security_headers.verdict == "not_applicable" and .dimensions.tls.verdict == "not_applicable"
+    and .dimensions.weight.checks[1].value >= 1' "${report}" >/dev/null || {
+    jq '.target, .tools, [.dimensions | to_entries[] | {(.key): .value.verdict}]' "${report}"
+    return 1
+  }
+  # The local server is gone once collect returns.
+  server="$(cat "${report%.json}/server-url.txt")" || return 1
+  if curl -sS --max-time 5 -o /dev/null "${server}" 2>/dev/null; then
+    printf 'the local server still answers at %s\n' "${server}"
+    return 1
+  fi
+  # The scored fixtures match the schema too: one passing remote run, and one
+  # with failures, warnings, text values and ranked fixes.
+  d="$(raw_copy)" || return 1
+  scripts/website-eval/score --now "${now}" "${d}" >"${out}/pass.json" || return 1
+  check-jsonschema --schemafile "${schema}" "${out}/pass.json" || return 1
+  set_headers "${d}" "content-security-policy: default-src 'self' 'unsafe-inline'" "referrer-policy: unsafe-url"
+  edit_json "${d}" lychee.json '.errors = 1 | .error_map = {"https://mechafighter.com/": [{"url": "https://mechafighter.com/gone", "status": {"text": "404 Not Found", "code": 404}}]}' || return 1
+  scripts/website-eval/score --now "${now}" "${d}" >"${out}/fail.json" || return 1
+  check-jsonschema --schemafile "${schema}" "${out}/fail.json" || return 1
+  jq -e '.verdict == "fail" and (.fixes | length > 0) and .fixes[0].rank == 1' "${out}/fail.json" >/dev/null || return 1
+  # The schema is strict: an unknown verdict or an extra key is rejected.
+  jq '.verdict = "ok"' "${out}/pass.json" >"${out}/bad-verdict.json" || return 1
+  jq '.dimensions.tls.extra = 1' "${out}/pass.json" >"${out}/bad-key.json" || return 1
+  for bad in bad-verdict bad-key; do
+    if check-jsonschema --schemafile "${schema}" "${out}/${bad}.json" >/dev/null 2>&1; then
+      printf 'schema accepted %s\n' "${bad}"
+      return 1
+    fi
+  done
+  rm -rf "${out}" "${d}"
+}
+
+test_website_eval_scoring_thresholds() {
+  # The untouched fixture passes every check.
+  scripts/website-eval/score --now "${now}" "${fixture}" | jq -e '.verdict == "pass" and .counts.fail == 0 and .counts.warn == 0 and .fixes == []' >/dev/null || return 1
+
+  # Lighthouse categories: pass from 0.90, warn from 0.50, fail below.
+  expect_values lighthouse.json .categories.performance.score lighthouse.performance 0.9 pass 0.89 warn 0.5 warn 0.49 fail || return 1
+  expect_values lighthouse.json .categories.accessibility.score lighthouse.accessibility 1 pass 0.5 warn 0.49 fail null fail || return 1
+
+  # Core Web Vitals (lab): at the bound passes or warns, just past it does not.
+  expect_values lighthouse.json '.audits["largest-contentful-paint"].numericValue' core_web_vitals.largest_contentful_paint 2500 pass 2500.1 warn 4000 warn 4000.1 fail || return 1
+  expect_values lighthouse.json '.audits["cumulative-layout-shift"].numericValue' core_web_vitals.cumulative_layout_shift 0.1 pass 0.11 warn 0.25 warn 0.26 fail || return 1
+  expect_values lighthouse.json '.audits["total-blocking-time"].numericValue' core_web_vitals.total_blocking_time 200 pass 201 warn 600 warn 601 fail || return 1
+  expect_values lighthouse.json '.audits["first-contentful-paint"].numericValue' core_web_vitals.first_contentful_paint 1800 pass 1801 warn 3000 warn 3001 fail || return 1
+  expect_values lighthouse.json '.audits["speed-index"].numericValue' core_web_vitals.speed_index 3400 pass 3401 warn 5800 warn 5801 fail || return 1
+
+  # axe-core: one violated rule fails, and names the rule.
+  expect_values lighthouse.json '.audits["color-contrast"].score' accessibility.violations 1 pass 0 fail || return 1
+  d="$(raw_copy)" && edit_json "${d}" lighthouse.json '.audits["color-contrast"].score = 0' || return 1
+  scripts/website-eval/score --now "${now}" "${d}" | jq -e '.dimensions.accessibility.checks[0] | .value == 1 and (.evidence[0] | startswith("color-contrast:"))' >/dev/null || return 1
+  rm -rf "${d}"
+
+  # html-validate: any error fails; up to 10 warnings warn, 11 fail.
+  e1="$(html_messages 2 1)" && w1="$(html_messages 1 1)" && w10="$(html_messages 1 10)" || return 1
+  w11="$(html_messages 1 11)" && e3="$(html_messages 2 3)" || return 1
+  expect_values html-validate.json . html.errors "${e1}" fail "${w1}" pass || return 1
+  expect_values html-validate.json . html.warnings "${w1}" warn "${w10}" warn "${w11}" fail "${e3}" pass || return 1
+
+  # lychee: a broken link fails; up to 3 timeouts warn; nothing checked warns.
+  expect_values lychee.json .errors links.broken 0 pass 1 fail || return 1
+  expect_values lychee.json .timeouts links.timeouts 0 pass 1 warn 3 warn 4 fail || return 1
+  expect_values lychee.json .successful links.checked 1 pass 0 warn || return 1
+
+  # Page weight (transfer sizes from Lighthouse's resource summary).
+  total='(.audits["resource-summary"].details.items[] | select(.resourceType == "total")'
+  third='(.audits["resource-summary"].details.items[] | select(.resourceType == "third-party")'
+  expect_values lighthouse.json "${total} | .transferSize)" weight.total_bytes 512000 pass 512001 warn 1638400 warn 1638401 fail || return 1
+  expect_values lighthouse.json "${total} | .requestCount)" weight.requests 25 pass 26 warn 50 warn 51 fail || return 1
+  expect_values lighthouse.json "${third} | .requestCount)" weight.third_party_requests 0 pass 1 warn 3 warn 4 fail || return 1
+
+  # Security headers of the final response (the redirect's are ignored).
+  good_csp="content-security-policy: default-src 'none'; frame-ancestors 'none'"
+  expect_headers security_headers.strict_transport_security pass "strict-transport-security: max-age=31536000" || return 1
+  expect_headers security_headers.strict_transport_security warn "Strict-Transport-Security: max-age=31535999; includeSubDomains" || return 1
+  expect_headers security_headers.strict_transport_security fail "strict-transport-security: max-age=0" || return 1
+  expect_headers security_headers.strict_transport_security fail "${good_csp}" || return 1
+  expect_headers security_headers.content_security_policy pass "${good_csp}" || return 1
+  expect_headers security_headers.content_security_policy warn "content-security-policy: default-src 'self' 'unsafe-inline'" || return 1
+  expect_headers security_headers.content_security_policy warn "content-security-policy: script-src 'self' 'unsafe-eval'" || return 1
+  expect_headers security_headers.content_security_policy warn "content-security-policy: upgrade-insecure-requests" || return 1
+  expect_headers security_headers.content_security_policy fail "content-security-policy-report-only: default-src 'none'" || return 1
+  expect_headers security_headers.x_content_type_options pass "X-Content-Type-Options: NoSniff" || return 1
+  expect_headers security_headers.x_content_type_options fail "x-content-type-options: sniff" || return 1
+  expect_headers security_headers.x_content_type_options fail || return 1
+  expect_headers security_headers.frame_ancestors pass "${good_csp}" || return 1
+  expect_headers security_headers.frame_ancestors warn "content-security-policy: default-src 'none'" "x-frame-options: DENY" || return 1
+  expect_headers security_headers.frame_ancestors warn "X-Frame-Options: sameorigin" || return 1
+  expect_headers security_headers.frame_ancestors fail "x-frame-options: ALLOW-FROM https://example.com/" || return 1
+  expect_headers security_headers.referrer_policy pass "referrer-policy: no-referrer" || return 1
+  expect_headers security_headers.referrer_policy pass "referrer-policy: unsafe-url, strict-origin-when-cross-origin" || return 1
+  expect_headers security_headers.referrer_policy warn "referrer-policy: origin" || return 1
+  expect_headers security_headers.referrer_policy warn || return 1
+  expect_headers security_headers.referrer_policy fail "referrer-policy: no-referrer, unsafe-url" || return 1
+  expect_headers security_headers.referrer_policy fail "referrer-policy: no-referrer-when-downgrade" || return 1
+
+  # TLS: 30 days left passes, 14 warns, under 14 fails; no TLS or an untrusted chain fails.
+  expect_tls_until 2026-12-26T12:00:00.000Z pass || return 1
+  expect_tls_until 2026-12-25T12:00:00.000Z warn || return 1
+  expect_tls_until 2026-12-10T12:00:00.000Z warn || return 1
+  expect_tls_until 2026-12-10T11:59:59.000Z fail || return 1
+  expect_tls_until 2026-11-01T00:00:00.000Z fail || return 1
+  expect_values tls.json . tls.days_remaining null fail || return 1
+  expect_values tls.json .authorized tls.chain_trusted true pass false fail || return 1
+
+  # A local build: headers and TLS can't be judged, and never fail the report.
+  d="$(raw_copy)" || return 1
+  edit_json "${d}" meta.json '.target.kind = "local"' || return 1
+  printf 'null\n' >"${d}/tls.json"
+  set_headers "${d}" "content-type: text/html"
+  scripts/website-eval/score --now "${now}" "${d}" | jq -e '.verdict == "pass"
+    and .dimensions.security_headers.verdict == "not_applicable" and .dimensions.tls.verdict == "not_applicable"
+    and .counts.not_applicable == 7 and .counts.fail == 0' >/dev/null || return 1
+  rm -rf "${d}"
+
+  # Aggregation and ranking: a dimension is its worst check; fixes go fail
+  # before warn, then security_headers, tls, accessibility, links, html,
+  # core_web_vitals, lighthouse, weight.
+  d="$(raw_copy)" || return 1
+  edit_json "${d}" lighthouse.json "${total} | .requestCount) = 30 | .audits[\"speed-index\"].numericValue = 9000 | .categories.seo.score = 0.6" || return 1
+  edit_json "${d}" lychee.json '.errors = 2' || return 1
+  set_headers "${d}" "strict-transport-security: max-age=63072000" "${good_csp}" "referrer-policy: same-origin"
+  scripts/website-eval/score --now "${now}" "${d}" >"${d}/report.json" || return 1
+  jq -e '.verdict == "fail" and .dimensions.weight.verdict == "warn" and .dimensions.links.verdict == "fail"
+    and .dimensions.html.verdict == "pass"
+    and [.fixes[] | [.rank, .check, .verdict]] == [
+      [1, "security_headers.x_content_type_options", "fail"],
+      [2, "links.broken", "fail"],
+      [3, "core_web_vitals.speed_index", "fail"],
+      [4, "lighthouse.seo", "warn"],
+      [5, "weight.requests", "warn"]]' "${d}/report.json" >/dev/null || {
+    jq -c '[.fixes[] | [.rank, .check, .verdict]]' "${d}/report.json"
+    return 1
+  }
+  rm -rf "${d}"
+
+  # Every numeric check carries the threshold it was judged by.
+  scripts/website-eval/score --now "${now}" "${fixture}" | jq -e '
+    [.dimensions[].checks[] | select(.id == "core_web_vitals.largest_contentful_paint" or .id == "tls.days_remaining") | .threshold]
+    == [{direction: "lower", pass: 2500, warn: 4000}, {direction: "higher", pass: 30, warn: 14}]' >/dev/null
+}
+
+test_website_eval_score_fails_closed() {
+  # A Lighthouse runtime error or a missing tool output is never scored.
+  d="$(raw_copy)" || return 1
+  edit_json "${d}" lighthouse.json '.runtimeError = {code: "NO_FCP", message: "The page did not paint any content."}' || return 1
+  if scripts/website-eval/score --now "${now}" "${d}" >/dev/null 2>&1; then
+    printf 'scored a Lighthouse runtime error\n'
+    return 1
+  fi
+  rm -rf "${d}"
+  d="$(raw_copy)" || return 1
+  rm "${d}/lychee.json"
+  if scripts/website-eval/score --now "${now}" "${d}" >/dev/null 2>&1; then
+    printf 'scored a run with no link check\n'
+    return 1
+  fi
+  rm -rf "${d}"
+}
+
+test_website_eval_collect_refuses_remote_under_ci() {
+  # Under CI only the loopback interface is measured: a remote target is
+  # refused (exit 3) before any tool runs. A fake curl records any call.
+  fake="$(mktemp -d)"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/calls"\nexit 1\n' "${fake}" >"${fake}/curl"
+  cp "${fake}/curl" "${fake}/lychee"
+  cp "${fake}/curl" "${fake}/npx"
+  chmod +x "${fake}/curl" "${fake}/lychee" "${fake}/npx"
+  for url in https://mechafighter.com/ https://game.mechafighter.com/ "https://aallbrig.github.io/mechapilot/" http://example.com/ http://127.0.0.1.example.com/; do
+    rc=0
+    CI=true PATH="${fake}:${PATH}" scripts/website-eval/collect --out "${fake}/out" "${url}" 2>"${fake}/err" || rc=$?
+    if [ "${rc}" -ne 3 ] || ! grep -q 'refusing to measure' "${fake}/err"; then
+      printf '%s: expected a refusal (exit 3), got %s:\n' "${url}" "${rc}"
+      cat "${fake}/err"
+      return 1
+    fi
+  done
+  [ ! -e "${fake}/calls" ] || {
+    printf 'a tool ran:\n'
+    cat "${fake}/calls"
+    return 1
+  }
+  [ ! -e "${fake}/out" ] || {
+    printf 'collect wrote output before refusing\n'
+    return 1
+  }
+  rm -rf "${fake}"
+}
+
+test_website_eval_collect_rejects_bad_targets() {
+  out="$(mktemp -d)" || return 1
+  for target in ftp://mechafighter.com/ "https://user:pw@mechafighter.com/" tests/fixtures/website-eval/missing "http:///"; do
+    rc=0
+    scripts/website-eval/collect --out "${out}" "${target}" 2>/dev/null || rc=$?
+    [ "${rc}" -eq 64 ] || {
+      printf '%s: expected usage error 64, got %s\n' "${target}" "${rc}"
+      return 1
+    }
+  done
+  leftovers="$(ls -A "${out}")"
+  [ -z "${leftovers}" ] || {
+    printf 'collect wrote output for a rejected target: %s\n' "${leftovers}"
+    return 1
+  }
+  rm -rf "${out}"
+}

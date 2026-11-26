@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/website-eval.schema.json",
+  "title": "website-eval report",
+  "description": "What scripts/website-eval/score emits for one scripts/website-eval/collect run. Thresholds and verdict rules live in scripts/website-eval/rules.jq and are copied into every check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "target", "tools", "verdict", "counts", "dimensions", "fixes"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "url", "final_url", "kind", "http_status", "measured_at"],
+      "properties": {
+        "input": { "type": "string", "minLength": 1, "description": "The site directory or URL collect was given." },
+        "url": { "type": "string", "pattern": "^https?://", "description": "The URL measured (a local build's 127.0.0.1 URL)." },
+        "final_url": { "type": "string", "pattern": "^https?://", "description": "The URL after redirects." },
+        "kind": {
+          "enum": ["local", "qa", "production", "other"],
+          "description": "local: a build or server on the loopback interface; qa: the QA Environment (GitHub Pages); production: mechafighter.com or a subdomain."
+        },
+        "http_status": { "type": "integer", "minimum": 200, "maximum": 299 },
+        "measured_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lighthouse", "axe_core", "chrome", "node", "html_validate", "lychee", "curl"],
+      "properties": {
+        "lighthouse": { "$ref": "#/$defs/version" },
+        "axe_core": { "$ref": "#/$defs/version" },
+        "chrome": { "$ref": "#/$defs/version" },
+        "node": { "$ref": "#/$defs/version" },
+        "html_validate": { "$ref": "#/$defs/version" },
+        "lychee": { "$ref": "#/$defs/version" },
+        "curl": { "$ref": "#/$defs/version" }
+      }
+    },
+    "verdict": { "$ref": "#/$defs/verdict", "description": "The worst dimension verdict (not_applicable only when every dimension is)." },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "warn", "fail", "not_applicable"],
+      "properties": {
+        "pass": { "type": "integer", "minimum": 0 },
+        "warn": { "type": "integer", "minimum": 0 },
+        "fail": { "type": "integer", "minimum": 0 },
+        "not_applicable": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lighthouse", "core_web_vitals", "accessibility", "html", "links", "weight", "security_headers", "tls"],
+      "properties": {
+        "lighthouse": { "$ref": "#/$defs/dimension" },
+        "core_web_vitals": { "$ref": "#/$defs/dimension" },
+        "accessibility": { "$ref": "#/$defs/dimension" },
+        "html": { "$ref": "#/$defs/dimension" },
+        "links": { "$ref": "#/$defs/dimension" },
+        "weight": { "$ref": "#/$defs/dimension" },
+        "security_headers": { "$ref": "#/$defs/dimension" },
+        "tls": { "$ref": "#/$defs/dimension" }
+      }
+    },
+    "fixes": {
+      "description": "Every warn and fail check, ranked: fail before warn, then by dimension (security_headers, tls, accessibility, links, html, core_web_vitals, lighthouse, weight), then by check id.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rank", "check", "dimension", "verdict", "title", "value", "evidence"],
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1 },
+          "check": { "$ref": "#/$defs/check_id" },
+          "dimension": { "enum": ["lighthouse", "core_web_vitals", "accessibility", "html", "links", "weight", "security_headers", "tls"] },
+          "verdict": { "enum": ["warn", "fail"] },
+          "title": { "type": "string", "minLength": 1 },
+          "value": { "$ref": "#/$defs/value" },
+          "evidence": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "version": { "type": ["string", "null"], "pattern": "^[0-9]+(\\.[0-9]+)*$" },
+    "verdict": { "enum": ["pass", "warn", "fail", "not_applicable"] },
+    "check_id": { "type": "string", "pattern": "^[a-z_]+\\.[a-z0-9_-]+$" },
+    "value": { "type": ["number", "string", "null"] },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "checks"],
+      "properties": {
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "checks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/check" } }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "value", "unit", "threshold", "verdict", "evidence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/check_id" },
+        "title": { "type": "string", "minLength": 1 },
+        "value": { "$ref": "#/$defs/value" },
+        "unit": { "enum": ["score", "ms", "unitless", "count", "bytes", "seconds", "days", "boolean", "text"] },
+        "threshold": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["direction", "pass", "warn"],
+              "properties": {
+                "direction": { "enum": ["lower", "higher"] },
+                "pass": { "type": "number" },
+                "warn": { "type": "number" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rule"],
+              "properties": { "rule": { "type": "string", "minLength": 1 } }
+            }
+          ]
+        },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    }
+  }
+}

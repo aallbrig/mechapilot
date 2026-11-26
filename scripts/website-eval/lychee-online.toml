@@ -1,0 +1,14 @@
+# lychee: the link check of scripts/website-eval/collect. Unlike the repo-root
+# lychee.toml (task site:links, offline), this one checks the links of one
+# served page online, so it runs only when a human or the skill measures a URL.
+# Passed with --config, so the offline repo-root config is never picked up.
+offline = false
+include_fragments = "full"
+no_progress = true
+cache = false
+max_redirects = 5
+max_retries = 2
+timeout = 20
+max_concurrency = 8
+# Only web links: mailto:/tel: and the like are reported as excluded, not fetched.
+scheme = ["http", "https"]

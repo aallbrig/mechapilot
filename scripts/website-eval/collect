@@ -1,0 +1,193 @@
+#!/bin/sh
+# Measure one page of a website with the pinned tools, then score it.
+# Usage: scripts/website-eval/collect [--out <dir>] <site-dir | url>
+#   <site-dir>  a local build (e.g. build/site/production), served on 127.0.0.1
+#               by scripts/website-eval/serve.mjs for the length of the run
+#   <url>       an http(s) URL: the QA Environment, Production, or a local server
+# Runs Lighthouse (all categories, axe-core inside) in the pinned Chrome
+# (scripts/site-chrome), html-validate with the repo's .htmlvalidate.json, lychee
+# (scripts/website-eval/lychee-online.toml, online), curl for the response headers and
+# scripts/website-eval/tls.mjs for the certificate. Raw outputs go to
+# <dir>/website-<ts>/ and the scored report (schemas/website-eval.schema.json)
+# to <dir>/website-<ts>.json, whose path is printed. Default <dir>: build/eval.
+#
+# Remote measurement is for a human or the website-evaluation skill only: with
+# CI set, any target off the loopback interface is refused before anything is
+# fetched, so CI never reaches the network through this script.
+#
+# Exit status: 0 measured and scored, 1 a measurement failed (nothing is
+# scored from a partial run), 3 refused (remote target under CI), 64 usage.
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "${here}/../.." && pwd)"
+out_dir="build/eval"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out)
+      out_dir="${2:?--out needs a directory}"
+      shift 2
+      ;;
+    -*)
+      printf 'collect: unknown option %s\n' "$1" >&2
+      exit 64
+      ;;
+    *) break ;;
+  esac
+done
+if [ "$#" -ne 1 ]; then
+  printf 'usage: collect [--out <dir>] <site-dir | url>\n' >&2
+  exit 64
+fi
+input="$1"
+
+fail() {
+  printf 'collect: %s\n' "$1" >&2
+  exit 1
+}
+
+# ---- classify the target (before anything is fetched) ----
+site_dir=""
+if [ -d "${input}" ]; then
+  site_dir="$(cd "${input}" && pwd)"
+  kind="local"
+else
+  case "${input}" in
+    http://* | https://*) ;;
+    *)
+      printf 'collect: %s is neither a directory nor an http(s) URL\n' "${input}" >&2
+      exit 64
+      ;;
+  esac
+  authority="${input#*://}"
+  authority="${authority%%[/?#]*}"
+  case "${authority}" in
+    *@*)
+      printf 'collect: refusing a URL with credentials in it\n' >&2
+      exit 64
+      ;;
+    *) ;;
+  esac
+  case "${authority}" in
+    \[*\]*) host="${authority%%]*}]" ;;
+    *) host="${authority%%:*}" ;;
+  esac
+  host="$(printf '%s' "${host}" | tr '[:upper:]' '[:lower:]')"
+  case "${host}" in
+    127.0.0.1 | localhost | "[::1]") kind="local" ;;
+    aallbrig.github.io) kind="qa" ;;
+    mechafighter.com | *.mechafighter.com) kind="production" ;;
+    "")
+      printf 'collect: %s has no host\n' "${input}" >&2
+      exit 64
+      ;;
+    *) kind="other" ;;
+  esac
+fi
+if [ "${kind}" != "local" ] && [ -n "${CI:-}" ]; then
+  printf 'collect: refusing to measure %s under CI: remote measurement runs only when a human or the website-evaluation skill invokes it\n' "${input}" >&2
+  exit 3
+fi
+
+cd "${root}"
+node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+[ "${node_major}" -ge 24 ] || fail "needs the pinned Node 24 (found major ${node_major}); run task setup and use the mise toolchain"
+if [ ! -f node_modules/lighthouse/package.json ] || [ ! -f node_modules/html-validate/package.json ]; then
+  npm ci --ignore-scripts --no-audit --no-fund >&2 || fail "npm ci failed"
+fi
+chrome="$(scripts/site-chrome)" || fail "the pinned Chrome could not be installed"
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "${out_dir}"
+out_dir="$(cd "${out_dir}" && pwd)"
+raw="${out_dir}/website-${ts}"
+report="${out_dir}/website-${ts}.json"
+[ ! -e "${raw}" ] || fail "${raw} already exists"
+mkdir -p "${raw}"
+
+server_pid=""
+cleanup() {
+  if [ -n "${server_pid}" ]; then kill "${server_pid}" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+url="${input}"
+if [ -n "${site_dir}" ]; then
+  node "${here}/serve.mjs" "${site_dir}" >"${raw}/server-url.txt" &
+  server_pid=$!
+  tries=0
+  while [ ! -s "${raw}/server-url.txt" ]; do
+    tries=$((tries + 1))
+    [ "${tries}" -le 20 ] || fail "the local server did not start"
+    kill -0 "${server_pid}" 2>/dev/null || fail "the local server exited"
+    sleep 1
+  done
+  url="$(head -n 1 "${raw}/server-url.txt")"
+fi
+printf 'collect: measuring %s (%s)\n' "${url}" "${kind}" >&2
+
+printf 'collect: curl (response headers)\n' >&2
+curl -sS -L --max-redirs 5 --max-time 30 --proto '=http,https' --proto-redir '=http,https' \
+  -D "${raw}/headers.txt" -o "${raw}/page.html" -w '%{json}' "${url}" >"${raw}/curl.json" ||
+  fail "curl could not fetch ${url}"
+status="$(jq -r '.response_code' "${raw}/curl.json")"
+final_url="$(jq -r '.url_effective' "${raw}/curl.json")"
+case "${status}" in
+  2??) ;;
+  *) fail "${url} answered HTTP ${status}; only a successful page is measured" ;;
+esac
+
+printf 'collect: html-validate\n' >&2
+rc=0
+npx --no-install html-validate --config .htmlvalidate.json --formatter json "${raw}/page.html" \
+  >"${raw}/html-validate.json" || rc=$?
+[ "${rc}" -le 1 ] || fail "html-validate could not run (exit ${rc})"
+
+printf 'collect: lychee\n' >&2
+rc=0
+lychee --config "${here}/lychee-online.toml" --format json --output "${raw}/lychee.json" "${final_url}" >&2 || rc=$?
+[ "${rc}" -eq 0 ] || [ "${rc}" -eq 2 ] || fail "lychee could not run (exit ${rc})"
+
+printf 'collect: Lighthouse (all categories)\n' >&2
+CHROME_PATH="${chrome}" npx --no-install lighthouse "${url}" --quiet --output=json \
+  --output-path="${raw}/lighthouse.json" --chrome-flags="--headless=new --no-sandbox --disable-gpu" ||
+  fail "Lighthouse failed"
+lh_error="$(jq -r '.runtimeError.message // .runtimeError.code // ""' "${raw}/lighthouse.json")"
+[ -z "${lh_error}" ] || fail "Lighthouse reported a runtime error: ${lh_error}"
+
+case "${final_url}" in
+  https://*)
+    printf 'collect: TLS certificate\n' >&2
+    tls_host="$(jq -r '."urle.host"' "${raw}/curl.json")"
+    tls_port="$(jq -r '."urle.port" // "443"' "${raw}/curl.json")"
+    node "${here}/tls.mjs" "${tls_host}" "${tls_port}" >"${raw}/tls.json" || fail "could not read the TLS certificate"
+    ;;
+  *) printf 'null\n' >"${raw}/tls.json" ;;
+esac
+
+# Tool versions: "Google Chrome for Testing 158.0.8127.88", "html-validate-11.21.1",
+# "lychee 0.24.2", "curl 8.7.1 (...)" (first line).
+chrome_version="$("${chrome}" --version)"
+chrome_version="${chrome_version%"${chrome_version##*[! ]}"}"
+chrome_version="${chrome_version##* }"
+node_version="$(node -p 'process.versions.node')"
+hv_version="$(npx --no-install html-validate --version)"
+hv_version="${hv_version#html-validate-}"
+lychee_version="$(lychee --version)"
+lychee_version="${lychee_version#lychee }"
+curl_version="$(curl --version)"
+curl_version="${curl_version#curl }"
+curl_version="${curl_version%% *}"
+jq -n --arg input "${input}" --arg url "${url}" --arg final "${final_url}" --arg kind "${kind}" \
+  --argjson status "${status}" --arg measured "${now}" \
+  --arg chrome "${chrome_version}" --arg node "${node_version}" --arg hv "${hv_version}" \
+  --arg lychee "${lychee_version}" --arg curl "${curl_version}" \
+  '{target: {input: $input, url: $url, final_url: $final, kind: $kind, http_status: $status, measured_at: $measured},
+    tools: {chrome: $chrome, node: $node, html_validate: $hv, lychee: $lychee, curl: $curl}}' >"${raw}/meta.json"
+
+"${here}/score" --now "${now}" "${raw}" >"${report}" || fail "scoring failed"
+check-jsonschema --schemafile schemas/website-eval.schema.json "${report}" >&2 ||
+  fail "the report does not match schemas/website-eval.schema.json"
+printf '%s\n' "${report}"
