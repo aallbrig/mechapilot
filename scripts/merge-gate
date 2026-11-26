@@ -46,9 +46,11 @@ author="$(jq -r .author.login "${gate}/pr.json")"
 cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
 [ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
 
-# 1. The ci check from GitHub Actions is green on exactly this head commit
-#    (cancelled runs ignored; see scripts/ci-verdict).
-gh api "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci" >"${gate}/check-runs.json"
+# 1. The newest ci check from GitHub Actions on exactly this head commit is
+#    green, and no older one failed (see scripts/ci-verdict). All pages and
+#    all attempts are read, so nothing can be pushed out of view.
+gh api --paginate --slurp \
+  "repos/{owner}/{repo}/commits/${head_sha}/check-runs?check_name=ci&filter=all&per_page=100" >"${gate}/check-runs.json"
 ci="$("${gate}/main/scripts/ci-verdict" "${gate}/check-runs.json")"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
@@ -73,9 +75,10 @@ else
       *) fail "linked issue #${n} is not labelled ready-for-agent" ;;
     esac
   done
-  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --json databaseId,conclusion \
-    --jq '[.[] | select(.conclusion == "success")][0].databaseId // empty')"
-  [ -n "${run_id}" ] || fail "no successful ci.yml run for ${head_sha}"
+  # Evidence comes from the newest ci.yml run on this commit, which must have succeeded.
+  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --limit 1 --json databaseId,conclusion \
+    --jq '.[0] | select(.conclusion == "success") | .databaseId')"
+  [ -n "${run_id}" ] || fail "the newest ci.yml run for ${head_sha} did not succeed"
   gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
   for n in ${issues}; do
     rc=0

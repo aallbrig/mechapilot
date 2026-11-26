@@ -1,45 +1,69 @@
 #!/bin/sh
 # Tests for scripts/ci-verdict.
 
-runs() {
-  f="$(mktemp)"
-  printf '{"check_runs":[%s]}\n' "$1" >"${f}"
-  printf '%s' "${f}"
-}
-
+# run <name> <app> <status> <conclusion-json> <started_at> <id>
 run() {
-  printf '{"name":"%s","app":{"slug":"%s"},"status":"%s","conclusion":%s}' "$1" "$2" "$3" "$4"
+  printf '{"id":%s,"name":"%s","app":{"slug":"%s"},"status":"%s","conclusion":%s,"started_at":"%s"}' \
+    "$6" "$1" "$2" "$3" "$4" "$5"
 }
 
+# verdict_of <total_count> <runs...>: one page holding the given runs.
 verdict_of() {
-  f="$(runs "$1")"
+  f="$(mktemp)"
+  printf '[{"total_count":%s,"check_runs":[%s]}]\n' "$1" "$2" >"${f}"
   v="$(scripts/ci-verdict "${f}")"
   rm -f "${f}"
   printf '%s' "${v}"
 }
 
+T1=2026-11-26T10:00:00Z
+T2=2026-11-26T10:05:00Z
+T3=2026-11-26T10:10:00Z
+
 test_ci_verdict_ignores_cancelled_when_a_run_succeeded() {
-  [ "$(verdict_of "$(run ci github-actions completed '"cancelled"'),$(run ci github-actions completed '"success"')")" = success ]
+  [ "$(verdict_of 2 "$(run ci github-actions completed '"cancelled"' "${T1}" 1),$(run ci github-actions completed '"success"' "${T2}" 2)")" = success ]
+}
+
+test_ci_verdict_newest_run_must_succeed() {
+  # A newer run cancelled (or timed out) must not let an older success count.
+  [ "$(verdict_of 2 "$(run ci github-actions completed '"success"' "${T1}" 1),$(run ci github-actions completed '"cancelled"' "${T2}" 2)")" = not-green ]
 }
 
 test_ci_verdict_fails_when_any_run_failed() {
-  [ "$(verdict_of "$(run ci github-actions completed '"failure"'),$(run ci github-actions completed '"success"')")" = not-green ]
+  [ "$(verdict_of 2 "$(run ci github-actions completed '"failure"' "${T1}" 1),$(run ci github-actions completed '"success"' "${T2}" 2)")" = not-green ]
+  [ "$(verdict_of 2 "$(run ci github-actions completed '"success"' "${T1}" 1),$(run ci github-actions completed '"failure"' "${T2}" 2)")" = not-green ]
 }
 
 test_ci_verdict_needs_a_success_not_only_cancelled() {
-  [ "$(verdict_of "$(run ci github-actions completed '"cancelled"')")" = missing ]
+  [ "$(verdict_of 1 "$(run ci github-actions completed '"cancelled"' "${T1}" 1)")" = not-green ]
+  [ "$(verdict_of 0 "")" = missing ]
 }
 
 test_ci_verdict_waits_for_in_progress_runs() {
-  [ "$(verdict_of "$(run ci github-actions in_progress null),$(run ci github-actions completed '"success"')")" = pending ]
+  [ "$(verdict_of 2 "$(run ci github-actions in_progress null "${T3}" 2),$(run ci github-actions completed '"success"' "${T1}" 1)")" = pending ]
 }
 
 test_ci_verdict_ignores_other_apps_and_names() {
-  [ "$(verdict_of "$(run ci other-app completed '"success"'),$(run lint github-actions completed '"success"')")" = missing ]
-  [ "$(verdict_of "$(run ci other-app completed '"failure"'),$(run ci github-actions completed '"success"')")" = success ]
+  [ "$(verdict_of 2 "$(run ci other-app completed '"success"' "${T1}" 1),$(run lint github-actions completed '"success"' "${T1}" 2)")" = missing ]
+  [ "$(verdict_of 2 "$(run ci other-app completed '"failure"' "${T2}" 2),$(run ci github-actions completed '"success"' "${T1}" 1)")" = success ]
 }
 
 test_ci_verdict_rejects_skipped_and_neutral() {
-  [ "$(verdict_of "$(run ci github-actions completed '"skipped"'),$(run ci github-actions completed '"success"')")" = not-green ]
-  [ "$(verdict_of "$(run ci github-actions completed '"neutral"')")" = not-green ]
+  [ "$(verdict_of 2 "$(run ci github-actions completed '"skipped"' "${T1}" 1),$(run ci github-actions completed '"success"' "${T2}" 2)")" = not-green ]
+  [ "$(verdict_of 1 "$(run ci github-actions completed '"neutral"' "${T1}" 1)")" = not-green ]
+}
+
+test_ci_verdict_fails_closed_on_missing_pages() {
+  # total_count says 31 but only one run was read: a failure could be hiding.
+  [ "$(verdict_of 31 "$(run ci github-actions completed '"success"' "${T1}" 1)")" = incomplete ]
+}
+
+test_ci_verdict_reads_every_page() {
+  f="$(mktemp)"
+  printf '[{"total_count":2,"check_runs":[%s]},{"total_count":2,"check_runs":[%s]}]\n' \
+    "$(run ci github-actions completed '"success"' "${T2}" 2)" \
+    "$(run ci github-actions completed '"failure"' "${T1}" 1)" >"${f}"
+  v="$(scripts/ci-verdict "${f}")"
+  rm -f "${f}"
+  [ "${v}" = not-green ]
 }
