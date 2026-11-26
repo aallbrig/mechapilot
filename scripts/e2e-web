@@ -1,0 +1,37 @@
+#!/bin/sh
+# Smoke-test an exported Web build in headless Chromium (tests/e2e/web-smoke.mjs).
+# The page is served with the production Game Site's Content-Security-Policy,
+# read from the game_site module in infra/stacks/prod/main.tf, so a CSP that
+# would block the game in production fails here. E2E_CSP overrides it.
+# Needs `npm ci` and the Playwright Chromium shell (task setup installs both).
+#
+# Usage: scripts/e2e-web [export-dir]   (default: build/web)
+set -eu
+
+dir="${1:-build/web}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+stack="${root}/infra/stacks/prod/main.tf"
+if [ ! -f "${dir}/index.html" ]; then
+  printf 'e2e-web: no exported page at %s/index.html (run: task godot:export:web)\n' "${dir}" >&2
+  exit 1
+fi
+if [ ! -d "${root}/node_modules/playwright" ]; then
+  printf 'e2e-web: Playwright is not installed (run: task setup)\n' >&2
+  exit 1
+fi
+
+if [ -z "${E2E_CSP:-}" ]; then
+  E2E_CSP="$(awk '
+    /^module "game_site"/ { inside = 1; next }
+    inside && /^}/ { inside = 0 }
+    inside && /^[[:space:]]*content_security_policy[[:space:]]*=/ {
+      sub(/^[^"]*"/, ""); sub(/"[[:space:]]*$/, ""); print
+    }
+  ' "${stack}")"
+  if [ -z "${E2E_CSP}" ]; then
+    printf 'e2e-web: no game_site content_security_policy in %s\n' "${stack}" >&2
+    exit 1
+  fi
+fi
+export E2E_CSP
+exec "${root}/scripts/run-with-timeout" "${E2E_TIMEOUT:-300}" node "${root}/tests/e2e/web-smoke.mjs" "${dir}"

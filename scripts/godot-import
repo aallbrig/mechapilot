@@ -1,0 +1,32 @@
+#!/bin/sh
+# Import the Godot project headless (fills <project>/.godot on a fresh clone),
+# through scripts/godot-run like every step that loads project code. Under the
+# Linux sandbox the import runs on a private copy, so the resulting .godot/ is
+# copied back into the project afterwards (it is a cache, never committed).
+#
+# Usage: scripts/godot-import [project-dir]   (default: godot)
+set -eu
+LC_ALL=C
+export LC_ALL
+
+project="${1:-godot}"
+here="$(cd "$(dirname "$0")" && pwd -P)"
+box="$(mktemp -d)"
+log="$(mktemp)"
+trap 'rm -rf "${box}" "${log}"' EXIT
+mkdir -p "${box}/dotgodot" "${project}/.godot"
+cp -R "${project}/.godot/." "${box}/dotgodot/"
+
+rc=0
+"${here}/godot-run" "${box}" "${project}" -- --import >"${log}" 2>&1 || rc=$?
+cat "${log}"
+if [ "${rc}" -ne 0 ]; then
+  printf 'godot-import: import failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+if grep -q '^godot-run: sandbox: bwrap$' "${log}"; then
+  rm -rf "${project}/.godot"
+  mkdir -p "${project}/.godot"
+  cp -R "${box}/dotgodot/." "${project}/.godot/"
+fi
+printf 'godot-import: imported %s\n' "${project}"

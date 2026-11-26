@@ -1,0 +1,161 @@
+#!/bin/sh
+# Install the pinned Godot editor and its single-threaded web export templates.
+#
+# The version comes from .godot-version. Every download is checked against the
+# SHA512 sums pinned in .godot-sha512sums (lines copied from the release's
+# SHA512-SUMS.txt), so a changed or truncated download never installs. From the
+# templates archive only web_nothreads_{debug,release}.zip and version.txt are
+# kept. Godot runs in self-contained mode (an _sc_ file next to the editor), so
+# its settings and templates live in the install root and a user-wide Godot is
+# never read.
+#
+# The unpacked editor binary and templates are pinned too (also in
+# .godot-sha512sums, by their path in the install root). Every run re-hashes
+# them, so a restored CI cache or a tampered install is never trusted on its
+# marker alone: a mismatch reinstalls from verified downloads. Idempotent.
+#
+# Usage: scripts/install-godot            install, or re-verify an existing install (task setup and CI)
+#        scripts/install-godot --verify   only re-verify: exit 1 on any mismatch, never download
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=lib-godot
+. "$(dirname "$0")/lib-godot"
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+sums_file="${repo_root}/.godot-sha512sums"
+base_url="https://github.com/godotengine/godot/releases/download/${godot_tag}"
+templates_asset="Godot_v${godot_tag}_export_templates.tpz"
+marker="${godot_home}/.installed"
+downloads="${godot_tools}/downloads"
+
+pinned_sum() {
+  awk -v f="$1" '$2 == f { print $1 }' "${sums_file}"
+}
+
+editor_sum="$(pinned_sum "${godot_asset}")"
+templates_sum="$(pinned_sum "${templates_asset}")"
+expected_marker="${editor_sum} ${godot_asset}
+${templates_sum} ${templates_asset}"
+
+sha512_of() {
+  if command -v sha512sum >/dev/null 2>&1; then
+    sha512sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 512 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# Download $1 into the downloads dir (reusing a copy whose checksum matches) and verify it.
+fetch() {
+  want="$(pinned_sum "$1")"
+  if [ -z "${want}" ]; then
+    printf 'install-godot: no pinned SHA512 for %s in .godot-sha512sums\n' "$1" >&2
+    exit 1
+  fi
+  dest="${downloads}/$1"
+  if [ -f "${dest}" ]; then
+    have="$(sha512_of "${dest}")"
+    if [ "${have}" = "${want}" ]; then
+      printf 'install-godot: reusing verified %s\n' "$1"
+      return 0
+    fi
+  fi
+  printf 'install-godot: downloading %s\n' "$1"
+  rm -f "${dest}" "${dest}.part"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 5 -o "${dest}.part" "${base_url}/$1"
+  got="$(sha512_of "${dest}.part")"
+  if [ "${got}" != "${want}" ]; then
+    rm -f "${dest}.part"
+    printf 'install-godot: SHA512 mismatch for %s\n  want %s\n  got  %s\n' "$1" "${want}" "${got}" >&2
+    exit 1
+  fi
+  mv -f "${dest}.part" "${dest}"
+}
+
+# The installed files that must match their pinned SHA512, relative to the install root.
+bin_rel="${godot_bin#"${godot_home}/"}"
+tpl_rel="editor_data/export_templates/${godot_dir_version}"
+installed_files="${bin_rel} ${tpl_rel}/web_nothreads_debug.zip ${tpl_rel}/web_nothreads_release.zip ${tpl_rel}/version.txt"
+
+# Sets verified=yes only if every installed file under $1 matches its pinned sum.
+verify_install() {
+  verified=no
+  for rel in ${installed_files}; do
+    want="$(pinned_sum "${rel}")"
+    if [ -z "${want}" ]; then
+      printf 'install-godot: no pinned SHA512 for %s in .godot-sha512sums\n' "${rel}" >&2
+      exit 1
+    fi
+    [ -f "$1/${rel}" ] || return 0
+    have="$(sha512_of "$1/${rel}")"
+    [ "${have}" = "${want}" ] || return 0
+  done
+  verified=yes
+}
+
+verify_install "${godot_home}"
+if [ "${verified}" = yes ] && [ -x "${godot_bin}" ] && [ -f "${marker}" ]; then
+  printf 'install-godot: Godot %s already installed (binary and templates re-verified)\n' "${godot_tag}"
+  exit 0
+fi
+if [ "${1:-}" = --verify ]; then
+  printf 'install-godot: the install at %s does not match its pinned SHA512 sums\n' "${godot_home}" >&2
+  exit 1
+fi
+
+mkdir -p "${downloads}" "${godot_tools}/godot"
+fetch "${godot_asset}"
+fetch "${templates_asset}"
+
+staging="${godot_home}.staging.$$"
+trap 'rm -rf "${staging}"' EXIT
+rm -rf "${staging}"
+mkdir -p "${staging}"
+
+printf 'install-godot: unpacking the editor\n'
+if [ "${godot_os}" = Darwin ]; then
+  ditto -x -k "${downloads}/${godot_asset}" "${staging}"
+else
+  unzip -q "${downloads}/${godot_asset}" -d "${staging}"
+fi
+: >"${staging}/_sc_"
+
+printf 'install-godot: unpacking the web templates\n'
+tpl_dir="${staging}/editor_data/export_templates/${godot_dir_version}"
+mkdir -p "${tpl_dir}"
+unzip -q -j "${downloads}/${templates_asset}" \
+  templates/web_nothreads_debug.zip templates/web_nothreads_release.zip templates/version.txt \
+  -d "${tpl_dir}"
+tpl_version="$(tr -d '[:space:]' <"${tpl_dir}/version.txt")"
+if [ "${tpl_version}" != "${godot_dir_version}" ]; then
+  printf 'install-godot: templates report version %s, expected %s\n' "${tpl_version}" "${godot_dir_version}" >&2
+  exit 1
+fi
+
+staged_bin="${staging}${godot_bin#"${godot_home}"}"
+if [ ! -x "${staged_bin}" ]; then
+  printf 'install-godot: editor binary missing after unpack: %s\n' "${staged_bin}" >&2
+  exit 1
+fi
+reported="$("${staged_bin}" --headless --version 2>/dev/null | tail -n 1)"
+case "${reported}" in
+  "${godot_dir_version}".*) ;;
+  *)
+    printf 'install-godot: editor reports version "%s", expected %s\n' "${reported}" "${godot_dir_version}" >&2
+    exit 1
+    ;;
+esac
+
+verify_install "${staging}"
+if [ "${verified}" != yes ]; then
+  printf 'install-godot: unpacked files do not match their pinned SHA512 sums\n' >&2
+  exit 1
+fi
+printf '%s\n' "${expected_marker}" >"${staging}/.installed"
+rm -rf "${godot_home}"
+mv "${staging}" "${godot_home}"
+trap - EXIT
+# The verified archives are no longer needed (the templates archive is 1.28 GB).
+rm -f "${downloads}/${godot_asset}" "${downloads}/${templates_asset}"
+printf 'install-godot: installed Godot %s at %s\n' "${reported}" "${godot_home}"

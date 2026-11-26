@@ -1,0 +1,86 @@
+#!/bin/sh
+# Detect anything a test run changed outside its output directories.
+#
+#   scripts/tree-guard snapshot <state-file> [repo-root]   record the tree
+#   scripts/tree-guard verify <state-file> [repo-root]     fail (exit 1, listing each
+#                                                          path) if anything differs
+#
+# repo-root defaults to this script's repo. Callers that must not trust the
+# repo's own copy during the run (it might be the thing that was tampered with)
+# copy scripts/tree-guard, scripts/lib-godot and .godot-version to a private
+# directory first and pass the real repo root.
+#
+# The snapshot covers, by SHA-256:
+#   - every tracked and untracked (not ignored) file in the repo
+#   - every file under node_modules/ (the pinned Playwright the e2e test trusts)
+#   - the pinned Godot editor binary and its export templates
+# Gitignored files are not checked, except node_modules/ and the Godot install
+# above: tools write caches there (.task/, infra/**/.terraform/, .lighthouseci/,
+# ...). build/ and godot/.godot/ are outputs and are excluded too. The state file
+# must live outside the repo (callers use mktemp).
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=lib-godot
+. "$(dirname "$0")/lib-godot"
+
+mode="${1:?usage: tree-guard snapshot|verify <state-file>}"
+state="${2:?usage: tree-guard snapshot|verify <state-file>}"
+root="${3:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "${root}"
+
+sha256_files() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    xargs -0 sha256sum
+  else
+    xargs -0 shasum -a 256
+  fi
+}
+
+outside_outputs() {
+  grep -Ev '^(build/|godot/\.godot/)' || true
+}
+
+record() {
+  {
+    git -c core.quotePath=false ls-files -z --cached --others --exclude-standard |
+      tr '\0' '\n' | outside_outputs | while IFS= read -r f; do
+      if [ -f "${f}" ]; then printf '%s\0' "${f}"; else printf 'missing  %s\n' "${f}" >&2; fi
+    done | sha256_files
+    if [ -d node_modules ]; then
+      find node_modules -type f -print0 2>/dev/null | sha256_files
+    fi
+    if [ -d "${godot_templates}" ] && [ -f "${godot_bin}" ]; then
+      {
+        printf '%s\0' "${godot_bin}"
+        find "${godot_templates}" -type f -print0
+      } | sha256_files
+    fi
+  } 2>&1 | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' | sort
+}
+
+case "${mode}" in
+  snapshot)
+    record >"${state}"
+    ;;
+  verify)
+    if [ ! -f "${state}" ]; then
+      printf 'tree-guard: no snapshot at %s\n' "${state}" >&2
+      exit 1
+    fi
+    now="$(mktemp)"
+    trap 'rm -f "${now}"' EXIT
+    record >"${now}"
+    if ! cmp -s "${state}" "${now}"; then
+      printf 'tree-guard: files changed outside build/ and godot/.godot/ during the run:\n' >&2
+      diff "${state}" "${now}" | sed -n 's/^[<>] //p' | sed 's/^[0-9a-f]\{64\}  //' |
+        sort -u | sed 's/^/  /' >&2
+      exit 1
+    fi
+    printf 'tree-guard: tree unchanged\n'
+    ;;
+  *)
+    printf 'usage: tree-guard snapshot|verify <state-file>\n' >&2
+    exit 64
+    ;;
+esac

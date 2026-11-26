@@ -181,3 +181,15 @@ test_guard_flags_threat_model_changes() {
   rm -rf "${r}"
   [ "${rc}" = 0 ]
 }
+
+test_guard_flags_godot_pins() {
+  for pin in .godot-version .godot-sha512sums godot/addons.sha256; do
+    r="$(guard_repo)"
+    guard="$(pwd)/scripts/checks/verification-guard"
+    mkdir -p "${r}/godot"
+    printf 'changed\n' >"${r}/${pin}"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    [ "${rc}" = 3 ] || return 1
+  done
+}

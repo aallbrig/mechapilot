@@ -2,7 +2,7 @@
   "name": "mechafighter-site-tooling",
   "version": "0.0.0",
   "private": true,
-  "description": "Pinned Node tooling that measures the Marketing Site (site/): HTML validation, a pinned Chrome, a browser-observed no-script/no-third-party check and Lighthouse CI.",
+  "description": "Pinned Node tooling: measuring the Marketing Site (site/: HTML validation, a pinned Chrome, a browser-observed no-script/no-third-party check, Lighthouse CI) and the Godot web smoke test (Playwright with headless Chromium).",
   "license": "UNLICENSED",
   "engines": {
     "node": "24.22.3"
@@ -10,6 +10,7 @@
   "devDependencies": {
     "@lhci/cli": "0.16.1",
     "@puppeteer/browsers": "3.2.7",
-    "html-validate": "11.21.1"
+    "html-validate": "11.21.1",
+    "playwright": "1.65.0"
   }
 }

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Tests for scripts/tree-guard (run by scripts/test-shell), against a throwaway repo.
+
+# A small git repo with the checker in it; sets r and s (state file).
+guarded_repo() {
+  r="$(mktemp -d)"
+  s="$(mktemp)"
+  trap 'rm -rf "${r}" "${s}"' EXIT
+  mkdir -p "${r}/scripts" "${r}/docs" "${r}/build" "${r}/godot/.godot"
+  cp scripts/tree-guard scripts/lib-godot "${r}/scripts/"
+  cp .godot-version "${r}/"
+  printf 'a\n' >"${r}/docs/a.md"
+  printf 'build/\n.godot/\n*.log\n' >"${r}/.gitignore"
+  git -C "${r}" init -q
+  git -C "${r}" add -A
+  git -C "${r}" -c user.name=t -c user.email=t@example.invalid commit -qm base
+  "${r}/scripts/tree-guard" snapshot "${s}" "${r}"
+}
+
+test_tree_guard_passes_when_nothing_changes() {
+  guarded_repo
+  printf 'output\n' >"${r}/build/out.txt"
+  printf 'cache\n' >"${r}/godot/.godot/cache.bin"
+  "${r}/scripts/tree-guard" verify "${s}" "${r}"
+}
+
+test_tree_guard_detects_a_modified_tracked_file() {
+  guarded_repo
+  printf 'tampered\n' >"${r}/scripts/tree-guard.extra"
+  printf 'b\n' >>"${r}/docs/a.md"
+  ! "${r}/scripts/tree-guard" verify "${s}" "${r}" 2>/dev/null
+}
+
+test_tree_guard_detects_a_new_untracked_file() {
+  guarded_repo
+  printf 'x\n' >"${r}/docs/new.md"
+  ! "${r}/scripts/tree-guard" verify "${s}" "${r}" 2>/dev/null
+}
+
+# Tools write gitignored caches (.task/, infra/**/.terraform/) during a run.
+test_tree_guard_ignores_gitignored_cache_writes() {
+  guarded_repo
+  printf 'cache\n' >"${r}/docs/tool.log"
+  "${r}/scripts/tree-guard" verify "${s}" "${r}"
+}
+
+test_tree_guard_detects_a_changed_harness_script() {
+  guarded_repo
+  printf '# tampered\n' >>"${r}/scripts/tree-guard"
+  ! "${r}/scripts/tree-guard" verify "${s}" "${r}" 2>/dev/null
+}

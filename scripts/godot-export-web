@@ -1,0 +1,46 @@
+#!/bin/sh
+# Export the single-threaded Web build headless with the pinned templates.
+# Fails on a non-zero export, on any engine ERROR line, or if a file the page
+# needs is missing.
+#
+# Usage: scripts/godot-export-web [out-dir] [project-dir]   (default: build/web godot)
+set -eu
+LC_ALL=C
+export LC_ALL
+
+out_dir="${1:-build/web}"
+project="${2:-godot}"
+here="$(cd "$(dirname "$0")" && pwd)"
+timeout_secs="${GODOT_EXPORT_TIMEOUT:-600}"
+
+rm -rf "${out_dir}"
+mkdir -p "${out_dir}"
+out_abs="$(cd "${out_dir}" && pwd)"
+log="$(mktemp)"
+# Import and export load project code, so both go through scripts/godot-run
+# (bubblewrap on Linux, required in CI); only the box and the out dir are writable.
+box="$(mktemp -d)"
+trap 'rm -f "${log}"; rm -rf "${box}"' EXIT
+mkdir -p "${box}/dotgodot"
+if [ -d "${project}/.godot" ]; then cp -R "${project}/.godot/." "${box}/dotgodot/"; fi
+
+rc=0
+GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${project}" --writable "${out_abs}" -- \
+  --import >"${log}" 2>&1 || rc=$?
+if [ "${rc}" -eq 0 ]; then
+  GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${project}" --writable "${out_abs}" -- \
+    --export-release Web "${out_abs}/index.html" >>"${log}" 2>&1 || rc=$?
+fi
+if [ "${rc}" -ne 0 ] || grep -Eq '^(ERROR|SCRIPT ERROR):' "${log}"; then
+  cat "${log}" >&2
+  printf 'godot-export-web: export failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+
+for f in index.html index.js index.wasm index.pck index.audio.worklet.js; do
+  if [ ! -s "${out_dir}/${f}" ]; then
+    printf 'godot-export-web: missing %s in %s\n' "${f}" "${out_dir}" >&2
+    exit 1
+  fi
+done
+printf 'godot-export-web: exported to %s\n' "${out_dir}"

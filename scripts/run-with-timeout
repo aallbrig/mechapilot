@@ -1,0 +1,83 @@
+#!/bin/sh
+# Run a command, killing it if it runs longer than the limit (a GDScript parse
+# error can leave Godot waiting at a debugger prompt forever). Exits with the
+# command's status; a killed command exits non-zero.
+#
+# The command runs in its own process group (setsid where it exists, as on
+# Linux, whose sh may refuse job control without a terminal; `set -m`
+# elsewhere). On timeout the group gets TERM, then KILL 5 s later. When the
+# command ends, the whole group is killed, so nothing it started survives to
+# rewrite files later. The watchdog leaves nothing behind either: its sleeps
+# have no inherited stdio (a caller piping our stderr is never held open) and
+# are killed with it.
+#
+# Usage: scripts/run-with-timeout <seconds> <command> [args...]
+set -eu
+
+limit="${1:?usage: run-with-timeout <seconds> <command> [args...]}"
+shift
+case "${limit}" in
+  "" | *[!0-9]*)
+    printf 'run-with-timeout: seconds must be a whole number\n' >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$@" &
+else
+  set -m
+  "$@" &
+fi
+pid=$!
+
+# Signal the command's process group, and the command itself in case the
+# group could not be created.
+signal_all() {
+  # `kill -s SIG -- -PGID` is the form dash, bash and zsh all accept.
+  kill -s "$1" -- "-${pid}" 2>/dev/null || true
+  kill -s "$1" "${pid}" 2>/dev/null || true
+}
+
+(
+  sleep "${limit}" >/dev/null 2>&1 &
+  timer=$!
+  trap 'kill "${timer}" 2>/dev/null; exit 0' TERM
+  wait "${timer}"
+  printf 'run-with-timeout: killed after %ss: %s\n' "${limit}" "$1" >&2
+  signal_all TERM
+  sleep 5 >/dev/null 2>&1 &
+  timer=$!
+  wait "${timer}"
+  trap - TERM
+  signal_all KILL
+) </dev/null &
+watcher=$!
+
+# Ctrl-C, TERM or HUP sent to this wrapper is passed on to the command's whole
+# group: it runs in its own group (or session), so it would otherwise miss it and
+# be orphaned. It then gets 5 s to exit before KILL.
+got=""
+trap 'got=INT; signal_all INT' INT
+trap 'got=TERM; signal_all TERM' TERM
+trap 'got=HUP; signal_all HUP' HUP
+status=0
+wait "${pid}" || status=$?
+if [ -n "${got}" ]; then
+  for _ in 1 2 3 4 5; do
+    kill -s 0 "${pid}" 2>/dev/null || break
+    sleep 1
+  done
+  signal_all KILL
+  case "${got}" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=129 ;;
+  esac
+fi
+kill -TERM "${watcher}" 2>/dev/null || true
+wait "${watcher}" 2>/dev/null || true
+# Anything the command left running in its group goes too.
+signal_all KILL
+exit "${status}"

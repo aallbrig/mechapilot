@@ -1,0 +1,57 @@
+#!/bin/sh
+# Sourced helper: where the pinned Godot lives. Sets
+#   godot_tag          release tag from .godot-version (e.g. 4.7.2-stable)
+#   godot_dir_version  export-template directory name (e.g. 4.7.2.stable)
+#   godot_home         install root (self-contained mode: editor data lives here)
+#   godot_asset        editor archive name for this OS and CPU
+#   godot_bin          the editor executable
+#   godot_templates    the export-template directory Godot reads in self-contained mode
+# The install root is ${MECHAPILOT_TOOLS:-${XDG_CACHE_HOME:-~/.cache}/mechapilot}/godot/<tag>,
+# so CI can cache it and a user-wide Godot install is never touched or used.
+
+godot_repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+godot_tag="$(tr -d '[:space:]' <"${godot_repo_root}/.godot-version")"
+case "${godot_tag}" in
+  [0-9]*.[0-9]*-stable) ;;
+  *)
+    printf 'lib-godot: .godot-version must look like 4.7.2-stable, got "%s"\n' "${godot_tag}" >&2
+    exit 1
+    ;;
+esac
+case "${godot_tag}" in
+  *[!0-9a-z.-]*)
+    printf 'lib-godot: unexpected characters in .godot-version\n' >&2
+    exit 1
+    ;;
+  *) ;;
+esac
+godot_dir_version="${godot_tag%-stable}.stable"
+godot_tools="${MECHAPILOT_TOOLS:-${XDG_CACHE_HOME:-${HOME}/.cache}/mechapilot}"
+godot_home="${godot_tools}/godot/${godot_tag}"
+godot_templates="${godot_home}/editor_data/export_templates/${godot_dir_version}"
+
+godot_os="$(uname -s)"
+godot_cpu="$(uname -m)"
+case "${godot_os}" in
+  Darwin)
+    godot_asset="Godot_v${godot_tag}_macos.universal.zip"
+    godot_bin="${godot_home}/Godot.app/Contents/MacOS/Godot"
+    ;;
+  Linux)
+    case "${godot_cpu}" in
+      x86_64 | amd64) godot_arch=x86_64 ;;
+      aarch64 | arm64) godot_arch=arm64 ;;
+      *)
+        printf 'lib-godot: unsupported Linux CPU %s\n' "${godot_cpu}" >&2
+        exit 1
+        ;;
+    esac
+    godot_asset="Godot_v${godot_tag}_linux.${godot_arch}.zip"
+    godot_bin="${godot_home}/Godot_v${godot_tag}_linux.${godot_arch}"
+    ;;
+  *)
+    printf 'lib-godot: unsupported OS %s (macOS and Linux only)\n' "${godot_os}" >&2
+    exit 1
+    ;;
+esac
+export godot_tag godot_dir_version godot_home godot_asset godot_bin godot_templates

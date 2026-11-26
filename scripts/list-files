@@ -1,5 +1,6 @@
 #!/bin/sh
 # Print repo files of a given kind, one per line (tracked + untracked, not ignored).
+# Vendored code (unity/, godot/addons/) is never ours to lint.
 # Usage: scripts/list-files sh|yaml|gd|json
 set -eu
 
@@ -7,7 +8,7 @@ kind="${1:?usage: list-files sh|yaml|gd|json}"
 
 listing="$(mktemp)"
 trap 'rm -f "${listing}"' EXIT
-git ls-files --cached --others --exclude-standard -- . ':!:unity/' >"${listing}"
+git ls-files --cached --others --exclude-standard -- . ':!:unity/' ':!:godot/addons/' >"${listing}"
 
 all_files() {
   while IFS= read -r f; do
