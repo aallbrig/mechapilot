@@ -5,7 +5,9 @@
 #
 # Every list item under "## Acceptance criteria" must end with exactly one
 # backticked check reference:
-#   `task:<target>`        `task <target>` exits 0 (setup/maintenance targets rejected)
+#   `task:<target>`        `task <target>` exits 0 (setup, maintenance and
+#                          side-effecting targets such as dev, dev:stop and
+#                          autostart:* are rejected)
 #   `check:<name>`         scripts/checks/<name> (tracked, executable) exits 0
 #   `test:[<suite>::]<name>` / `e2e:...`
 #                          exactly one JUnit <testcase> with that exact name (and
@@ -150,7 +152,7 @@ prove_task() {
   result=fail
   case "$1" in
     "" | *[!a-z0-9:-]* | [!a-z]*) return 0 ;;
-    default | setup | doctor | fmt | ci | ci:fast | verify:* | merge-gate) return 0 ;;
+    default | setup | doctor | fmt | ci | ci:fast | verify:* | merge-gate | dev | dev:stop | autostart:*) return 0 ;;
     *) ;;
   esac
   if [ -n "${ACCEPTANCE_EVIDENCE:-}" ]; then

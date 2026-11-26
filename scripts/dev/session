@@ -31,6 +31,13 @@ probe() {
   fi
 }
 
+# tmuxinator runs the raw file through ERB before parsing it, so refuse any
+# ERB tag before tmuxinator ever sees the file.
+guard_erb() {
+  [ -f "${config}" ] || die "no config at ${config}"
+  "${repo_root}/scripts/checks/no-erb" "${config}" || die "refusing to run tmuxinator on ${config}"
+}
+
 attach() {
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t "=${session}"
@@ -39,7 +46,7 @@ attach() {
 }
 
 check() {
-  [ -f "${config}" ] || die "no config at ${config}"
+  guard_erb
   work="$(mktemp -d)"
   trap 'rm -rf "${work}"' EXIT
   rc=0
@@ -69,6 +76,7 @@ case "${cmd}" in
   start)
     probe
     if [ "${state}" = running ]; then attach; fi
+    guard_erb
     cd "${repo_root}"
     exec tmuxinator start -p "${config}"
     ;;
@@ -78,6 +86,7 @@ case "${cmd}" in
       printf 'dev session: %s is already running\n' "${session}"
       exit 0
     fi
+    guard_erb
     cd "${repo_root}"
     tmuxinator start --no-attach -p "${config}"
     ;;

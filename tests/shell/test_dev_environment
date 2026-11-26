@@ -53,15 +53,30 @@ test_autostart_detects_platform() {
 }
 
 test_autostart_refuses_unsafe_values() {
-  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT='/home/dev/a&b' AUTOSTART_MISE=/opt/mise AUTOSTART_PATH=/bin \
-    scripts/autostart/autostart render systemd 2>/dev/null || return 1
-  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=relative/mise AUTOSTART_PATH=/bin \
-    scripts/autostart/autostart render launchd 2>/dev/null || return 1
-  ! AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=/opt/mise AUTOSTART_PATH="/bin:\$HOME/bin" \
-    scripts/autostart/autostart render systemd 2>/dev/null
+  nl='
+'
+  # Every character autostart refuses, as the repo root (which lands in XML,
+  # a systemd unit and a sed replacement), then as PATH.
+  for c in '"' '$' '%' '&' '<' '>' "\\" '|' "${nl}"; do
+    for var in AUTOSTART_REPO_ROOT AUTOSTART_PATH; do
+      for manager in launchd systemd; do
+        err="$(
+          export AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=/opt/mise/bin/mise AUTOSTART_PATH=/bin
+          export "${var}=/home/dev/a${c}b"
+          scripts/autostart/autostart render "${manager}" 2>&1 >/dev/null
+        )" && return 1
+        printf '%s\n' "${err}" | grep -q 'contains a character autostart refuses' || return 1
+      done
+    done
+  done
+  err="$(AUTOSTART_HOME=/home/dev AUTOSTART_REPO_ROOT=/home/dev/repo AUTOSTART_MISE=relative/mise AUTOSTART_PATH=/bin \
+    scripts/autostart/autostart render launchd 2>&1 >/dev/null)" && return 1
+  printf '%s\n' "${err}" | grep -q 'mise must be an absolute path'
 }
 
-# Stub service managers record their calls so install/uninstall touch nothing real.
+# Stub service managers record their calls so install/uninstall touch nothing
+# real. `print` reports a job as loaded only while <dir>/loaded exists, and a
+# subcommand fails while <dir>/fail-<subcommand> exists.
 stub_bin() {
   bin="$1/bin"
   mkdir -p "${bin}"
@@ -69,7 +84,10 @@ stub_bin() {
     cat >"${bin}/${tool}" <<EOF
 #!/bin/sh
 printf '%s %s\n' ${tool} "\$*" >>"$1/calls"
-[ "\$1" != print ]
+sub="\$1"
+[ "\${sub}" = --user ] && sub="\$2"
+[ ! -e "$1/fail-\${sub}" ] || exit 1
+[ "\${sub}" != print ] || [ -e "$1/loaded" ]
 EOF
     chmod +x "${bin}/${tool}"
   done
@@ -81,7 +99,7 @@ test_autostart_install_and_uninstall_are_idempotent() {
   for os in Linux Darwin; do
     run() {
       PATH="${d}/bin:${PATH}" AUTOSTART_UNAME="${os}" AUTOSTART_HOME="${d}/home" AUTOSTART_XDG_CONFIG_HOME="${d}/home/.config" \
-        AUTOSTART_UID=501 AUTOSTART_MISE=/opt/mise/bin/mise AUTOSTART_PATH=/usr/bin:/bin scripts/autostart/autostart "$@"
+        AUTOSTART_UID=501 AUTOSTART_MISE=/opt/mise/bin/mise AUTOSTART_PATH=/usr/bin:/bin scripts/autostart/autostart "$@" 2>/dev/null
     }
     target="$(run path)" || return 1
     case "${os}" in
@@ -92,14 +110,52 @@ test_autostart_install_and_uninstall_are_idempotent() {
     [ -f "${target}" ] || return 1
     run install | grep -q 'already up to date' || return 1
     run status | grep -q '^autostart: installed' || return 1
+    : >"${d}/loaded"
+    : >"${d}/calls"
     run uninstall >/dev/null || return 1
     [ ! -e "${target}" ] || return 1
+    case "${os}" in
+    Linux)
+      grep -qx 'systemctl --user disable mechafighter-dev.service' "${d}/calls" || return 1
+      grep -qx 'systemctl --user daemon-reload' "${d}/calls" || return 1
+      ;;
+    *) grep -qx 'launchctl bootout gui/501/com.mechafighter.dev-session' "${d}/calls" || return 1 ;;
+    esac
+    rm -f "${d}/loaded"
+    : >"${d}/calls"
     run uninstall | grep -q 'not installed' || return 1
+    ! grep -q 'bootout\|disable' "${d}/calls" || return 1
     run status | grep -q '^autostart: not installed' || return 1
+    # A failed enable leaves nothing behind for status to call installed.
+    : >"${d}/fail-enable"
+    ! run install >/dev/null || return 1
+    [ ! -e "${target}" ] || return 1
+    run status | grep -q '^autostart: not installed' || return 1
+    rm -f "${d}/fail-enable"
+    : >"${d}/calls"
+    run install >/dev/null || return 1
+    case "${os}" in
+    Linux) grep -qx 'systemctl --user enable mechafighter-dev.service' "${d}/calls" || return 1 ;;
+    *) grep -qx 'launchctl enable gui/501/com.mechafighter.dev-session' "${d}/calls" || return 1 ;;
+    esac
+    run uninstall >/dev/null || return 1
   done
-  grep -qx 'systemctl --user enable mechafighter-dev.service' "${d}/calls" || return 1
-  grep -qx 'systemctl --user disable mechafighter-dev.service' "${d}/calls" || return 1
-  grep -qx 'launchctl enable gui/501/com.mechafighter.dev-session' "${d}/calls"
+}
+
+test_autostart_warns_when_checkout_is_not_on_main() {
+  d="$(mktemp -d)"
+  stub_bin "${d}"
+  repo="${d}/repo"
+  git init --quiet -b topic "${repo}" || return 1
+  run() {
+    PATH="${d}/bin:${PATH}" AUTOSTART_UNAME=Linux AUTOSTART_HOME="${d}/home" AUTOSTART_XDG_CONFIG_HOME="${d}/home/.config" \
+      AUTOSTART_REPO_ROOT="${repo}" AUTOSTART_MISE=/opt/mise/bin/mise AUTOSTART_PATH=/usr/bin:/bin scripts/autostart/autostart "$@"
+  }
+  err="$(run install 2>&1 >/dev/null)" || return 1
+  printf '%s\n' "${err}" | grep -q 'is on topic, not main' || return 1
+  git -C "${repo}" symbolic-ref HEAD refs/heads/main || return 1
+  err="$(run install 2>&1 >/dev/null)" || return 1
+  [ -z "${err}" ]
 }
 
 test_open_urls_uses_open_on_macos_and_xdg_open_on_linux() {
@@ -159,4 +215,21 @@ test_godot_window_uses_task_godot_editor_or_explains() {
   printf 'version: "3"\ntasks:\n  godot:editor:\n    cmds:\n      - "true"\n' >"${d}/Taskfile.yml"
   out="$(DEV_REPO_ROOT="${d}" GODOT_EDITOR_ONCE=1 scripts/dev/godot-editor)" || return 1
   [ "${out}" = 'godot: task godot:editor' ]
+}
+
+test_erb_in_tmuxinator_config_is_rejected_before_ruby_runs() {
+  d="$(mktemp -d)"
+  marker="${d}/erb-ran"
+  {
+    printf '# <%% File.write("%s", "ran") %%>\n' "${marker}"
+    cat .tmuxinator.yml
+  } >"${d}/evil.yml"
+  # The schema can't see comments, which is why the raw-file check exists.
+  check-jsonschema --schemafile schemas/tmuxinator.schema.json "${d}/evil.yml" >/dev/null || return 1
+  ! scripts/checks/no-erb "${d}/evil.yml" 2>/dev/null || return 1
+  err="$(DEV_SESSION_CONFIG="${d}/evil.yml" scripts/dev/session check 2>&1)" && return 1
+  printf '%s\n' "${err}" | grep -q 'refusing to run tmuxinator' || return 1
+  ! DEV_SESSION_CONFIG="${d}/evil.yml" scripts/dev/session start-detached >/dev/null 2>&1 || return 1
+  [ ! -e "${marker}" ] || return 1
+  scripts/checks/no-erb .tmuxinator.yml
 }

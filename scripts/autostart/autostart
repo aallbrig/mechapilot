@@ -114,18 +114,34 @@ install_it() {
     chmod 644 "${target}"
     printf 'autostart: wrote %s\n' "${target}"
   fi
+  enabled=0
   case "${platform}" in
     launchd)
       domain="$(gui_domain)"
-      launchctl enable "${domain}/${label}"
+      launchctl enable "${domain}/${label}" && enabled=1
       ;;
     systemd)
-      systemctl --user daemon-reload
-      systemctl --user enable "${unit}"
+      systemctl --user daemon-reload && systemctl --user enable "${unit}" && enabled=1
       ;;
-    *) die "unknown service manager: ${platform}" ;;
+    *) ;;
   esac
+  if [ "${enabled}" -ne 1 ]; then
+    # Don't leave a file behind that status would report as installed.
+    rm -f "${target}"
+    die "enabling ${platform} failed; removed ${target}"
+  fi
   printf 'autostart: the dev session will start detached at your next login (task dev attaches)\n'
+  warn_branch
+}
+
+# The session runs `task setup` and the pane scripts from whatever this
+# checkout has checked out at login, so say so when that isn't main.
+warn_branch() {
+  branch="$(git -C "${repo_root}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ "${branch}" != main ]; then
+    printf 'autostart: warning: %s is on %s, not main; login will run that checkout as-is\n' \
+      "${repo_root}" "${branch:-a detached HEAD}" >&2
+  fi
 }
 
 uninstall_it() {
@@ -161,6 +177,7 @@ status_it() {
     render "${platform}" >"${current}"
     if cmp -s "${current}" "${target}"; then
       printf 'autostart: installed (%s, %s)\n' "${platform}" "${target}"
+      warn_branch
     else
       printf 'autostart: installed but stale (%s); run task autostart:install\n' "${target}"
     fi

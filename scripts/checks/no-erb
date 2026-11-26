@@ -1,0 +1,24 @@
+#!/bin/sh
+# Fail if a tmuxinator config contains an ERB tag ("<%") anywhere.
+# tmuxinator renders the whole raw file through ERB before it parses the YAML,
+# so ERB even inside a YAML comment runs Ruby. A JSON Schema only sees the
+# parsed YAML and can't stop that; this check reads the raw bytes, and runs
+# before tmuxinator ever does (lint:schema and dev:check).
+# Args: files to check (default: .tmuxinator.yml).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+if [ "$#" -eq 0 ]; then set -- .tmuxinator.yml; fi
+
+status=0
+for f in "$@"; do
+  if [ ! -f "${f}" ]; then
+    printf 'no-erb: %s does not exist\n' "${f}" >&2
+    status=1
+  elif grep -n -F '<%' "${f}" >&2; then
+    printf 'no-erb: %s contains an ERB tag (<%%); tmuxinator would run it as Ruby\n' "${f}" >&2
+    status=1
+  fi
+done
+exit "${status}"

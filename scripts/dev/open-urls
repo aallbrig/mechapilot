@@ -3,7 +3,10 @@
 # `open` on macOS, `xdg-open` on Linux.
 #
 # Environment:
-#   MECHAFIGHTER_NO_BROWSER=1  print the URLs, open nothing (autostart sets it)
+#   MECHAFIGHTER_NO_BROWSER=1  print the URLs, open nothing (autostart sets it;
+#                              panes only see it when that autostart started the
+#                              tmux server, since an already-running server
+#                              gives new sessions its own global environment)
 #   OPEN_URLS_DRY_RUN=1        print "<opener> <url>" lines instead of opening
 #   DEV_UNAME, DEV_GIT_REMOTE  override `uname -s` and the origin URL (tests)
 #   MECHAFIGHTER_QA_URL        overrides the QA URL derived from the git remote

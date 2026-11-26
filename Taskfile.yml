@@ -74,6 +74,7 @@ tasks:
       - check-jsonschema --schemafile schemas/taskfile.schema.json Taskfile.yml
       - check-jsonschema --schemafile schemas/claude-code-settings.schema.json .claude/settings.json
       - check-jsonschema --check-metaschema schemas/tmuxinator.schema.json
+      - scripts/checks/no-erb .tmuxinator.yml
       - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
 
   lint:gd:

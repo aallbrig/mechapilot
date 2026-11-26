@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/aallbrig/mechapilot/blob/main/schemas/tmuxinator.schema.json",
   "title": "tmuxinator project config (strict)",
-  "description": "Written for this repo; tmuxinator publishes no schema. Keys follow tmuxinator 3.4.2 (lib/tmuxinator/project.rb, window.rb, pane.rb, hooks/project.rb). Deliberately strict: deprecated keys (project_name, project_root, tabs, pre, post, pre_tab, cli_args, rbenv, rvm) and ERB are rejected, and every object forbids unknown keys.",
+  "description": "Written for this repo; tmuxinator publishes no schema. Keys follow tmuxinator 3.4.2 (lib/tmuxinator/project.rb, window.rb, pane.rb, hooks/project.rb). Deliberately strict: deprecated keys (project_name, project_root, tabs, pre, post, pre_tab, cli_args, rbenv, rvm) are rejected and every object forbids unknown keys. The schema sees only parsed YAML, so it cannot stop ERB (tmuxinator renders the raw file, comments included, through ERB first); scripts/checks/no-erb rejects any '<%' in the raw file before tmuxinator runs.",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "windows"],
