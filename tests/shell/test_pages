@@ -1,0 +1,462 @@
+#!/bin/sh
+# Tests for the QA Environment's GitHub Pages deploy (#18): scripts/pages/*,
+# scripts/checks/pages-artifact, scripts/checks/qa-smoke,
+# scripts/checks/actions-pinned, the deploy-qa.yml rules in
+# scripts/checks/workflow-permissions, and the workflow itself. Nothing here
+# touches the network: curl is a stub on PATH that serves a fixture tree.
+
+qa_sha_a=""
+qa_sha_b=""
+
+# pages_inputs <dir>: a minimal QA site in <dir>/site and a Godot web export
+# in <dir>/web, shaped like the real ones (task site:build, task godot:export:web).
+pages_inputs() {
+  mkdir -p "$1/site/css" "$1/web"
+  printf '%s\n' '<!DOCTYPE html><html lang="en"><head><title>Mecha Fighter</title>' \
+    '<meta name="robots" content="noindex, nofollow"></head>' \
+    '<body><a href="/mechapilot/game/">Play</a></body></html>' >"$1/site/index.html"
+  printf '<!DOCTYPE html><title>Not found</title>\n' >"$1/site/404.html"
+  printf 'body{color:red}\n' >"$1/site/css/main.css"
+  printf '%s\n' '<!DOCTYPE html><html><head><title>game</title></head><body>' \
+    '<script src="index.js"></script>' \
+    '<script>' \
+    'const GODOT_CONFIG = {"args":[],"executable":"index","fileSizes":{"index.pck":4,"index.wasm":5},"mainPack":null};' \
+    'const engine = new Engine(GODOT_CONFIG);' \
+    '</script></body></html>' >"$1/web/index.html"
+  printf 'js\n' >"$1/web/index.js"
+  printf 'wasm\n' >"$1/web/index.wasm"
+  printf 'pck\n' >"$1/web/index.pck"
+  printf 'worklet\n' >"$1/web/index.audio.worklet.js"
+}
+
+# pages_tree <dir>: inputs plus the assembled artifact in <dir>/out.
+pages_tree() {
+  pages_inputs "$1"
+  scripts/pages/assemble "$1/site" "$1/web" "$1/out" >/dev/null
+}
+
+test_pages_assemble_puts_site_at_root_and_game_under_game() {
+  d="$(mktemp -d)"
+  pages_inputs "${d}"
+  out="$(scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out")" || return 1
+  printf '%s\n' "${out}" | grep -qx 'pages-artifact: ok (10 entries, [0-9]* bytes, game executable index)' || return 1
+  cmp -s "${d}/site/index.html" "${d}/out/index.html" || return 1
+  cmp -s "${d}/site/css/main.css" "${d}/out/css/main.css" || return 1
+  for f in index.html index.js index.wasm index.pck index.audio.worklet.js; do
+    cmp -s "${d}/web/${f}" "${d}/out/game/${f}" || return 1
+  done
+  # A stale file from an earlier assembly does not survive.
+  : >"${d}/out/stale.html"
+  scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out" >/dev/null || return 1
+  [ ! -e "${d}/out/stale.html" ] || return 1
+  rm -rf "${d}"
+}
+
+test_pages_assemble_refuses_symlinks_and_a_site_game_entry() {
+  d="$(mktemp -d)"
+  pages_inputs "${d}"
+  # The site must not shadow the game.
+  mkdir "${d}/site/game"
+  ! scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out" 2>/dev/null || return 1
+  rmdir "${d}/site/game"
+  ln -s /etc "${d}/site/game"
+  ! scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out" 2>/dev/null || return 1
+  rm "${d}/site/game"
+  # A symlink anywhere in either input is refused (upload-pages-artifact follows them).
+  ln -s /etc/hosts "${d}/web/hosts"
+  ! scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out" 2>/dev/null || return 1
+  rm "${d}/web/hosts"
+  ln -s "${d}/site" "${d}/site-link"
+  ! scripts/pages/assemble "${d}/site-link" "${d}/web" "${d}/out" 2>/dev/null || return 1
+  ! scripts/pages/assemble "${d}/site" "${d}/missing" "${d}/out" 2>/dev/null || return 1
+  ! scripts/pages/assemble "${d}/site" "${d}/web" 2>/dev/null || return 1
+  scripts/pages/assemble "${d}/site" "${d}/web" "${d}/out" >/dev/null || return 1
+  rm -rf "${d}"
+}
+
+# artifact_rejects <name> <mutation>: copy a good artifact, apply the mutation
+# (a shell snippet run in the copy), and require the check to fail.
+artifact_rejects() {
+  rm -rf "${pd}/m"
+  cp -R "${pd}/out" "${pd}/m"
+  (cd "${pd}/m" && eval "$2") || {
+    printf 'mutation %s did not apply\n' "$1"
+    return 1
+  }
+  if scripts/checks/pages-artifact "${pd}/m" >"${pd}/m.out" 2>&1; then
+    printf 'accepted mutation %s\n' "$1"
+    return 1
+  fi
+}
+
+test_pages_artifact_rejects_incomplete_or_unsafe_trees() {
+  pd="$(mktemp -d)"
+  pages_tree "${pd}"
+  scripts/checks/pages-artifact "${pd}/out" >/dev/null || return 1
+  artifact_rejects no-root-index 'rm index.html' || return 1
+  artifact_rejects no-404 'rm 404.html' || return 1
+  artifact_rejects no-game-index 'rm game/index.html' || return 1
+  artifact_rejects empty-root-index ': >index.html' || return 1
+  artifact_rejects no-pck 'rm game/index.pck' || return 1
+  artifact_rejects empty-pck ': >game/index.pck' || return 1
+  artifact_rejects no-wasm 'rm game/index.wasm' || return 1
+  artifact_rejects no-js 'rm game/index.js' || return 1
+  artifact_rejects no-worklet 'rm game/index.audio.worklet.js' || return 1
+  artifact_rejects symlink 'ln -s /etc/hosts hosts.txt' || return 1
+  artifact_rejects symlinked-pck 'mv game/index.pck game/real.pck && ln -s real.pck game/index.pck' || return 1
+  artifact_rejects hidden-file 'mkdir .well-known && : >.well-known/x' || return 1
+  artifact_rejects hidden-dir-file ': >game/.env' || return 1
+  artifact_rejects unsafe-name ': >"a b.html"' || return 1
+  artifact_rejects production-build "sed -i.bak '/name=\"robots\"/d' index.html && rm index.html.bak" || return 1
+  artifact_rejects no-game-link "sed -i.bak 's#/mechapilot/game/#/elsewhere/#' index.html && rm index.html.bak" || return 1
+  artifact_rejects no-config "sed -i.bak '/GODOT_CONFIG = /d' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects two-configs "grep 'GODOT_CONFIG = ' game/index.html >../cfg && cat ../cfg >>game/index.html && rm ../cfg" || return 1
+  artifact_rejects config-not-json "sed -i.bak 's/\"args\":\\[\\],/\"args\":[,/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects exe-traversal "sed -i.bak 's/\"executable\":\"index\"/\"executable\":\"..\\/index\"/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects pack-not-pck "sed -i.bak 's/\"mainPack\":null/\"mainPack\":\"index.zip\"/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects pack-missing "sed -i.bak 's/\"mainPack\":null/\"mainPack\":\"other.pck\"/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects size-mismatch 'printf "pck plus\n" >game/index.pck' || return 1
+  artifact_rejects sized-file-missing "sed -i.bak 's/\"index.wasm\":5/\"index.wasm\":5,\"extra.bin\":1/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects sized-unsafe "sed -i.bak 's/\"index.wasm\":5/\"index.wasm\":5,\"..\\/index.html\":1/' game/index.html && rm game/index.html.bak" || return 1
+  artifact_rejects no-script-tag "sed -i.bak 's#<script src=\"index.js\"></script>##' game/index.html && rm game/index.html.bak" || return 1
+  # The refusal names the problem.
+  artifact_rejects no-pck 'rm game/index.pck' || return 1
+  grep -qx 'pages-artifact: game/index.pck is missing or empty' "${pd}/m.out" || return 1
+  # A main pack other than <exe>.pck is honoured when it exists.
+  rm -rf "${pd}/m"
+  cp -R "${pd}/out" "${pd}/m"
+  mv "${pd}/m/game/index.pck" "${pd}/m/game/main.pck"
+  sed -i.bak 's/"mainPack":null/"mainPack":"main.pck"/; s/"index.pck":4/"main.pck":4/' "${pd}/m/game/index.html"
+  rm "${pd}/m/game/index.html.bak"
+  scripts/checks/pages-artifact "${pd}/m" >/dev/null || return 1
+  # The directory itself must be real.
+  ! scripts/checks/pages-artifact "${pd}/nothing" >/dev/null || return 1
+  ln -s "${pd}/out" "${pd}/link"
+  ! scripts/checks/pages-artifact "${pd}/link" >/dev/null || return 1
+  rm -rf "${pd}"
+}
+
+test_pages_artifact_enforces_the_size_limit() {
+  pd="$(mktemp -d)"
+  pages_tree "${pd}"
+  ! PAGES_ARTIFACT_MAX_BYTES=10 scripts/checks/pages-artifact "${pd}/out" >/dev/null || return 1
+  ! PAGES_ARTIFACT_MAX_BYTES=ten scripts/checks/pages-artifact "${pd}/out" >/dev/null 2>&1 || return 1
+  PAGES_ARTIFACT_MAX_BYTES=100000 scripts/checks/pages-artifact "${pd}/out" >/dev/null || return 1
+  # The variable can only lower the 1 GiB Pages limit: a sparse file one byte
+  # over it fails even when a larger limit is asked for.
+  dd if=/dev/zero of="${pd}/out/big.bin" bs=1 count=0 seek=1073741825 2>/dev/null || return 1
+  out="$(PAGES_ARTIFACT_MAX_BYTES=99999999999 scripts/checks/pages-artifact "${pd}/out")" && return 1
+  printf '%s\n' "${out}" | grep -q 'over the 1073741824-byte limit' || return 1
+  rm -rf "${pd}"
+}
+
+test_pages_artifact_honours_the_base_path() {
+  pd="$(mktemp -d)"
+  pages_tree "${pd}"
+  ! PAGES_BASE_PATH=/other/ scripts/checks/pages-artifact "${pd}/out" >/dev/null || return 1
+  ! PAGES_BASE_PATH=nope scripts/checks/pages-artifact "${pd}/out" >/dev/null 2>&1 || return 1
+  PAGES_BASE_PATH=/mechapilot/ scripts/checks/pages-artifact "${pd}/out" >/dev/null || return 1
+  rm -rf "${pd}"
+}
+
+# ---- qa-smoke ----
+
+# smoke_stub <dir> <served-tree>: a curl that serves <served-tree> for
+# https://qa.example.test/qa/ and records its arguments. A URL ending in /
+# serves that directory's index.html; anything missing is a 404. With
+# <dir>/fail-rounds holding N, the first N requests for the root are 503s.
+smoke_stub() {
+  mkdir -p "$1/bin"
+  cat >"$1/bin/curl" <<EOF
+#!/bin/sh
+root='$2'
+state='$1'
+printf '%s\n' "\$*" >>"\${state}/curl.log"
+out=/dev/null
+url=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --output) out="\$2"; shift 2 ;;
+    --write-out | --max-time | --proto | --proto-redir) shift 2 ;;
+    --*) shift ;;
+    *) url="\$1"; shift ;;
+  esac
+done
+path="\${url#https://qa.example.test/qa/}"
+[ "\${path}" != "\${url}" ] || { printf '000 0'; exit 6; }
+if [ -z "\${path}" ] && [ -f "\${state}/fail-rounds" ]; then
+  n="\$(cat "\${state}/fail-rounds")"
+  if [ "\${n}" -gt 0 ]; then
+    printf '%s\n' "\$((n - 1))" >"\${state}/fail-rounds"
+    printf '503 0'
+    exit 0
+  fi
+fi
+case "\${path}" in "" | */) path="\${path}index.html" ;; *) ;; esac
+if [ -f "\${root}/\${path}" ]; then
+  cp "\${root}/\${path}" "\${out}"
+  printf '200 %s' "\$(wc -c <"\${root}/\${path}" | tr -d ' ')"
+else
+  printf '404 9'
+fi
+EOF
+  chmod +x "$1/bin/curl"
+}
+
+qa_smoke() {
+  PATH="${sd}/bin:${PATH}" env MECHAFIGHTER_QA_URL=https://qa.example.test/qa/ QA_SMOKE_DELAY=0 "$@" scripts/checks/qa-smoke
+}
+
+test_qa_smoke_checks_site_game_and_pck() {
+  sd="$(mktemp -d)"
+  pages_tree "${sd}"
+  smoke_stub "${sd}" "${sd}/out"
+  out="$(qa_smoke)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'PASS  https://qa.example.test/qa/: HTTP 200' || return 1
+  printf '%s\n' "${out}" | grep -qx 'PASS  https://qa.example.test/qa/game/: HTTP 200' || return 1
+  printf '%s\n' "${out}" | grep -qx 'PASS  https://qa.example.test/qa/game/index.pck: HTTP 200, 4 bytes' || return 1
+  printf '%s\n' "${out}" | grep -qx 'qa-smoke: ok' || return 1
+  # https only, redirects included.
+  grep -q -- "--proto =https --proto-redir =https" "${sd}/curl.log" || return 1
+  # The default URL is this repository's Pages site.
+  PATH="${sd}/bin:${PATH}" scripts/checks/qa-smoke >/dev/null && return 1
+  grep -q 'https://aallbrig.github.io/mechapilot/' "${sd}/curl.log" || return 1
+  rm -rf "${sd}"
+}
+
+test_qa_smoke_fails_on_missing_pages_or_pack() {
+  sd="$(mktemp -d)"
+  pages_tree "${sd}"
+  smoke_stub "${sd}" "${sd}/out"
+  rm "${sd}/out/index.html"
+  out="$(qa_smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://qa.example.test/qa/: HTTP 404' || return 1
+  printf '%s\n' "${out}" | grep -qx 'qa-smoke: FAILED' || return 1
+  pages_tree "${sd}"
+  rm "${sd}/out/game/index.pck"
+  out="$(qa_smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://qa.example.test/qa/game/index.pck: HTTP 404' || return 1
+  # A pack from another deploy (wrong size) fails.
+  pages_tree "${sd}"
+  printf 'other pack\n' >"${sd}/out/game/index.pck"
+  out="$(qa_smoke)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  https://qa.example.test/qa/game/index.pck: 11 bytes, but the page expects 4' || return 1
+  # A game page without a usable config (the legacy Unity build, say) fails.
+  pages_tree "${sd}"
+  printf '<html>unity</html>\n' >"${sd}/out/game/index.html"
+  out="$(qa_smoke)" && return 1
+  printf '%s\n' "${out}" | grep -q 'no usable GODOT_CONFIG' || return 1
+  rm -rf "${sd}"
+}
+
+test_qa_smoke_retries_while_pages_catches_up() {
+  sd="$(mktemp -d)"
+  pages_tree "${sd}"
+  smoke_stub "${sd}" "${sd}/out"
+  printf '2\n' >"${sd}/fail-rounds"
+  ! qa_smoke QA_SMOKE_ATTEMPTS=2 >/dev/null || return 1
+  printf '2\n' >"${sd}/fail-rounds"
+  out="$(qa_smoke QA_SMOKE_ATTEMPTS=3)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'qa-smoke: round 2 of 3 failed; retrying in 0s' || return 1
+  printf '%s\n' "${out}" | grep -qx 'qa-smoke: ok' || return 1
+  rm -rf "${sd}"
+}
+
+test_qa_smoke_rejects_bad_settings() {
+  sd="$(mktemp -d)"
+  smoke_stub "${sd}" "${sd}"
+  for env in MECHAFIGHTER_QA_URL=http://qa.example.test/qa/ MECHAFIGHTER_QA_URL=https://qa.example.test/qa \
+    QA_SMOKE_ATTEMPTS=0 QA_SMOKE_ATTEMPTS=x QA_SMOKE_ATTEMPTS=1000 QA_SMOKE_DELAY=-1; do
+    rc=0
+    PATH="${sd}/bin:${PATH}" env "${env}" scripts/checks/qa-smoke >/dev/null 2>&1 || rc=$?
+    [ "${rc}" -eq 64 ] || {
+      printf '%s: exit %s, not 64\n' "${env}" "${rc}"
+      return 1
+    }
+  done
+  rc=0
+  PATH="${sd}/bin:${PATH}" scripts/checks/qa-smoke extra >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 64 ] || return 1
+  # Nothing was fetched for a bad setting.
+  [ ! -f "${sd}/curl.log" ] || return 1
+  rm -rf "${sd}"
+}
+
+# ---- the guard ----
+
+# guard_repo <dir>: a clone with main = a <- b and a side commit c off a.
+guard_repo() {
+  git -C "$1" init -q -b main
+  git -C "$1" config user.email t@example.test
+  git -C "$1" config user.name t
+  git -C "$1" config commit.gpgsign false
+  git -C "$1" commit -q --allow-empty -m a
+  qa_sha_a="$(git -C "$1" rev-parse HEAD)"
+  git -C "$1" commit -q --allow-empty -m b
+  qa_sha_b="$(git -C "$1" rev-parse HEAD)"
+  git -C "$1" update-ref refs/remotes/origin/main "${qa_sha_b}"
+  git -C "$1" checkout -q -b side "${qa_sha_a}"
+  git -C "$1" commit -q --allow-empty -m c
+}
+
+# run_guard <dir> <sha> [VAR=value...]: run the guard in <dir> as deploy-qa.yml would.
+run_guard() {
+  gdir="$1"
+  gsha="$2"
+  shift 2
+  (cd "${gdir}" && env DEPLOY_EVENT=workflow_run CI_WORKFLOW_PATH=.github/workflows/ci.yml CI_CONCLUSION=success \
+    CI_EVENT=push CI_HEAD_BRANCH=main CI_HEAD_REPOSITORY=octo/game GITHUB_REPOSITORY=octo/game \
+    CI_HEAD_SHA="${gsha}" CI_RUN_ID=7 "$@" "${here}/scripts/pages/guard" 2>/dev/null)
+}
+
+test_pages_guard_deploys_only_green_main_tip() {
+  here="$(pwd)"
+  g="$(mktemp -d)"
+  guard_repo "${g}"
+  r="$(run_guard "${g}" "${qa_sha_b}")" || return 1
+  [ "${r}" = deploy=yes ] || return 1
+  # An older main commit whose ci finished late does not roll QA back.
+  r="$(run_guard "${g}" "${qa_sha_a}")" || return 1
+  [ "${r}" = deploy=no ] || return 1
+  # Off main, or anything but a green push run of ci on main in this repo, is refused.
+  c="$(git -C "${g}" rev-parse side)"
+  ! run_guard "${g}" "${c}" >/dev/null || return 1
+  for bad in DEPLOY_EVENT=workflow_dispatch CI_WORKFLOW_PATH=.github/workflows/other.yml \
+    CI_CONCLUSION=failure CI_EVENT=pull_request CI_EVENT=workflow_dispatch CI_HEAD_BRANCH=side \
+    CI_HEAD_REPOSITORY=fork/game CI_RUN_ID=7x CI_RUN_ID= GITHUB_REPOSITORY= PAGES_MAIN_REF=refs/heads/none; do
+    if run_guard "${g}" "${qa_sha_b}" "${bad}" >/dev/null; then
+      printf 'guard accepted %s\n' "${bad}"
+      return 1
+    fi
+  done
+  short="$(printf '%s' "${qa_sha_b}" | cut -c1-12)"
+  ! run_guard "${g}" "${short}" >/dev/null || return 1
+  ! run_guard "${g}" 0123456789abcdef0123456789abcdef01234567 >/dev/null || return 1
+  rm -rf "${g}"
+}
+
+# ---- workflow rules ----
+
+# qa_perms <deploy-qa-sed> [other.yml]: exit 0 if workflow-permissions passes
+# on main's deploy.yml and release.yml plus a variant of deploy-qa.yml.
+qa_perms() {
+  rm -rf "${wd}/w"
+  mkdir -p "${wd}/w"
+  cp .github/workflows/deploy.yml .github/workflows/release.yml "${wd}/w/"
+  sed "$1" .github/workflows/deploy-qa.yml >"${wd}/w/deploy-qa.yml"
+  if [ -n "${2:-}" ]; then printf '%s\n' "$2" >"${wd}/w/other.yml"; fi
+  scripts/checks/workflow-permissions "${wd}/w" >"${wd}/out" 2>&1
+}
+
+test_workflow_permissions_confines_pages_deploy() {
+  wd="$(mktemp -d)"
+  nl='\
+'
+  qa_perms "" || return 1
+  # Without a deploy-qa.yml nothing can publish Pages, so it is optional.
+  rm "${wd}/w/deploy-qa.yml"
+  scripts/checks/workflow-permissions "${wd}/w" >/dev/null || return 1
+  # The environment's string form is the same environment.
+  qa_perms "s/^    environment:\$/    environment: github-pages/;/^      name: github-pages\$/d;/^      url: /d" || return 1
+  grep -qx '    environment: github-pages' "${wd}/w/deploy-qa.yml" || return 1
+  i=0
+  for script in \
+    "s/^  contents: read\$/  contents: read${nl}  pages: write/" \
+    "s/^      pages: write\$/      pages: write${nl}      contents: write/" \
+    "s/^      pages: write\$/      pages: write${nl}      actions: write/" \
+    "s/^      actions: read\$/      actions: read${nl}      pages: write/" \
+    "s/^      name: github-pages\$/      name: staging/" \
+    "/^    environment:\$/,/^      url: /d" \
+    "s#uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346#uses: actions/deploy-pages@v5#" \
+    "s#uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346#uses: someone/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346#" \
+    "s/^      - name: Deploy to GitHub Pages\$/      - run: env${nl}      - name: Deploy to GitHub Pages/" \
+    "s/^      - name: Deploy to GitHub Pages\$/      - uses: actions\\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1${nl}      - name: Deploy to GitHub Pages/" \
+    "s/^    timeout-minutes: 10\$/    timeout-minutes: 10${nl}    environment: production/" \
+    "/^  smoke:\$/,/^    permissions:\$/s/^    permissions:\$/    permissions:${nl}      id-token: write/"; do
+    i=$((i + 1))
+    sed "${script}" .github/workflows/deploy-qa.yml >"${wd}/v" || return 1
+    if cmp -s .github/workflows/deploy-qa.yml "${wd}/v"; then
+      printf 'variant %s did not change the workflow\n' "${i}"
+      return 1
+    fi
+    if qa_perms "${script}"; then
+      printf 'accepted variant %s:\n' "${i}"
+      return 1
+    fi
+  done
+  # Only deploy-qa.yml may write pages, and only it and deploy.yml id-token.
+  ! qa_perms "" 'on: push
+permissions:
+  contents: read
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+    steps:
+      - run: "true"' || return 1
+  grep -q 'other.yml requests pages: write' "${wd}/out" || return 1
+  ! qa_perms "" 'on: push
+permissions:
+  contents: read
+  id-token: write
+jobs: {}' || return 1
+  grep -q 'other.yml requests id-token: write' "${wd}/out" || return 1
+  # A symlinked deploy-qa.yml is refused.
+  qa_perms "" || return 1
+  mv "${wd}/w/deploy-qa.yml" "${wd}/real.yml"
+  ln -s "${wd}/real.yml" "${wd}/w/deploy-qa.yml"
+  ! scripts/checks/workflow-permissions "${wd}/w" >/dev/null || return 1
+  rm -rf "${wd}"
+}
+
+test_actions_pinned_requires_full_shas() {
+  scripts/checks/actions-pinned >/dev/null || return 1
+  ad="$(mktemp -d)"
+  sha=0123456789abcdef0123456789abcdef01234567
+  pinned() {
+    rm -rf "${ad}/w"
+    mkdir -p "${ad}/w"
+    printf 'on: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: %s\n' "$1" >"${ad}/w/$2"
+    scripts/checks/actions-pinned "${ad}/w" >/dev/null
+  }
+  pinned "actions/checkout@${sha}" a.yml || return 1
+  pinned "actions/cache/restore@${sha}" a.yml || return 1
+  pinned ./.github/actions/local a.yml || return 1
+  for u in actions/checkout@v7 actions/checkout@main "actions/checkout@$(printf '%s' "${sha}" | cut -c1-12)" \
+    "actions/checkout@$(printf '%s' "${sha}" | tr a-f A-F)" docker://alpine:3 actions/checkout "${sha}"; do
+    if pinned "${u}" a.yml; then
+      printf 'accepted %s\n' "${u}"
+      return 1
+    fi
+  done
+  # Dotfile workflows and job-level reusable workflows count too.
+  ! pinned actions/checkout@v7 .hidden.yml || return 1
+  printf 'on: push\njobs:\n  x:\n    uses: octo/repo/.github/workflows/w.yml@main\n' >"${ad}/w/b.yaml"
+  ! scripts/checks/actions-pinned "${ad}/w" >/dev/null 2>&1 || return 1
+  rm -rf "${ad}"
+}
+
+test_deploy_qa_workflow_publishes_after_green_ci() {
+  wf=.github/workflows/deploy-qa.yml
+  wfj="$(mktemp)"
+  yq -o=json '.' "${wf}" >"${wfj}" || return 1
+  # Only after ci completes on main; the guard decides the rest.
+  jq -e '.on == {"workflow_run": {"workflows": ["ci"], "types": ["completed"], "branches": ["main"]}}' "${wfj}" >/dev/null || return 1
+  jq -e '.concurrency == {"group": "pages", "cancel-in-progress": false}' "${wfj}" >/dev/null || return 1
+  jq -e '.jobs.build.steps | map(select(.id == "guard"))[0].run == "scripts/pages/guard >>\"${GITHUB_OUTPUT}\""' "${wfj}" >/dev/null || return 1
+  # The game is ci's own web artifact for that run, not a rebuild.
+  jq -e '.jobs.build.steps | map(select(.uses // "" | startswith("actions/download-artifact@")))[0].with
+     == {"name": "web", "path": "build/web", "run-id": "${{ github.event.workflow_run.id }}", "github-token": "${{ github.token }}"}' "${wfj}" >/dev/null || return 1
+  jq -e '[.jobs.build.steps[].run // empty] | any(test("task pages:assemble"))' "${wfj}" >/dev/null || return 1
+  jq -e '.jobs.build.steps | map(select(.uses // "" | startswith("actions/upload-pages-artifact@")))[0].with.path == "build/pages/"' "${wfj}" >/dev/null || return 1
+  # Publish only when the guard said so, then smoke the live site.
+  jq -e '.jobs.deploy.needs == "build" and .jobs.deploy.if == "needs.build.outputs.deploy == '"'"'yes'"'"'"' "${wfj}" >/dev/null || return 1
+  jq -e '.jobs.deploy.environment.name == "github-pages"' "${wfj}" >/dev/null || return 1
+  jq -e '.jobs.smoke.needs == "deploy" and ([.jobs.smoke.steps[].run // empty] | index("scripts/checks/qa-smoke") != null)' "${wfj}" >/dev/null || return 1
+  # No ${{ }} reaches a run block; triggering-run fields go through env.
+  jq -e '[.jobs[].steps[].run // empty] | all(contains("${{") | not)' "${wfj}" >/dev/null || return 1
+  # Every build step after the guard runs only when the guard says deploy.
+  jq -e '[.jobs.build.steps[] | select(.id != "guard" and (.uses // "" | test("^(actions/checkout|jdx/mise-action)@") | not)) | .if] | all(. == "steps.guard.outputs.deploy == '"'"'yes'"'"'")' "${wfj}" >/dev/null || return 1
+  rm -f "${wfj}"
+}

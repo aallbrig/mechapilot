@@ -1,0 +1,133 @@
+#!/bin/sh
+# The QA Environment's GitHub Pages artifact is complete and publishable (#18).
+#
+# Usage: scripts/checks/pages-artifact [dir]   (default: build/pages, made by
+#        `task pages:build` or `task pages:assemble`)
+#
+# The tree must hold:
+#   - only regular files and directories: no symlinks (upload-pages-artifact
+#     dereferences them), no hidden entries (it silently drops them), and only
+#     URL-safe names ([A-Za-z0-9._-] in every path segment)
+#   - the Marketing Site at the root: index.html and 404.html, built for QA
+#     (index.html carries the noindex robots meta) and linking to the game at
+#     PAGES_BASE_PATH/game/ (default /mechapilot/)
+#   - the game at game/: index.html with exactly one GODOT_CONFIG, and every
+#     file that config names (<exe>.js, <exe>.wasm, the main .pck,
+#     <exe>.audio.worklet.js), non-empty; index.html loads <exe>.js; every
+#     size in its fileSizes matches the file
+#   - at most 1 GiB in all (the Pages site limit), or less with
+#     PAGES_ARTIFACT_MAX_BYTES (which can only lower it)
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../pages/lib-pages
+. "$(dirname "$0")/../pages/lib-pages"
+
+dir="${1:-build/pages}"
+base="${PAGES_BASE_PATH:-/mechapilot/}"
+limit=1073741824
+max="${PAGES_ARTIFACT_MAX_BYTES:-${limit}}"
+case "${max}" in
+  "" | *[!0-9]*)
+    printf 'pages-artifact: PAGES_ARTIFACT_MAX_BYTES must be a whole number\n' >&2
+    exit 64
+    ;;
+  *) ;;
+esac
+if [ "${#max}" -gt 10 ] || [ "${max}" -gt "${limit}" ]; then max="${limit}"; fi
+case "${base}" in
+  /*/ | /) ;;
+  *)
+    printf 'pages-artifact: PAGES_BASE_PATH must start and end with /\n' >&2
+    exit 64
+    ;;
+esac
+
+failed=0
+fail() {
+  printf 'pages-artifact: %s\n' "$*"
+  failed=1
+}
+
+if [ -L "${dir}" ] || [ ! -d "${dir}" ]; then
+  printf 'pages-artifact: %s is missing, a symlink or not a directory (run: task pages:build)\n' "${dir}"
+  exit 1
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+(cd "${dir}" && find . ! -name . -print) | sort >"${work}/all"
+
+while IFS= read -r p; do
+  rel="${p#./}"
+  if [ -L "${dir}/${rel}" ] || { [ ! -f "${dir}/${rel}" ] && [ ! -d "${dir}/${rel}" ]; }; then
+    fail "${rel}: not a regular file or directory"
+  fi
+  case "/${rel}" in
+    */.*) fail "${rel}: hidden entries are dropped by upload-pages-artifact" ;;
+    *) ;;
+  esac
+  case "${rel}" in
+    *[!A-Za-z0-9._/-]*) fail "${rel}: name is not URL-safe ([A-Za-z0-9._-])" ;;
+    *) ;;
+  esac
+done <"${work}/all"
+
+for f in index.html 404.html game/index.html; do
+  if [ -L "${dir}/${f}" ] || [ ! -f "${dir}/${f}" ] || [ ! -s "${dir}/${f}" ]; then fail "${f} is missing or empty"; fi
+done
+
+if [ -f "${dir}/index.html" ] && [ ! -L "${dir}/index.html" ]; then
+  grep -q '<meta name="robots" content="noindex' "${dir}/index.html" ||
+    fail "index.html is not the QA build (no noindex robots meta)"
+  grep -qF "href=\"${base}game/\"" "${dir}/index.html" ||
+    fail "index.html has no link to the game at ${base}game/"
+fi
+
+game="${dir}/game"
+if [ -f "${game}/index.html" ] && [ ! -L "${game}/index.html" ]; then
+  config="$(godot_config "${game}/index.html")"
+  files=""
+  if [ -n "${config}" ]; then files="$(godot_files "${config}")"; fi
+  if [ -z "${config}" ]; then
+    fail "game/index.html has no single GODOT_CONFIG object"
+  elif [ -z "${files}" ]; then
+    fail "game/index.html: GODOT_CONFIG names an unsafe executable or main pack"
+  else
+    exe="$(printf '%s\n' "${files}" | sed -n 1p)"
+    printf '%s\n' "${files}" | sed 1d >"${work}/needed"
+    while IFS= read -r f; do
+      if [ -L "${game}/${f}" ] || [ ! -f "${game}/${f}" ] || [ ! -s "${game}/${f}" ]; then
+        fail "game/${f} is missing or empty"
+      fi
+    done <"${work}/needed"
+    grep -qF "<script src=\"${exe}.js\"></script>" "${game}/index.html" ||
+      fail "game/index.html does not load ${exe}.js"
+    printf '%s\n' "${config}" | jq -r '(.fileSizes // {}) | to_entries[] | "\(.key)\t\(.value)"' >"${work}/sizes"
+    tab="$(printf '\t')"
+    while IFS="${tab}" read -r f want; do
+      case "${f}" in
+        "" | *[!A-Za-z0-9._-]* | .*)
+          fail "game/index.html: fileSizes names an unsafe file"
+          continue
+          ;;
+        *) ;;
+      esac
+      if [ -L "${game}/${f}" ] || [ ! -f "${game}/${f}" ]; then
+        fail "game/${f}: in fileSizes but missing"
+        continue
+      fi
+      have="$(wc -c <"${game}/${f}" | tr -d ' ')"
+      [ "${have}" = "${want}" ] || fail "game/${f}: ${have} bytes, but fileSizes says ${want}"
+    done <"${work}/sizes"
+  fi
+fi
+
+exe="${exe:-none}"
+files_n="$(grep -c . "${work}/all" || true)"
+# wc prints "<n> ./<path>" per file, plus "<n> total" per batch of several.
+bytes="$( (cd "${dir}" && find . -type f -exec wc -c {} +) | awk '$2 != "total" { s += $1 } END { printf "%.0f", s }')"
+[ "${bytes}" -le "${max}" ] || fail "${bytes} bytes in all, over the ${max}-byte limit"
+
+if [ "${failed}" -ne 0 ]; then exit 1; fi
+printf 'pages-artifact: ok (%s entries, %s bytes, game executable %s)\n' "${files_n}" "${bytes}" "${exe}"

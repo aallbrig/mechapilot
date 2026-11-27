@@ -1,0 +1,58 @@
+#!/bin/sh
+# Every Action and reusable workflow a workflow uses is pinned by full commit
+# SHA (#18), so a moved tag can't change what runs.
+#
+# Usage: scripts/checks/actions-pinned [workflows-dir]   (default: .github/workflows)
+#
+# Every *.yml and *.yaml directly in the directory is checked, dotfiles
+# included; a symlink or anything but a regular file fails. Each `uses:` of a
+# step or a job must be either a local path (./...) or
+# <owner>/<repo>[/<path>]@<40 lowercase hex>. Docker image references
+# (docker://) and branch or tag refs are refused.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+dir="${1:-.github/workflows}"
+[ -d "${dir}" ] || {
+  printf 'actions-pinned: no %s\n' "${dir}" >&2
+  exit 1
+}
+
+failed=0
+checked=0
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+find "${dir}/." ! -name . -prune \( -name '*.yml' -o -name '*.yaml' \) -print | sort >"${list}"
+
+while IFS= read -r f; do
+  shown="${dir}/${f##*/}"
+  if [ -L "${f}" ] || [ ! -f "${f}" ]; then
+    printf 'actions-pinned: %s is a symlink or not a regular file\n' "${shown}"
+    failed=1
+    continue
+  fi
+  json="$(yq -o=json '.' "${f}")" || {
+    printf 'actions-pinned: %s is not valid YAML\n' "${shown}"
+    failed=1
+    continue
+  }
+  checked=$((checked + 1))
+  bad="$(printf '%s\n' "${json}" | jq -r '
+    def pinned: type == "string"
+      and (startswith("./") or test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$"));
+    (.jobs // {}) | to_entries[] | .key as $job | .value
+    | ((if type == "object" and has("uses") then .uses else empty end),
+       (if type == "object" then (.steps // [])[] | select(type == "object" and has("uses")) | .uses else empty end))
+    | select(pinned | not)
+    | "job \($job): \(tojson)"')" || bad="unparseable jobs"
+  if [ -n "${bad}" ]; then
+    printf '%s\n' "${bad}" | while IFS= read -r b; do
+      printf 'actions-pinned: %s: %s is not pinned by full commit SHA\n' "${shown}" "${b}"
+    done
+    failed=1
+  fi
+done <"${list}"
+
+if [ "${failed}" -ne 0 ]; then exit 1; fi
+printf 'actions-pinned: ok (%s workflows)\n' "${checked}"

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Shared helpers for the QA Environment's Pages artifact and smoke check (#18).
+# Sourced. Each helper prints its result, or nothing when the input is not
+# acceptable, and always returns 0 (so set -e stays in force in callers).
+
+# godot_config <html-file>: print the Godot web export's GODOT_CONFIG object as
+# compact JSON, only if the page has exactly one `const GODOT_CONFIG = {...};`
+# line and it holds one JSON object.
+godot_config() {
+  n="$(grep -c '^const GODOT_CONFIG = {.*};[[:space:]]*$' "$1" 2>/dev/null || true)"
+  [ "${n}" = 1 ] || return 0
+  grep '^const GODOT_CONFIG = {.*};[[:space:]]*$' "$1" |
+    sed 's/^const GODOT_CONFIG = //; s/;[[:space:]]*$//' |
+    jq -c 'select(type == "object")' 2>/dev/null || true
+}
+
+# godot_files <config-json>: print the executable's name, then the files the
+# page loads (<exe>.js, <exe>.wasm, the main pack and <exe>.audio.worklet.js),
+# one per line, only if the executable and the main pack are plain file names
+# ([A-Za-z0-9_-], the pack ending in .pck), so they can't leave the game's
+# directory or carry URL syntax.
+godot_files() {
+  printf '%s\n' "$1" | jq -r '
+    def plain: type == "string" and test("^[A-Za-z0-9_-]+$");
+    .executable as $e
+    | (.mainPack // "\($e).pck") as $p
+    | if ($e | plain) and ($p | type == "string" and test("^[A-Za-z0-9_-]+[.]pck$")) then
+        $e, "\($e).js", "\($e).wasm", $p, "\($e).audio.worklet.js"
+      else empty end' 2>/dev/null || true
+}

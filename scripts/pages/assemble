@@ -1,0 +1,46 @@
+#!/bin/sh
+# Assemble the GitHub Pages artifact for the QA Environment (#18).
+#
+# Usage: scripts/pages/assemble <site-dir> <web-dir> <out-dir>
+#
+#   <site-dir>  the Marketing Site's QA build (build/site/qa/mechapilot),
+#               published at the Pages root (/mechapilot/)
+#   <web-dir>   the Godot web export (build/web), published at /mechapilot/game/
+#   <out-dir>   replaced with the assembled tree (build/pages)
+#
+# Both inputs must be real directories holding only regular files and
+# directories (no symlinks, which upload-pages-artifact would dereference),
+# and the site must not already have a game/ entry, so neither tree can
+# shadow the other. The result is then judged by scripts/checks/pages-artifact.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+
+usage='usage: assemble <site-dir> <web-dir> <out-dir>'
+site="${1:?${usage}}"
+web="${2:?${usage}}"
+out="${3:?${usage}}"
+[ "$#" -eq 3 ] || {
+  printf '%s\n' "${usage}" >&2
+  exit 64
+}
+
+fail() {
+  printf 'pages-assemble: %s\n' "$*" >&2
+  exit 1
+}
+
+for d in "${site}" "${web}"; do
+  if [ -L "${d}" ] || [ ! -d "${d}" ]; then fail "${d} is missing, a symlink or not a directory"; fi
+  odd="$(find "${d}/." ! -type f ! -type d -print | head -n 1)"
+  [ -z "${odd}" ] || fail "${d} holds something other than regular files and directories: ${odd}"
+done
+if [ -e "${site}/game" ] || [ -L "${site}/game" ]; then fail "${site} already has a game entry; the game owns /game/"; fi
+
+rm -rf "${out}"
+mkdir -p "${out}/game"
+cp -R "${site}/." "${out}/"
+cp -R "${web}/." "${out}/game/"
+
+"${here}/../checks/pages-artifact" "${out}"

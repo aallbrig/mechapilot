@@ -1,14 +1,25 @@
 #!/bin/sh
-# Least privilege for the release and deploy workflows (#31).
+# Least privilege for the release and deploy workflows (#31) and the QA
+# Environment's Pages deploy (#18).
 #
 # Usage: scripts/checks/workflow-permissions [workflows-dir]
 #
-#   deploy.yml   requests exactly id-token: write and contents: read
-#   release.yml  requests exactly contents: write
+#   deploy.yml     requests exactly id-token: write and contents: read
+#   release.yml    requests exactly contents: write
 # at the workflow level, and every job declares its own permissions with no
-# scope and no level beyond that (read < write). No other workflow may request
-# contents: write (or write-all), so only release.yml can publish a release as
-# github-actions[bot], which the deploy's pre-flight relies on. Every other
+# scope and no level beyond that (read < write).
+#   deploy-qa.yml  (optional) requests exactly contents: read at the workflow
+#                  level; every job declares permissions within contents: read,
+#                  actions: read, pages: write and id-token: write. A job that
+#                  requests pages or id-token write runs in the github-pages
+#                  environment (exactly that name) and has only
+#                  actions/deploy-pages steps pinned by full SHA, so neither
+#                  token reaches repository code; no job uses another
+#                  environment.
+# No other workflow may request contents: write (or write-all), so only
+# release.yml can publish a release as github-actions[bot], which the deploy's
+# pre-flight relies on. Only deploy-qa.yml may request pages: write, and only
+# deploy.yml and deploy-qa.yml may request id-token: write. Every other
 # workflow must declare workflow-level permissions, because a workflow that
 # declares none gets the repository's default token, which may write.
 set -eu
@@ -26,7 +37,8 @@ fail() {
   failed=1
 }
 
-# policy <file> <allowed-permissions-json>
+# policy <file> <allowed-permissions-json> [workflow-level-json]
+# The workflow level must be exactly workflow-level-json (default: allowed).
 policy() {
   f="${dir}/$1"
   if [ -L "${f}" ] || [ ! -f "${f}" ]; then
@@ -37,10 +49,10 @@ policy() {
     fail "$1 does not parse"
     return 0
   }
-  problems="$(printf '%s' "${json}" | jq -r --argjson allowed "$2" '
+  problems="$(printf '%s' "${json}" | jq -r --argjson allowed "$2" --argjson top "${3:-$2}" '
     def level: {"none": 0, "read": 1, "write": 2}[.] // 99;
     def within: type == "object" and all(to_entries[]; ($allowed[.key] != null) and ((.value | level) <= ($allowed[.key] | level)));
-    (if .permissions != $allowed then "workflow-level permissions must be exactly \($allowed | tojson), not \(.permissions | tojson)" else empty end),
+    (if .permissions != $top then "workflow-level permissions must be exactly \($top | tojson), not \(.permissions | tojson)" else empty end),
     (.jobs // {} | to_entries[]
       | if (.value | has("permissions") | not) then "job \(.key) must declare its permissions"
         elif (.value.permissions | within | not) then "job \(.key) requests \(.value.permissions | tojson), beyond \($allowed | tojson)"
@@ -60,6 +72,29 @@ if [ -f "${dir}/deploy.yml" ] && [ ! -L "${dir}/deploy.yml" ]; then
 fi
 policy release.yml '{"contents": "write"}'
 
+if [ -e "${dir}/deploy-qa.yml" ] || [ -L "${dir}/deploy-qa.yml" ]; then
+  policy deploy-qa.yml '{"contents": "read", "actions": "read", "pages": "write", "id-token": "write"}' '{"contents": "read"}'
+  if [ -f "${dir}/deploy-qa.yml" ] && [ ! -L "${dir}/deploy-qa.yml" ]; then
+    problems="$(yq -o=json '.' "${dir}/deploy-qa.yml" | jq -r '
+      def envname: if type == "object" then .name else . end;
+      def deploy_step: type == "object" and ((keys - ["name", "id", "uses", "with", "if", "timeout-minutes"]) == [])
+        and (.uses | type == "string" and test("^actions/deploy-pages@[0-9a-f]{40}$"));
+      .jobs // {} | to_entries[] | .key as $job | .value
+      | (if has("environment") and (.environment | envname) != "github-pages" then
+          "job \($job) uses environment \(.environment | envname | tojson); only github-pages is allowed" else empty end),
+        (if ((.permissions // {}) | type == "object" and (.pages == "write" or .["id-token"] == "write")) then
+          (if (has("environment") | not) or (.environment | envname) != "github-pages" then
+            "job \($job) requests pages or id-token write outside the github-pages environment" else empty end),
+          (if has("uses") or ((.steps // []) | type != "array" or length == 0 or (all(deploy_step) | not)) then
+            "job \($job) requests pages or id-token write but runs more than actions/deploy-pages pinned by SHA" else empty end)
+        else empty end)')" || problems="does not parse"
+    if [ -n "${problems}" ]; then
+      printf '%s\n' "${problems}" | while IFS= read -r p; do printf 'workflow-permissions: deploy-qa.yml: %s\n' "${p}"; done
+      failed=1
+    fi
+  fi
+fi
+
 # Every *.yml and *.yaml directly in the directory, dotfiles included.
 list="$(mktemp)"
 trap 'rm -f "${list}"' EXIT
@@ -77,14 +112,21 @@ while IFS= read -r f; do
     fail "${f##*/} does not parse"
     continue
   }
-  writes="$(printf '%s' "${json}" | jq -r '
+  name="${f##*/}"
+  writes="$(printf '%s' "${json}" | jq -r --arg name "${name}" '
     if .permissions == null then "the repository default (no workflow-level permissions)" else
     [.permissions, (.jobs // {} | .[].permissions)]
     | map(select(. != null))
     | map(if type == "string" then (if . == "write-all" then "write-all" else empty end)
-          elif .contents == "write" then "contents: write" else empty end)
+          else
+            (if .contents == "write" then "contents: write" else empty end),
+            (if .pages == "write" and $name != "deploy-qa.yml" then "pages: write" else empty end),
+            (if .["id-token"] == "write" and $name != "deploy.yml" and $name != "deploy-qa.yml" then "id-token: write" else empty end)
+          end)
     | unique | join(", ") end')" || writes="unparseable"
-  if [ -n "${writes}" ]; then fail "${f##*/} requests ${writes}; only release.yml may write contents"; fi
+  if [ -n "${writes}" ]; then
+    fail "${name} requests ${writes}; only release.yml may write contents, deploy-qa.yml pages, deploy.yml and deploy-qa.yml id-token"
+  fi
 done <"${list}"
 
 if [ "${failed}" -ne 0 ]; then exit 1; fi

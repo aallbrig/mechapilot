@@ -193,6 +193,7 @@ tasks:
       - scripts/checks/nginx-config
       - scripts/checks/threat-models
       - scripts/checks/workflow-permissions
+      - scripts/checks/actions-pinned
       - scripts/checks/production-dispatch-only
       - scripts/checks/godot-architecture
       - scripts/checks/godot-safe-api
@@ -404,6 +405,22 @@ tasks:
     cmds:
       - scripts/dev/lan url
 
+  # ---- QA Environment (GitHub Pages, #18) ----
+  # build/pages/ is the Pages artifact: the QA Marketing Site at the root
+  # (https://aallbrig.github.io/mechapilot/) and the game under game/.
+
+  pages:build:
+    desc: Build the QA site and the web export, then assemble the Pages artifact in build/pages/
+    cmds:
+      - task: site:build
+      - task: godot:export:web
+      - task: pages:assemble
+
+  pages:assemble:
+    desc: Assemble build/pages/ from the existing build/site/qa and build/web, and check it
+    cmds:
+      - scripts/pages/assemble build/site/qa/mechapilot build/web build/pages
+
   website:eval:
     desc: "Measure one page and score it (usage: task website:eval -- <site-dir | url>); remote URLs are for humans and the website-evaluation skill, never CI"
     cmds:
@@ -443,6 +460,8 @@ tasks:
       - task: ci:fast
       - task: site
       - task: e2e:web
+      # The Pages artifact deploy-qa.yml would publish, from the builds above.
+      - task: pages:assemble
       - task: secrets
       - task: ci:guard:end
 
