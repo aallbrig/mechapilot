@@ -5,6 +5,7 @@
   "name": "Dawn Patrol",
   "objective": "Fill the Boss Gauge, then bring down the Albatross.",
   "sky": {
+    "theme": "dawn",
     "top": "#3b2a5c",
     "bottom": "#ff9eb5",
     "effects": [

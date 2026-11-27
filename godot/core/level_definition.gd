@@ -14,6 +14,10 @@ const MAX_DISTANCE: float = 10_000.0
 const MAX_SCALE: float = 4.0
 const MIN_SCALE: float = 0.25
 const MAX_ANGLE: float = PI
+## The visual environments game/ can build, one per Level in Run order (#27).
+const SKY_THEMES: Array[StringName] = [
+	&"dawn", &"storm", &"sunset", &"night", &"stratosphere", &"orbit"
+]
 
 
 ## A weighted enemy kind that joins the pick after `min_kills` kills in the Level.
@@ -79,6 +83,8 @@ var id: StringName = &""
 var number: int = 0
 var display_name: String = ""
 var objective: String = ""
+## Which visual environment game/ builds (one of SKY_THEMES).
+var sky_theme: StringName = &""
 var sky_top: Color = Color.BLACK
 var sky_bottom: Color = Color.BLACK
 var sky_effects: Array[StringName] = []
@@ -167,6 +173,9 @@ static func parse_roster(data: Dictionary, reader: DataReader, path: String) -> 
 
 
 static func _parse_sky(level: LevelDefinition, sky: Dictionary, reader: DataReader) -> void:
+	level.sky_theme = StringName(reader.text(sky, "theme", "sky"))
+	if not SKY_THEMES.has(level.sky_theme):
+		reader.fail("sky.theme", "unknown theme '%s'" % level.sky_theme)
 	level.sky_top = _color(reader.text(sky, "top", "sky"), reader, "sky.top")
 	level.sky_bottom = _color(reader.text(sky, "bottom", "sky"), reader, "sky.bottom")
 	for effect: Variant in reader.list(sky, "effects", "sky"):

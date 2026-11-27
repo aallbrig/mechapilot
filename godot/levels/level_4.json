@@ -5,6 +5,7 @@
   "name": "Night Raid",
   "objective": "Fill the Boss Gauge, then sink the Leviathan.",
   "sky": {
+    "theme": "night",
     "top": "#0b1a3a",
     "bottom": "#1e3a8a",
     "effects": [

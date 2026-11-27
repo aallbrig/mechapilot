@@ -183,11 +183,23 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "theme",
         "top",
         "bottom",
         "effects"
       ],
       "properties": {
+        "theme": {
+          "description": "The visual environment game/ builds for this Level (#27).",
+          "enum": [
+            "dawn",
+            "storm",
+            "sunset",
+            "night",
+            "stratosphere",
+            "orbit"
+          ]
+        },
         "top": {
           "$ref": "#/$defs/color"
         },

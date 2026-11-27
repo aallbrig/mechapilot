@@ -5,6 +5,7 @@
   "name": "Edge of Orbit",
   "objective": "Fill the Boss Gauge, then break the Ascendant.",
   "sky": {
+    "theme": "orbit",
     "top": "#020617",
     "bottom": "#0f172a",
     "effects": [

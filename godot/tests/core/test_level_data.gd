@@ -106,6 +106,23 @@ func test_levels_match_spec_rosters_thresholds_and_bosses() -> void:
 	var _phases: GdUnitAssert = assert_array(phases).is_equal(PHASE_COUNTS)
 
 
+func test_every_level_has_its_sky_theme() -> void:
+	var themes: Array[StringName] = []
+	for level: LevelDefinition in _levels():
+		themes.append(level.sky_theme)
+	var unknown: Dictionary = _level_1_document()
+	var sky: Dictionary = unknown["sky"]
+	sky["theme"] = "underwater"
+	var missing: Dictionary = _level_1_document()
+	var bare_sky: Dictionary = missing["sky"]
+	var _erased: bool = bare_sky.erase("theme")
+	var _in_order: GdUnitAssert = assert_array(themes).is_equal(
+		[&"dawn", &"storm", &"sunset", &"night", &"stratosphere", &"orbit"]
+	)
+	var _unknown_rejected: GdUnitAssert = assert_object(LevelDefinition.parse(unknown)).is_null()
+	var _missing_rejected: GdUnitAssert = assert_object(LevelDefinition.parse(missing)).is_null()
+
+
 func test_levels_ramp_difficulty_across_levels() -> void:
 	var levels: Array[LevelDefinition] = _levels()
 	var falls: Array[String] = []

@@ -5,6 +5,7 @@
   "name": "Storm Front",
   "objective": "Fill the Boss Gauge, then ground the Thunderhead.",
   "sky": {
+    "theme": "storm",
     "top": "#2b3038",
     "bottom": "#6b7480",
     "effects": [
