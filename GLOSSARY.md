@@ -9,15 +9,55 @@ A named, game-level occurrence (e.g. player died, enemy killed, game state chang
 _Avoid_: message, notification, callback
 
 **Game State**:
-The phase the game is in: Menu, Gameplay, Game Over, or Scoreboard.
-_Avoid_: screen, mode
+The phase the game is in: Boot, Title, Level Intro, Skirmish, Boss Warning, Boss Fight, Level Clear, Paused, Game Over, Victory or Scoreboard. Only the four phases of play (Level Intro to Boss Fight) can be Paused.
+_Avoid_: screen, mode, Menu (now the Title), Gameplay (now the phases of play)
+
+**Run**:
+One attempt at the game: the six Levels in order, starting with 3 lives, ending at Game Over or Victory. Its score, kills and time become a Scoreboard entry.
+_Avoid_: game, session, playthrough
+
+**Level**:
+One stage of a Run, defined by a Level file (`levels/level_N.json`): its sky, enemy roster, spawn ramp, Boss Gauge threshold and Boss. It plays as Level Intro, Skirmish, Boss Warning, Boss Fight and Level Clear.
+_Avoid_: stage, wave, mission
+
+**Skirmish**:
+The part of a Level before the Boss: enemies spawn from the Level's roster and their points fill the Boss Gauge.
+_Avoid_: wave (a wave is a group of enemies spawned together inside the Skirmish)
+
+**Boss**:
+The large enemy that ends each Level, with a health pool, phases and telegraphed attacks. Defeating it clears the Level; defeating Level 6's Boss is Victory.
+_Avoid_: mothership, end enemy
+
+**Boss Gauge**:
+The meter of points earned from kills in the current Level's Skirmish. When it reaches the Level's threshold, the Boss Warning starts and then the Boss enters. Losing a life does not empty it.
+_Avoid_: boss bar (that is the Boss's health bar), progress
+
+**Armor**:
+The player mech's health, 0 to 100. Hits take Armor by source; at 0 the player loses a life and respawns at full Armor.
+_Avoid_: health, HP, shield
+
+**Repair Kit**:
+A pickup that restores 30 Armor when the player flies through it. Kills sometimes drop one and a Boss always does.
+_Avoid_: health pack, powerup
+
+**Bonus Life**:
+The single extra life awarded once per Run when the score first reaches 100,000.
+_Avoid_: extra life, 1UP
+
+**Combo**:
+The score multiplier (x1 to x8) that rises with each kill made within 1.2 s of the last, and resets after 1.2 s without a kill or when the player takes damage.
+_Avoid_: streak, chain
+
+**Intel**:
+The codex of enemies and Bosses. An entry shows "???" until that enemy or Boss is first encountered in play, and stays unlocked.
+_Avoid_: bestiary, encyclopedia
 
 **Play Sphere**:
 The bounded region of space where play happens; things leaving it are out of play.
 _Avoid_: arena, play area, bounds
 
 **Scoreboard**:
-The ranked list of past runs, each recorded with the player's initials. Local to the player's browser for now.
+The top 10 past Runs, each recorded with the player's three initials, score, Level reached and time. Local to the player's browser for now.
 _Avoid_: leaderboard (reserved for a future internet-accessible version), high scores
 
 ## Web presence

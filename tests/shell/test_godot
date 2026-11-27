@@ -9,18 +9,20 @@ strict_project() {
   d="$(mktemp -d)"
   trap 'rm -rf "${d}"' EXIT
   cp godot/project.godot godot/main.gd godot/main.tscn "${d}/"
-  for dir in autoload types ui; do
+  for dir in autoload types core game ui; do
     mkdir -p "${d}/${dir}"
     cp "godot/${dir}"/*.gd "${d}/${dir}/"
   done
+  mkdir -p "${d}/levels"
+  cp godot/levels/*.json "${d}/levels/"
 }
 
 # compile_rejects <file>: the check fails, and names that file as the reason.
 compile_rejects() {
   out="$(scripts/godot-compile-check "${d}" 2>&1)" && return 1
   case "${out}" in
-    *"$1"*) return 0 ;;
-    *) return 1 ;;
+  *"$1"*) return 0 ;;
+  *) return 1 ;;
   esac
 }
 
@@ -217,6 +219,83 @@ test_architecture_rejects_game_constructing_core() {
 test_architecture_rejects_direct_event_emit() {
   arch_project
   printf 'extends Node3D\n\n\nfunc _ready() -> void:\n\tEvents.ping.emit(Phase.Id.A)\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+# A bus with a channel, like godot/autoload/events.gd; replaces the arch_project bus.
+channel_bus() {
+  printf 'class_name EventBus\nextends Node\n\nvar run: RunChannel = RunChannel.new()\n\n\nclass RunChannel:\n\textends RefCounted\n\n\tsignal score_changed(total: int)\n\n\tfunc announce_score_changed(total: int) -> void:\n\t\tscore_changed.emit(total)\n' >"${d}/autoload/events.gd"
+}
+
+test_architecture_rejects_channel_event_emit() {
+  arch_project
+  channel_bus
+  printf 'extends Node3D\n\n\nfunc _ready() -> void:\n\tEvents.run.score_changed.emit(1)\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_injected_bus_emit() {
+  arch_project
+  channel_bus
+  core_rules 'var _b: EventBus = null; _b.run.score_changed.emit(1)'
+  arch_rejects
+}
+
+test_architecture_rejects_aliased_bus_signal() {
+  arch_project
+  channel_bus
+  printf 'extends Node3D\n\n\nfunc _ready() -> void:\n\tvar s: Signal = Events.run.score_changed\n\ts.emit(1)\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_signal_built_from_name() {
+  arch_project
+  channel_bus
+  printf 'extends Node3D\n\n\nfunc _ready() -> void:\n\tvar s: Signal = Signal(Events.run, &"x")\n\ts.emit(1)\n' >"${d}/game/mech.gd"
+  arch_rejects
+}
+
+test_architecture_accepts_bus_connect_and_local_signals() {
+  arch_project
+  channel_bus
+  printf 'extends Node3D\n\nsignal landed\n\n\nfunc _ready() -> void:\n\tvar _e: Error = Events.run.score_changed.connect(_on_score_changed) as Error\n\tEvents.run.score_changed.disconnect(_on_score_changed)\n\tEvents.run.announce_score_changed(1)\n\tlanded.emit()\n\n\nfunc _on_score_changed(_total: int) -> void:\n\tpass\n' >"${d}/game/mech.gd"
+  scripts/checks/godot-architecture "${d}"
+}
+
+test_architecture_accepts_core_injected_rng_methods() {
+  arch_project
+  printf 'class_name Dice\nextends RefCounted\n\nvar _rng: RandomNumberGenerator\n\n\nfunc roll() -> float:\n\treturn _rng.randf() + _rng.randf_range(0.0, 1.0) + _rng . randi_range(1, 6)\n' >"${d}/core/dice.gd"
+  scripts/checks/godot-architecture "${d}"
+}
+
+test_architecture_rejects_core_global_rng_forms() {
+  for line in 'print(randf())' 'var _f: float = randf_range(0.0, 1.0)' '  seed(4)' '_rng.randomize()' \
+    'print([1, 2].pick_random())' 'var a: Array = [1, 2]; a.shuffle()' 'return randf()' \
+    'if randi() > 0: pass' 'var _b: bool = not randf() > 0.5' 'var _r: float = _rng.randf() + randf()' \
+    '_rng.seed = 4' 'var _c: Callable = _rng.randf'; do
+    arch_project
+    printf 'class_name Rules\nextends RefCounted\n\nvar _rng: RandomNumberGenerator\n\n\nfunc f() -> void:\n\t%s\n' "${line}" >"${d}/core/rules.gd"
+    arch_rejects || return 1
+    rm -rf "${d}"
+  done
+}
+
+test_architecture_accepts_core_subclass_of_core_class() {
+  arch_project
+  printf 'class_name MemoryLedger\nextends Ledger\n' >"${d}/core/memory_ledger.gd"
+  scripts/checks/godot-architecture "${d}"
+}
+
+test_architecture_rejects_core_subclass_of_engine_class() {
+  arch_project
+  printf 'class_name Saved\nextends Resource\n' >"${d}/core/saved.gd"
+  arch_rejects
+}
+
+test_architecture_rejects_core_subclass_of_other_layer() {
+  arch_project
+  printf 'class_name Widget\nextends RefCounted\n' >"${d}/game/widget.gd"
+  printf 'class_name CoreWidget\nextends Widget\n' >"${d}/core/core_widget.gd"
   arch_rejects
 }
 

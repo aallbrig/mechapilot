@@ -1,0 +1,175 @@
+{
+  "$schema": "../../schemas/level.schema.json",
+  "id": "level_6",
+  "number": 6,
+  "name": "Edge of Orbit",
+  "objective": "Fill the Boss Gauge, then break the Ascendant.",
+  "sky": {
+    "theme": "orbit",
+    "top": "#020617",
+    "bottom": "#0f172a",
+    "effects": [
+      "stars",
+      "earth_curve"
+    ]
+  },
+  "player": {
+    "speed": 10,
+    "coast_factor": 0.3,
+    "initial_move": [
+      0,
+      0.5
+    ],
+    "fire_interval": 0.25,
+    "muzzle_offset": 3,
+    "projectile_speed": 24,
+    "projectile_lifetime": 10,
+    "projectile_damage": 3
+  },
+  "camera": {
+    "fov": 60,
+    "offset_landscape": [
+      0,
+      0,
+      22
+    ],
+    "offset_portrait": [
+      0,
+      -2,
+      32
+    ],
+    "damping": 1,
+    "far": 100
+  },
+  "play_sphere": {
+    "radius": 40
+  },
+  "intro": {
+    "duration": 2.5
+  },
+  "roster": [
+    {
+      "kind": "fighter",
+      "weight": 2,
+      "min_kills": 0
+    },
+    {
+      "kind": "heavy",
+      "weight": 1,
+      "min_kills": 2
+    },
+    {
+      "kind": "interceptor",
+      "weight": 1,
+      "min_kills": 4
+    },
+    {
+      "kind": "drone",
+      "weight": 1,
+      "min_kills": 6
+    },
+    {
+      "kind": "bomber",
+      "weight": 1,
+      "min_kills": 8
+    },
+    {
+      "kind": "enemy_mech",
+      "weight": 1,
+      "min_kills": 10
+    }
+  ],
+  "spawner": {
+    "spawn_distance": 25,
+    "spawn_distance_jitter": 4,
+    "pool": 50,
+    "limit_start": 4.5,
+    "limit_per_kill": 0.45,
+    "limit_max": 16,
+    "delay_min": 0.1,
+    "delay_max": 0.5,
+    "buffer_start": 0.6,
+    "buffer_per_kill": 0.08,
+    "buffer_min": 0.0,
+    "aggression_start": 0.45,
+    "aggression_per_kill": 0.03,
+    "aggression_max": 0.95,
+    "wave_interval": 9,
+    "wave_size_start": 6,
+    "wave_size_growth": 3,
+    "wave_spread": 0.5
+  },
+  "difficulty": {
+    "enemy_speed_scale": 1.5,
+    "enemy_fire_rate_scale": 1.5,
+    "enemy_bullet_speed_scale": 1.25
+  },
+  "boss": {
+    "id": "ascendant",
+    "name": "Ascendant",
+    "description": "A mothership: shield nodes, then bullet curtains, then its bare core.",
+    "threshold": 15000,
+    "health": 720,
+    "phases": [
+      {
+        "starts_at": 1.0,
+        "attacks": [
+          {
+            "id": "shield_node_pulse",
+            "damage": 20,
+            "telegraph": 0.5,
+            "interval": 2.5
+          }
+        ]
+      },
+      {
+        "starts_at": 0.66,
+        "attacks": [
+          {
+            "id": "bullet_curtain",
+            "damage": 25,
+            "telegraph": 0.6,
+            "interval": 2.0
+          }
+        ]
+      },
+      {
+        "starts_at": 0.33,
+        "attacks": [
+          {
+            "id": "core_lance",
+            "damage": 35,
+            "telegraph": 0.8,
+            "interval": 3.0
+          },
+          {
+            "id": "bullet_curtain",
+            "damage": 28,
+            "telegraph": 0.6,
+            "interval": 1.6
+          }
+        ]
+      }
+    ],
+    "escorts": {
+      "roster": [
+        {
+          "kind": "drone",
+          "weight": 1,
+          "min_kills": 0
+        },
+        {
+          "kind": "interceptor",
+          "weight": 1,
+          "min_kills": 0
+        }
+      ],
+      "limit": 4,
+      "delay_min": 2.0,
+      "delay_max": 4.0
+    }
+  },
+  "game_over": {
+    "delay_after_player_death": 2.0
+  }
+}

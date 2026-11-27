@@ -1,0 +1,150 @@
+{
+  "$schema": "../../schemas/level.schema.json",
+  "id": "level_2",
+  "number": 2,
+  "name": "Storm Front",
+  "objective": "Fill the Boss Gauge, then ground the Thunderhead.",
+  "sky": {
+    "theme": "storm",
+    "top": "#2b3038",
+    "bottom": "#6b7480",
+    "effects": [
+      "rain",
+      "lightning"
+    ]
+  },
+  "player": {
+    "speed": 10,
+    "coast_factor": 0.3,
+    "initial_move": [
+      0,
+      0.5
+    ],
+    "fire_interval": 0.25,
+    "muzzle_offset": 3,
+    "projectile_speed": 24,
+    "projectile_lifetime": 10,
+    "projectile_damage": 3
+  },
+  "camera": {
+    "fov": 60,
+    "offset_landscape": [
+      0,
+      0,
+      22
+    ],
+    "offset_portrait": [
+      0,
+      -2,
+      32
+    ],
+    "damping": 1,
+    "far": 100
+  },
+  "play_sphere": {
+    "radius": 40
+  },
+  "intro": {
+    "duration": 2.5
+  },
+  "roster": [
+    {
+      "kind": "fighter",
+      "weight": 3,
+      "min_kills": 0
+    },
+    {
+      "kind": "heavy",
+      "weight": 1,
+      "min_kills": 6
+    }
+  ],
+  "spawner": {
+    "spawn_distance": 25,
+    "spawn_distance_jitter": 4,
+    "pool": 50,
+    "limit_start": 2.5,
+    "limit_per_kill": 0.36,
+    "limit_max": 12,
+    "delay_min": 0.1,
+    "delay_max": 0.7,
+    "buffer_start": 1.0,
+    "buffer_per_kill": 0.08,
+    "buffer_min": 0.0,
+    "aggression_start": 0.25,
+    "aggression_per_kill": 0.022,
+    "aggression_max": 0.75,
+    "wave_interval": 13,
+    "wave_size_start": 4,
+    "wave_size_growth": 2,
+    "wave_spread": 0.5
+  },
+  "difficulty": {
+    "enemy_speed_scale": 1.1,
+    "enemy_fire_rate_scale": 1.1,
+    "enemy_bullet_speed_scale": 1.05
+  },
+  "boss": {
+    "id": "thunderhead",
+    "name": "Thunderhead",
+    "description": "A heavy bomber that drops gravity-bomb carpets behind a tail gun.",
+    "threshold": 6000,
+    "health": 240,
+    "phases": [
+      {
+        "starts_at": 1.0,
+        "attacks": [
+          {
+            "id": "bomb_carpet",
+            "damage": 20,
+            "telegraph": 0.5,
+            "interval": 3.0
+          },
+          {
+            "id": "tail_gun",
+            "damage": 15,
+            "telegraph": 0.4,
+            "interval": 1.2
+          }
+        ]
+      },
+      {
+        "starts_at": 0.5,
+        "attacks": [
+          {
+            "id": "bomb_carpet",
+            "damage": 25,
+            "telegraph": 0.5,
+            "interval": 2.4
+          },
+          {
+            "id": "tail_gun",
+            "damage": 18,
+            "telegraph": 0.4,
+            "interval": 0.9
+          }
+        ]
+      }
+    ],
+    "escorts": {
+      "roster": [
+        {
+          "kind": "fighter",
+          "weight": 2,
+          "min_kills": 0
+        },
+        {
+          "kind": "heavy",
+          "weight": 1,
+          "min_kills": 0
+        }
+      ],
+      "limit": 3,
+      "delay_min": 3.0,
+      "delay_max": 5.0
+    }
+  },
+  "game_over": {
+    "delay_after_player_death": 2.0
+  }
+}
