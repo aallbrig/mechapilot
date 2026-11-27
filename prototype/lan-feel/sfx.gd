@@ -42,6 +42,7 @@ func _ready() -> void:
 	Events.wave_started.connect(_on_wave)
 	Events.game_started.connect(_on_game_started)
 	Events.extra_life.connect(_on_extra_life)
+	Events.vapor_burst.connect(_on_vapor)
 	Events.ui_focus.connect(_on_ui_focus)
 	Events.ui_confirm.connect(_on_ui_confirm)
 
@@ -125,3 +126,7 @@ func _on_ui_focus() -> void:
 
 func _on_ui_confirm() -> void:
 	play(0.12, 600.0, 1500.0, 0.35, 0.1, 0.12, 0.8)
+
+
+func _on_vapor(strength: float) -> void:
+	play(0.45, 300.0, 120.0, 0.0, 1.0, 0.12 + 0.2 * strength, 0.05)

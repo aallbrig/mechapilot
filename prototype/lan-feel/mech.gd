@@ -1,51 +1,80 @@
 extends Node3D
-## PROTOTYPE flying mech (throwaway). Seen side-on. The body yaws to face left or
-## right; legs (thigh + shin) and arms are secondary motion driven by hand-rolled
-## spring-dampers on their joint angles. On death it shatters into tumbling parts.
-## Joint angles are rotation.x in the body frame: positive swings a hanging limb
-## forward (toward facing), negative trails it back.
+## PROTOTYPE flying mech (throwaway, an original design). Slim humanoid with two
+## swept binder wings that carry the main thrusters, a beaked crested head with
+## three red eyes, rounded shoulders, tapered legs on thruster feet and a long arm
+## cannon. Seen side-on: the body yaws to face left or right.
+## Limbs are hand-rolled spring-dampers on joint angles (rotation.x in the body
+## frame: positive swings a hanging limb forward, negative trails it back). Two
+## tuning groups, THRUST_* (input held: streamlined, stiff) and COAST_* (input
+## released: loose, dangling), blend over POSE_BLEND_TIME.
 
-# ---- tuning (rad, rad/s, per-unit gains)
-const LEG_STIFFNESS := 34.0
-const LEG_DAMPING := 4.0
-const SHIN_STIFFNESS := 55.0
-const SHIN_DAMPING := 4.5
-const ARM_STIFFNESS := 48.0
-const ARM_DAMPING := 4.5
-## Sustained trailing per unit/s of forward speed.
-const VEL_LAG := 0.045
-## Legs back/down when climbing, float up/forward when diving, per unit/s.
-const CLIMB_LAG := 0.035
-## Angular acceleration per unit/s^2 of body acceleration (the "lag").
-const ACC_LAG := 0.32
-## How much the knee reacts to the thigh's angular velocity.
+# ---- pose blend
+const POSE_BLEND_TIME := 0.15
+
+# ---- THRUST: stick or keys held. Streamlined flying pose, stiff and damped.
+const THRUST_THIGH_REST := -0.6
+const THRUST_SHIN_REST := -0.08
+const THRUST_ARM_REST := -0.75
+const THRUST_WING_REST := 0.35
+const THRUST_LEG_SPRING := Vector2(95.0, 17.0)
+const THRUST_SHIN_SPRING := Vector2(120.0, 18.0)
+const THRUST_ARM_SPRING := Vector2(100.0, 17.0)
+const THRUST_WING_SPRING := Vector2(80.0, 13.0)
+const THRUST_VEL_LAG := 0.012
+const THRUST_ACC_LAG := 0.1
+## Max body lean toward the direction of travel (rad).
+const THRUST_LEAN := 1.15
+
+# ---- COAST: input released. Loose springs, limbs dangle and flail.
+const COAST_THIGH_REST := 0.15
+const COAST_SHIN_REST := -0.45
+const COAST_ARM_REST := 0.15
+const COAST_WING_REST := -0.3
+const COAST_LEG_SPRING := Vector2(14.0, 1.0)
+const COAST_SHIN_SPRING := Vector2(18.0, 1.2)
+const COAST_ARM_SPRING := Vector2(12.0, 0.8)
+const COAST_WING_SPRING := Vector2(16.0, 1.5)
+const COAST_VEL_LAG := 0.05
+const COAST_ACC_LAG := 0.5
+## How strongly dangling limbs keep pointing at world-down as the body tilts.
+const COAST_GRAVITY := 0.85
+## Lazy body tilt with the velocity (rad per unit/s), and its follow rate.
+const COAST_TILT := 0.025
+const COAST_TILT_RATE := 1.5
+
+# ---- shared
+const CLIMB_LAG := 0.03
 const SHIN_COUPLING := 0.7
-const IDLE_BOB := 0.07
-const MAX_ANGLE := 1.7
+const IDLE_BOB := 0.06
+const MAX_ANGLE := 1.8
 const RECOIL_KICK := 3.0
 const DEBRIS_GRAVITY := 24.0
 const DEBRIS_LIFE := 2.2
-## Back booster "wings": extra flare (rad) at full thrust, and their spring.
-const WING_FLARE := 0.55
-const WING_STIFFNESS := 40.0
-const WING_DAMPING := 5.0
-## Booster pods per side: (pitch back, roll out, length).
-const WING_PODS: Array[Vector3] = [Vector3(0.45, -0.45, 1.9), Vector3(1.1, -0.8, 1.5)]
-const BOOST_PARTICLES := 14
-const LEG_PARTICLES := 10
 const EYE_TRAIL_PARTICLES := 8
+## Muzzle of the arm cannon in gun_pivot space.
+const MUZZLE := Vector3(0, 0, -2.1)
+## Exhaust directions (in the parent's frame) for the wing and foot thrusters.
+const WING_EXHAUST := Vector3(0, -0.35, 1.0)
+const FOOT_EXHAUST := Vector3(0, -1.0, 0.3)
+## Binder wing segments, root to tip: (length, chord, sweep back).
+const WING_SEGMENTS: Array[Vector3] = [
+	Vector3(0.75, 0.85, 0.0), Vector3(0.65, 0.6, 0.14), Vector3(0.55, 0.36, 0.28)
+]
+
+const COL_WHITE := Color(0.92, 0.92, 0.88)
+const COL_GREY := Color(0.55, 0.58, 0.63)
+const COL_FRAME := Color(0.12, 0.16, 0.36)
+const COL_RED := Color(0.85, 0.1, 0.12)
+
+const Flame := preload("res://flame.gd")
 
 
 class Joint:
 	var node: Node3D
-	var rest := 0.0
 	var angle := 0.0
 	var vel := 0.0
-	var stiffness := 30.0
-	var damping := 4.0
-	var vel_gain := 1.0
-	var acc_gain := 1.0
 	var phase := 0.0
+	var gain := 1.0
 
 
 class Debris:
@@ -62,15 +91,14 @@ var gun_pivot: Node3D
 var thighs: Array[Joint] = []
 var shins: Array[Joint] = []
 var arms: Array[Joint] = []
-var debris: Array[Debris] = []
 var wings: Array[Joint] = []
-var nozzles: Array[MeshInstance3D] = []
-var boosters: Array[CPUParticles3D] = []
-var leg_jets: Array[CPUParticles3D] = []
+var flames: Array[Flame] = []
+var wing_tips: Array[Node3D] = []
+var debris: Array[Debris] = []
 var eye_trails: Array[CPUParticles3D] = []
-var boost := 0.0
-var _flame_mesh: QuadMesh
-var _eye_mesh: QuadMesh
+## 0 = coasting, 1 = thrusting.
+var fly := 0.0
+var lateral_g := 0.0
 var _last_vel := Vector3.ZERO
 var _acc := Vector3.ZERO
 var _clock := 0.0
@@ -81,71 +109,132 @@ func _ready() -> void:
 	body = Node3D.new()
 	body.rotation.y = -PI / 2.0
 	add_child(body)
-	var hull := _mat(Color(0.72, 0.78, 0.85))
-	var dark := _mat(Color(0.2, 0.24, 0.3))
-	var accent := _mat(Color(0.1, 0.9, 1.0), 3.0)
-	var jet := _mat(Color(1, 0.5, 0.1), 4.0)
-	_box(body, Vector3(1.4, 1.0, 1.0), Vector3(0, 0.0, 0), hull)
+	var white := _mat(COL_WHITE)
+	var grey := _mat(COL_GREY)
+	var frame := _mat(COL_FRAME)
+	var red := _mat(COL_RED)
+	_box(body, Vector3(0.62, 0.45, 0.5), Vector3(0, 0.25, 0), white)
+	_box(body, Vector3(0.22, 0.1, 0.05), Vector3(0, 0.3, -0.26), red)
+	_box(body, Vector3(0.36, 0.32, 0.38), Vector3(0, -0.1, 0), frame)
+	_box(body, Vector3(0.5, 0.16, 0.44), Vector3(0, -0.32, 0), grey)
+	_box(body, Vector3(0.42, 0.45, 0.3), Vector3(0, 0.2, 0.36), frame)
+	_build_head(white, red)
+	for side: float in [-1.0, 1.0]:
+		_build_shoulder(side, white, grey, frame)
+		_build_leg(side, white, grey, frame, red)
+		_build_wing(side, white, grey, frame, red)
+	gun_pivot = Node3D.new()
+	gun_pivot.position = Vector3(0, 0.28, 0.5)
+	add_child(gun_pivot)
+	_box(gun_pivot, Vector3(0.2, 0.22, 0.8), Vector3(0, 0, -0.2), white)
+	_box(gun_pivot, Vector3(0.14, 0.1, 0.5), Vector3(0, 0.13, -0.3), frame)
+	var barrel := _cyl(gun_pivot, 0.05, 1.5, Vector3(0, 0, -1.25), grey)
+	barrel.rotation.x = PI / 2.0
+	_box(gun_pivot, Vector3(0.13, 0.13, 0.1), Vector3(0, 0, -2.0), red)
+
+
+func _build_head(white: Material, red: Material) -> void:
 	var head := Node3D.new()
-	head.position = Vector3(0, 0.7, -0.05)
+	head.position = Vector3(0, 0.62, -0.02)
 	body.add_child(head)
-	_box(head, Vector3(0.7, 0.45, 0.6), Vector3.ZERO, hull)
-	_flame_mesh = _particle_quad(Color(1, 1, 1), 1.0)
-	_eye_mesh = _particle_quad(Color(1, 0.15, 0.1), 0.09)
+	_box(head, Vector3(0.3, 0.26, 0.34), Vector3.ZERO, white)
+	var beak := _cyl(head, 0.0, 0.42, Vector3(0, -0.03, -0.36), white, 0.13, 4)
+	beak.rotation.x = -PI / 2.0
+	var crest := _box(head, Vector3(0.03, 0.34, 0.3), Vector3(0, 0.25, 0.06), red)
+	crest.rotation.x = 0.55
+	var eye_mesh := _particle_quad(Color(1, 0.15, 0.1), 0.12)
 	var eye_mat := _mat(Color(1, 0.08, 0.05), 7.0)
 	for at: Vector3 in [
-		Vector3(0.14, 0.08, -0.32), Vector3(-0.14, 0.08, -0.32), Vector3(0, -0.06, -0.33)
+		Vector3(0.09, 0.04, -0.19), Vector3(-0.09, 0.04, -0.19), Vector3(0, 0.11, -0.2)
 	]:
-		var eye := _box(head, Vector3(0.1, 0.09, 0.08), at, eye_mat)
-		var trail := _emitter(_eye_mesh, EYE_TRAIL_PARTICLES, 0.22, Vector3.ZERO, _eye_ramp())
+		var eye := _box(head, Vector3(0.07, 0.06, 0.06), at, eye_mat)
+		var trail := CPUParticles3D.new()
+		trail.amount = EYE_TRAIL_PARTICLES
+		trail.lifetime = 0.22
+		trail.local_coords = false
+		trail.mesh = eye_mesh
+		trail.gravity = Vector3.ZERO
 		trail.initial_velocity_max = 0.0
-		trail.scale_amount_min = 1.0
-		trail.scale_amount_max = 1.0
+		var shrink := Curve.new()
+		shrink.add_point(Vector2(0, 1))
+		shrink.add_point(Vector2(1, 0.2))
+		trail.scale_amount_curve = shrink
+		var g := Gradient.new()
+		g.set_color(0, Color(1, 0.2, 0.15, 0.5))
+		g.set_color(1, Color(1, 0.1, 0.1, 0))
+		trail.color_ramp = g
 		eye.add_child(trail)
 		eye_trails.append(trail)
-	_box(body, Vector3(0.6, 0.8, 0.5), Vector3(0, 0.1, 0.7), dark)
-	nozzles.append(_box(body, Vector3(0.3, 0.3, 0.2), Vector3(0, -0.15, 1.0), jet))
-	var main_jet := _emitter(_flame_mesh, BOOST_PARTICLES, 0.24, Vector3(0, -0.2, 1), _flame_ramp())
-	main_jet.position = Vector3(0, -0.15, 1.1)
-	body.add_child(main_jet)
-	boosters.append(main_jet)
-	_build_wings(hull, dark, jet)
-	for side: float in [-1.0, 1.0]:
-		var thigh := _joint(Vector3(0.42 * side, -0.45, 0), LEG_STIFFNESS, LEG_DAMPING, 0.15)
-		thigh.vel_gain = 1.0 + side * 0.1
-		thigh.phase = side
-		_box(thigh.node, Vector3(0.38, 0.8, 0.45), Vector3(0, -0.38, 0), dark)
-		thighs.append(thigh)
-		var shin := Joint.new()
-		shin.node = Node3D.new()
-		shin.node.position = Vector3(0, -0.78, 0)
-		thigh.node.add_child(shin.node)
-		shin.rest = -0.35
-		shin.angle = shin.rest
-		shin.stiffness = SHIN_STIFFNESS
-		shin.damping = SHIN_DAMPING
-		shin.acc_gain = 1.3
-		_box(shin.node, Vector3(0.32, 0.72, 0.4), Vector3(0, -0.36, 0), hull)
-		_box(shin.node, Vector3(0.45, 0.15, 0.75), Vector3(0, -0.74, -0.12), dark)
-		nozzles.append(_box(shin.node, Vector3(0.24, 0.22, 0.22), Vector3(0, -0.5, 0.26), jet))
-		var leg_jet := _emitter(
-			_flame_mesh, LEG_PARTICLES, 0.25, Vector3(0, -1, 0.35), _flame_ramp()
-		)
-		leg_jet.position = Vector3(0, -0.6, 0.3)
-		shin.node.add_child(leg_jet)
-		leg_jets.append(leg_jet)
-		shins.append(shin)
-		var arm := _joint(Vector3(0.9 * side, 0.3, 0), ARM_STIFFNESS, ARM_DAMPING, 0.1)
-		arm.vel_gain = 0.7
-		arm.acc_gain = 0.8
-		arm.phase = side * 2.0
-		_box(arm.node, Vector3(0.35, 0.85, 0.35), Vector3(0, -0.35, 0), hull)
-		arms.append(arm)
-	gun_pivot = Node3D.new()
-	gun_pivot.position = Vector3(0, 0.2, 0.75)
-	add_child(gun_pivot)
-	_box(gun_pivot, Vector3(0.3, 0.3, 1.6), Vector3(0, 0, -0.6), dark)
-	_box(gun_pivot, Vector3(0.2, 0.2, 0.3), Vector3(0, 0, -1.45), accent)
+
+
+func _build_shoulder(side: float, white: Material, grey: Material, frame: Material) -> void:
+	var pad := _sphere(body, 0.24, Vector3(0.45 * side, 0.38, 0), white)
+	pad.scale = Vector3(1.0, 0.85, 1.15)
+	var arm := _joint(Vector3(0.45 * side, 0.3, 0), side * 2.0)
+	_box(arm.node, Vector3(0.13, 0.38, 0.13), Vector3(0, -0.22, 0), frame)
+	_box(arm.node, Vector3(0.17, 0.36, 0.2), Vector3(0, -0.55, 0), white)
+	_box(arm.node, Vector3(0.12, 0.12, 0.12), Vector3(0, -0.78, 0), grey)
+	arms.append(arm)
+
+
+func _build_leg(
+	side: float, white: Material, grey: Material, frame: Material, red: Material
+) -> void:
+	var thigh := _joint(Vector3(0.15 * side, -0.38, 0), side)
+	thigh.gain = 1.0 + side * 0.08
+	_box(thigh.node, Vector3(0.16, 0.5, 0.2), Vector3(0, -0.25, 0), frame)
+	_box(thigh.node, Vector3(0.2, 0.32, 0.24), Vector3(0, -0.2, -0.03), white)
+	thighs.append(thigh)
+	var shin := Joint.new()
+	shin.node = Node3D.new()
+	shin.node.position = Vector3(0, -0.52, 0)
+	thigh.node.add_child(shin.node)
+	shin.gain = 1.3
+	_box(shin.node, Vector3(0.12, 0.1, 0.1), Vector3(0, 0, -0.12), red)
+	_cyl(shin.node, 0.13, 0.62, Vector3(0, -0.32, 0), white, 0.08)
+	_box(shin.node, Vector3(0.2, 0.2, 0.42), Vector3(0, -0.68, -0.04), grey)
+	_box(shin.node, Vector3(0.16, 0.08, 0.16), Vector3(0, -0.79, 0.06), frame)
+	var f := _flame(shin.node, Vector3(0, -0.83, 0.06), FOOT_EXHAUST, 0.5, false)
+	f.name = "FootFlame"
+	shins.append(shin)
+
+
+## A swept, flat binder wing with its main thruster pod built into the root.
+func _build_wing(
+	side: float, white: Material, grey: Material, frame: Material, red: Material
+) -> void:
+	var w := _joint(Vector3(0.22 * side, 0.35, 0.4), side)
+	wings.append(w)
+	var plate := Node3D.new()
+	plate.rotation = Vector3(0.75, 0, -0.25 * side)
+	w.node.add_child(plate)
+	# Tapered, swept panel built from segments: (length, chord, sweep back).
+	var y := 0.0
+	for seg: Vector3 in WING_SEGMENTS:
+		var mid := Vector3(0, y + seg.x * 0.5, seg.z)
+		_box(plate, Vector3(0.05, seg.x, seg.y), mid, grey)
+		_box(plate, Vector3(0.07, seg.x, 0.1), mid + Vector3(0, 0, -seg.y * 0.5), white)
+		_box(plate, Vector3(0.06, seg.x * 0.9, 0.12), mid + Vector3(0, 0, seg.y * 0.45), frame)
+		y += seg.x
+	_box(plate, Vector3(0.08, 0.14, 0.3), Vector3(0, y, 0.24), red)
+	var tip := Node3D.new()
+	tip.position = Vector3(0, y + 0.05, 0.3)
+	plate.add_child(tip)
+	wing_tips.append(tip)
+	var dir := WING_EXHAUST.normalized()
+	var pod := _cyl(w.node, 0.14, 0.75, Vector3(0, -0.05, 0.25), white, 0.17)
+	pod.basis = Basis(Quaternion(Vector3.UP, dir))
+	_flame(w.node, Vector3(0, -0.05, 0.25) + dir * 0.38, dir, 1.0, true)
+
+
+func _flame(parent: Node3D, at: Vector3, dir: Vector3, flame_size: float, main: bool) -> Flame:
+	var f := Flame.new()
+	f.position = at
+	f.basis = Basis(Quaternion(Vector3.UP, dir.normalized()))
+	parent.add_child(f)
+	f.setup(flame_size, main, main)
+	flames.append(f)
+	return f
 
 
 func _mat(color: Color, emission: float = 0.0) -> StandardMaterial3D:
@@ -159,38 +248,45 @@ func _mat(color: Color, emission: float = 0.0) -> StandardMaterial3D:
 
 
 func _box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = size
-	mi.mesh = bm
+	return _mesh(parent, bm, pos, mat)
+
+
+func _cyl(
+	parent: Node3D,
+	top: float,
+	height: float,
+	pos: Vector3,
+	mat: Material,
+	bottom: float = -1.0,
+	segments: int = 12
+) -> MeshInstance3D:
+	var cm := CylinderMesh.new()
+	cm.top_radius = top
+	cm.bottom_radius = top if bottom < 0.0 else bottom
+	cm.height = height
+	cm.radial_segments = segments
+	cm.rings = 1
+	return _mesh(parent, cm, pos, mat)
+
+
+func _sphere(parent: Node3D, radius: float, pos: Vector3, mat: Material) -> MeshInstance3D:
+	var sm := SphereMesh.new()
+	sm.radius = radius
+	sm.height = radius * 2.0
+	sm.radial_segments = 12
+	sm.rings = 6
+	return _mesh(parent, sm, pos, mat)
+
+
+func _mesh(parent: Node3D, mesh: Mesh, pos: Vector3, mat: Material) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
 	mi.material_override = mat
 	mi.position = pos
 	parent.add_child(mi)
 	return mi
-
-
-## Long booster pods splayed up and back like wings, nozzles at the tips.
-func _build_wings(hull: Material, dark: Material, jet: Material) -> void:
-	for side: float in [-1.0, 1.0]:
-		var w := _joint(Vector3(0.28 * side, 0.4, 0.85), WING_STIFFNESS, WING_DAMPING, 0.0)
-		w.phase = side
-		wings.append(w)
-		for pod_def in WING_PODS:
-			var pod := Node3D.new()
-			pod.rotation = Vector3(pod_def.x, 0, pod_def.y * side)
-			w.node.add_child(pod)
-			var length := pod_def.z
-			_box(pod, Vector3(0.22, length, 0.3), Vector3(0, length * 0.5, 0), hull)
-			_box(pod, Vector3(0.06, length * 0.8, 0.55), Vector3(0, length * 0.45, 0.22), dark)
-			var noz := _box(pod, Vector3(0.3, 0.24, 0.36), Vector3(0, length, 0.05), jet)
-			nozzles.append(noz)
-			var em := _emitter(
-				_flame_mesh, BOOST_PARTICLES, 0.24, Vector3(0, -0.45, 1), _flame_ramp()
-			)
-			em.position = Vector3(0, length + 0.1, 0.05)
-			em.basis = pod.basis.inverse()
-			pod.add_child(em)
-			boosters.append(em)
 
 
 func _particle_quad(color: Color, size: float) -> QuadMesh:
@@ -202,75 +298,32 @@ func _particle_quad(color: Color, size: float) -> QuadMesh:
 	m.vertex_color_use_as_albedo = true
 	m.albedo_color = color
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
-	var soft := GradientTexture2D.new()
-	soft.fill = GradientTexture2D.FILL_RADIAL
-	soft.fill_from = Vector2(0.5, 0.5)
-	soft.fill_to = Vector2(1.0, 0.5)
-	var fall := Gradient.new()
-	fall.set_color(0, Color(1, 1, 1, 1))
-	fall.set_color(1, Color(1, 1, 1, 0))
-	soft.gradient = fall
-	soft.width = 32
-	soft.height = 32
-	m.albedo_texture = soft
 	q.material = m
 	return q
 
 
-func _flame_ramp() -> Gradient:
-	var g := Gradient.new()
-	g.set_color(0, Color(1, 0.95, 0.7, 0.85))
-	g.set_color(1, Color(0.45, 0.45, 0.5, 0))
-	g.add_point(0.2, Color(1, 0.55, 0.15, 0.75))
-	g.add_point(0.55, Color(0.7, 0.25, 0.1, 0.35))
-	return g
-
-
-func _eye_ramp() -> Gradient:
-	var g := Gradient.new()
-	g.set_color(0, Color(1, 0.2, 0.15, 0.5))
-	g.set_color(1, Color(1, 0.1, 0.1, 0))
-	return g
-
-
-func _emitter(
-	mesh: Mesh, amount: int, lifetime: float, dir: Vector3, ramp: Gradient
-) -> CPUParticles3D:
-	var p := CPUParticles3D.new()
-	p.amount = amount
-	p.lifetime = lifetime
-	p.local_coords = false
-	p.mesh = mesh
-	p.direction = dir if dir != Vector3.ZERO else Vector3.UP
-	p.spread = 12.0
-	p.gravity = Vector3.ZERO
-	p.initial_velocity_min = 1.0
-	p.initial_velocity_max = 3.0
-	p.scale_amount_min = 0.2
-	p.scale_amount_max = 0.4
-	var curve := Curve.new()
-	curve.add_point(Vector2(0, 1))
-	curve.add_point(Vector2(1, 0.1))
-	p.scale_amount_curve = curve
-	p.color_ramp = ramp
-	p.emitting = true
-	return p
-
-
-func _joint(pos: Vector3, k: float, c: float, rest: float) -> Joint:
+func _joint(pos: Vector3, phase: float) -> Joint:
 	var j := Joint.new()
 	j.node = Node3D.new()
 	j.node.position = pos
+	j.phase = phase
 	body.add_child(j.node)
-	j.stiffness = k
-	j.damping = c
-	j.rest = rest
-	j.angle = rest
 	return j
 
 
-## Advance the body pose and limb springs. velocity is world-space, facing is +1 or -1.
-## thrust is the move-input magnitude, 0..1; it drives the boosters.
+func muzzle_position() -> Vector3:
+	return gun_pivot.global_transform * MUZZLE
+
+
+func wing_tip_positions() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for t in wing_tips:
+		out.append(t.global_position)
+	return out
+
+
+## Advance pose, springs and flames. velocity is world-space, facing is +1 or -1,
+## thrust is the move-input magnitude 0..1.
 func step(delta: float, velocity: Vector3, facing: float, thrust: float = 0.0) -> void:
 	if delta <= 0.0:
 		return
@@ -278,58 +331,60 @@ func step(delta: float, velocity: Vector3, facing: float, thrust: float = 0.0) -
 	var raw_acc := (velocity - _last_vel) / delta
 	_last_vel = velocity
 	_acc = _acc.lerp(raw_acc, 0.5)
+	var vdir := velocity.normalized() if velocity.length() > 0.5 else Vector3.ZERO
+	var lat := (raw_acc - vdir * raw_acc.dot(vdir)).length()
+	lateral_g = lerpf(lateral_g, lat, 1.0 - exp(-6.0 * delta))
+	fly = move_toward(fly, 1.0 if thrust > 0.15 else 0.0, delta / POSE_BLEND_TIME)
+
 	var yaw := -PI / 2.0 * facing
 	body.rotation.y = lerp_angle(body.rotation.y, yaw, 1.0 - exp(-12.0 * delta))
-	var pitch := clampf(velocity.y * 0.035 * facing, -0.45, 0.45)
-	body.rotation.x = lerpf(body.rotation.x, pitch, 1.0 - exp(-8.0 * delta))
-	body.position.y = sin(_clock * 2.2) * 0.06
-
 	var fwd_vel := velocity.x * facing
-	var fwd_acc := _acc.x * facing
-	var drive := -fwd_vel * VEL_LAG - velocity.y * CLIMB_LAG
-	var push := -fwd_acc * ACC_LAG - _acc.y * ACC_LAG * 0.4
+	var lean := -clampf(atan2(fwd_vel, velocity.y) * 0.75, -0.9, THRUST_LEAN)
+	if velocity.length() < 2.0:
+		lean = 0.0
+	var coast_tilt := clampf(velocity.y * COAST_TILT * facing - fwd_vel * 0.02, -0.5, 0.5)
+	var pitch_goal := lerpf(coast_tilt, lean, fly)
+	var rate := lerpf(COAST_TILT_RATE, 9.0, fly)
+	body.rotation.x = lerpf(body.rotation.x, pitch_goal, 1.0 - exp(-rate * delta))
+	body.position.y = sin(_clock * 2.2) * 0.05 * (1.0 - fly)
+
+	var vel_lag := lerpf(COAST_VEL_LAG, THRUST_VEL_LAG, fly)
+	var acc_lag := lerpf(COAST_ACC_LAG, THRUST_ACC_LAG, fly)
+	var drive := -fwd_vel * vel_lag - velocity.y * CLIMB_LAG * (1.0 - fly)
+	var push := -_acc.x * facing * acc_lag - _acc.y * acc_lag * 0.4
+	var hang := -body.rotation.x * COAST_GRAVITY * (1.0 - fly)
+	var bob := IDLE_BOB * (1.0 - fly)
+	var leg_k := COAST_LEG_SPRING.lerp(THRUST_LEG_SPRING, fly)
+	var shin_k := COAST_SHIN_SPRING.lerp(THRUST_SHIN_SPRING, fly)
+	var arm_k := COAST_ARM_SPRING.lerp(THRUST_ARM_SPRING, fly)
+	var wing_k := COAST_WING_SPRING.lerp(THRUST_WING_SPRING, fly)
+	var thigh_rest := lerpf(COAST_THIGH_REST, THRUST_THIGH_REST, fly)
+	var shin_rest := lerpf(COAST_SHIN_REST, THRUST_SHIN_REST, fly)
+	var arm_rest := lerpf(COAST_ARM_REST, THRUST_ARM_REST, fly)
+	var wing_rest := lerpf(COAST_WING_REST, THRUST_WING_REST, fly)
 	for j in thighs:
-		var bob := sin(_clock * 2.4 + j.phase) * IDLE_BOB
-		_spring(j, j.rest + drive * j.vel_gain + bob, push * j.acc_gain, delta)
+		var t := thigh_rest + drive * j.gain + hang + sin(_clock * 2.4 + j.phase) * bob
+		_spring(j, t, push * j.gain, leg_k, delta)
 	for i in shins.size():
 		var s := shins[i]
-		var couple := -thighs[i].vel * SHIN_COUPLING
-		_spring(s, s.rest + drive * 0.4, push * s.acc_gain + couple * s.stiffness * 0.1, delta)
+		var couple := -thighs[i].vel * SHIN_COUPLING * shin_k.x * 0.1 * (1.0 - fly * 0.7)
+		_spring(s, shin_rest + drive * 0.4, push * s.gain + couple, shin_k, delta)
 	for j in arms:
-		var bob := sin(_clock * 2.0 + j.phase) * IDLE_BOB
-		_spring(j, j.rest + drive * j.vel_gain + bob, push * j.acc_gain, delta)
-	_update_boosters(delta, thrust, push, velocity)
-
-
-func _update_boosters(delta: float, thrust: float, push: float, velocity: Vector3) -> void:
-	boost = lerpf(boost, clampf(thrust, 0.0, 1.0), 1.0 - exp(-8.0 * delta))
-	var flicker := 0.12 + 0.06 * sin(_clock * 37.0) * sin(_clock * 23.0)
-	var power := maxf(boost, flicker)
+		var t := arm_rest + drive * 0.7 + hang + sin(_clock * 2.0 + j.phase) * bob
+		_spring(j, t, push * 0.8, arm_k, delta)
 	for w in wings:
 		var sway := sin(_clock * 1.7 + w.phase) * 0.03
-		_spring(w, boost * WING_FLARE + sway, push * 0.2, delta)
-		w.node.rotation.z = w.phase * w.angle * 0.6
-	for em in boosters:
-		_drive(em, power, 1.0)
-	for em in leg_jets:
-		_drive(em, power, 0.7)
-	for n in nozzles:
-		n.scale = Vector3.ONE * (0.85 + power * 0.45)
+		_spring(w, wing_rest + sway, push * 0.2, wing_k, delta)
+		w.node.rotation.z = w.phase * w.angle * 0.5
+	for f in flames:
+		f.drive(thrust, delta)
 	var moving := velocity.length() > 3.0
 	for t in eye_trails:
 		t.emitting = moving
 
 
-func _drive(em: CPUParticles3D, power: float, k: float) -> void:
-	em.initial_velocity_min = lerpf(1.0, 7.0, power) * k
-	em.initial_velocity_max = lerpf(2.0, 13.0, power) * k
-	em.speed_scale = lerpf(0.6, 1.5, power)
-	em.scale_amount_min = lerpf(0.08, 0.16, power) * k
-	em.scale_amount_max = lerpf(0.14, 0.32, power) * k
-
-
-func _spring(j: Joint, target: float, force: float, delta: float) -> void:
-	j.vel += (j.stiffness * (target - j.angle) - j.damping * j.vel + force) * delta
+func _spring(j: Joint, target: float, force: float, k: Vector2, delta: float) -> void:
+	j.vel += (k.x * (target - j.angle) - k.y * j.vel + force) * delta
 	j.angle = clampf(j.angle + j.vel * delta, -MAX_ANGLE, MAX_ANGLE)
 	j.node.rotation.x = j.angle
 
@@ -338,13 +393,15 @@ func _spring(j: Joint, target: float, force: float, delta: float) -> void:
 func impulse(push: Vector3, facing: float) -> void:
 	var fwd := push.x * facing
 	for j: Joint in thighs + shins + arms:
-		j.vel += (-fwd - push.y * 0.4) * RECOIL_KICK * j.acc_gain + randf_range(-0.6, 0.6)
+		j.vel += (-fwd - push.y * 0.4) * RECOIL_KICK * j.gain + randf_range(-0.6, 0.6)
 
 
 ## Break into tumbling parts. The intact mech hides until reset().
 func shatter(velocity: Vector3) -> void:
 	var center := global_position
 	for mi in _meshes(self):
+		if not mi.material_override is StandardMaterial3D:
+			continue
 		var d := Debris.new()
 		d.node = MeshInstance3D.new()
 		d.node.mesh = mi.mesh
@@ -369,11 +426,12 @@ func reset() -> void:
 	visible = true
 	_last_vel = Vector3.ZERO
 	_acc = Vector3.ZERO
-	boost = 0.0
+	lateral_g = 0.0
+	fly = 0.0
 	for j: Joint in thighs + shins + arms + wings:
-		j.angle = j.rest
+		j.angle = 0.0
 		j.vel = 0.0
-		j.node.rotation.x = j.rest
+		j.node.rotation.x = 0.0
 
 
 func _meshes(n: Node) -> Array[MeshInstance3D]:

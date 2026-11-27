@@ -18,12 +18,12 @@ const BULLET_INHERIT := 0.6
 const SPHERE_RADIUS := 40.0
 const SPAWN_DIST := 25.0
 ## Visual scale of the player mech; the contact radius scales with it.
-const MECH_SCALE := 1.15
-const CAMERA_DISTANCE := 24.0
+const MECH_SCALE := 0.85
+const CAMERA_DISTANCE := 34.0
 ## Fraction of the screen (width and height) where the mech moves without the camera.
 const CAMERA_DEADZONE := 0.2
 ## Critically damped follow rate outside the dead zone (1/s). Lower = lazier.
-const CAMERA_FOLLOW := 2.6
+const CAMERA_FOLLOW := 2.3
 ## Seconds of velocity the camera leads by.
 const CAMERA_LOOKAHEAD := 0.25
 const CAM_OFFSET := Vector3(0, 0, CAMERA_DISTANCE)
@@ -36,12 +36,13 @@ const RESPAWN_DELAY := 1.6
 const ATTRACT_ENEMIES := 3
 const WAVE_INTERVAL := 14.0
 const COMBO_WINDOW := 1.6
-const CLOUD_SPAN := Vector2(150.0, 100.0)
+const CLOUD_SPAN := Vector2(230.0, 150.0)
 const STICK_RANGE := 70.0
 const Mech := preload("res://mech.gd")
 const Hud := preload("res://hud.gd")
 const Menu := preload("res://menu.gd")
 const Fx := preload("res://fx.gd")
+const Vapor := preload("res://vapor.gd")
 const Scores := preload("res://scores.gd")
 const SKY_SHADER := preload("res://sky.gdshader")
 
@@ -71,6 +72,7 @@ var player: Mech
 var hud: Hud
 var menu: Menu
 var fx: Fx
+var vapor: Vapor
 var velocity := Vector3.ZERO
 var move_dir := Vector3(0, 1, 0)
 var aim_dir := Vector3(1, 0, 0)
@@ -119,6 +121,10 @@ var mat_cache := {}
 var autotest := false
 var auto_t := 0.0
 var auto_screen := -1
+var auto_peak := 0.0
+## Stills only: --cam=<distance> overrides the camera distance.
+var cam_offset := CAM_OFFSET
+var cam_lock := false
 
 
 func _ready() -> void:
@@ -127,9 +133,15 @@ func _ready() -> void:
 	shake_noise.frequency = 0.5
 	last_ticks = Time.get_ticks_usec()
 	autotest = OS.get_cmdline_user_args().has("--autotest")
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--cam="):
+			cam_offset = Vector3(0, 0, arg.trim_prefix("--cam=").to_float())
+			cam_lock = true
 	_build_world()
 	fx = Fx.new()
 	add_child(fx)
+	vapor = Vapor.new()
+	add_child(vapor)
 	_build_player()
 	var layer := CanvasLayer.new()
 	add_child(layer)
@@ -239,7 +251,7 @@ func _build_world() -> void:
 	add_child(sky)
 
 	# Parallax cloud layers: perspective does the parallax, deeper = slower.
-	for i in 40:
+	for i in 60:
 		var c := MeshInstance3D.new()
 		var sp := SphereMesh.new()
 		sp.radius = 1.0
@@ -296,6 +308,7 @@ func _clear_world() -> void:
 	player.position = Vector3.ZERO
 	player.reset()
 	player.visible = true
+	vapor.clear()
 	move_dir = Vector3(0, 1, 0)
 	aim_dir = Vector3(1, 0, 0)
 	facing = 1.0
@@ -353,6 +366,7 @@ func _player_hit() -> void:
 	fx.explode(p, Color(0.3, 0.9, 1.0), 90, 1.8)
 	fx.explode(p, Color(1.0, 0.6, 0.1), 60, 1.3)
 	player.shatter(velocity)
+	vapor.clear()
 	trauma = 1.0
 	slowmo = 0.9
 	fov_punch = 14.0
@@ -458,7 +472,9 @@ func _read_move() -> Vector2:
 	)
 	v += touch_move_vec
 	if autotest:
-		v = Vector2(signf(sin(clock * 0.9)), cos(clock * 1.3) * 0.7)
+		var turn := floorf(clock / 0.9) * PI * 0.5
+		v = Vector2(cos(turn), sin(turn))
+		v *= float(fmod(clock, 3.5) < 2.0)
 	return v.limit_length(1.0)
 
 
@@ -587,6 +603,17 @@ func _autotest_step(real_dt: float) -> void:
 			)
 		)
 	auto_t += real_dt
+	auto_peak = maxf(auto_peak, player.lateral_g)
+	if cam_lock and Engine.get_frames_drawn() % 10 == 0:
+		print(
+			(
+				"still: frame=%d fly=%.2f vapor=%.2f"
+				% [Engine.get_frames_drawn(), player.fly, vapor.strength]
+			)
+		)
+	if int(clock / 2.0) != int((clock - real_dt) / 2.0):
+		print("autotest: peak lateral_g=%.1f vapor=%.2f" % [auto_peak, vapor.strength])
+		auto_peak = 0.0
 	if menu.screen == Menu.Screen.MAIN and auto_t > 3.0:
 		menu.request_play()
 	elif menu.screen == Menu.Screen.INITIALS and auto_t > 2.0:
@@ -636,6 +663,14 @@ func _update_player(delta: float) -> void:
 		if fire_cd <= 0.0:
 			_fire()
 	player.step(delta, velocity, facing, thrust)
+	vapor.update(
+		delta,
+		player.global_position,
+		velocity,
+		player.lateral_g,
+		player.wing_tip_positions(),
+		MECH_SCALE
+	)
 	var want := Basis.looking_at(aim_dir, Vector3.BACK)
 	player.gun_pivot.basis = (
 		player.gun_pivot.basis.slerp(want, 1.0 - exp(-30.0 * delta)).orthonormalized()
@@ -645,7 +680,7 @@ func _update_player(delta: float) -> void:
 func _fire() -> void:
 	fire_cd = FIRE_INTERVAL * (1.6 if state == State.ATTRACT else 1.0)
 	var dir := aim_dir.rotated(Vector3.BACK, randf_range(-0.04, 0.04))
-	var muzzle := player.gun_pivot.global_transform * Vector3(0, 0, -1.6)
+	var muzzle := player.muzzle_position()
 	var b := Bullet.new()
 	b.node = MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -879,7 +914,9 @@ func _update_camera(real_dt: float) -> void:
 		var desired := player.position + velocity * CAMERA_LOOKAHEAD
 		cam_goal.x += _deadzone_excess(desired.x - cam_goal.x, dz.x)
 		cam_goal.y += _deadzone_excess(desired.y - cam_goal.y, dz.y)
-	var w := CAMERA_FOLLOW
+	if cam_lock:
+		cam_goal = player.position
+	var w := CAMERA_FOLLOW * (4.0 if cam_lock else 1.0)
 	cam_vel += (w * w * (cam_goal - cam_focus) - 2.0 * w * cam_vel) * real_dt
 	cam_focus += cam_vel * real_dt
 	trauma = maxf(0.0, trauma - real_dt * 1.5)
@@ -887,7 +924,7 @@ func _update_camera(real_dt: float) -> void:
 	var t := clock * 40.0
 	var off := Vector3(shake_noise.get_noise_2d(t, 0), shake_noise.get_noise_2d(0, t), 0) * s * 2.2
 	cam_kick = cam_kick.lerp(Vector3.ZERO, 1.0 - exp(-18.0 * real_dt))
-	cam.position = cam_focus + CAM_OFFSET + off + cam_kick
+	cam.position = cam_focus + cam_offset + off + cam_kick
 	cam.rotation = Vector3(0, 0, shake_noise.get_noise_2d(t, t) * s * 0.08)
 	fov_punch = lerpf(fov_punch, 0.0, 1.0 - exp(-8.0 * real_dt))
 	cam.fov = 60.0 - fov_punch

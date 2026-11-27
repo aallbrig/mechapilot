@@ -12,3 +12,4 @@ signal life_lost(lives_left: int)
 signal extra_life(lives: int)
 signal ui_focus
 signal ui_confirm
+signal vapor_burst(strength: float)
