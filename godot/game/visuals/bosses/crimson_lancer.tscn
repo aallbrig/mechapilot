@@ -4,30 +4,12 @@
 [ext_resource type="Script" path="res://game/visuals/bosses/boss_visual.gd" id="2_boss_visual"]
 [ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="3_visual_piece"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
-resource_name = "hull"
-albedo_color = Color(0.62, 0.05, 0.08, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
-resource_name = "metal"
-albedo_color = Color(0.22, 0.22, 0.25, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
-resource_name = "frame"
-albedo_color = Color(0.06, 0.06, 0.08, 1)
+[sub_resource type="BoxMesh" id="BoxMesh_6"]
+size = Vector3(0.04, 0.42, 0.06)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
 resource_name = "accent"
 albedo_color = Color(0.95, 0.72, 0.2, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
-resource_name = "glow"
-albedo_color = Color(1, 0.85, 0.2, 1)
-emission_enabled = true
-emission = Color(1, 0.85, 0.2, 1)
-
-[sub_resource type="BoxMesh" id="BoxMesh_6"]
-size = Vector3(0.04, 0.42, 0.06)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_7"]
 top_radius = 0.05
@@ -36,8 +18,12 @@ height = 0.9
 radial_segments = 12
 rings = 1
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
+resource_name = "metal"
+albedo_color = Color(0.22, 0.22, 0.25, 1)
+
 [sub_resource type="CylinderMesh" id="CylinderMesh_8"]
-top_radius = 0
+top_radius = 0.0
 bottom_radius = 0.13
 height = 2.2
 radial_segments = 6
@@ -50,35 +36,46 @@ height = 0.08
 radial_segments = 8
 rings = 1
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.06, 0.06, 0.08, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_10"]
 size = Vector3(0.04, 0.04, 1.6)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "glow"
+albedo_color = Color(1, 0.85, 0.2, 1)
+emission_enabled = true
+emission = Color(1, 0.85, 0.2, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_11"]
 size = Vector3(0.32, 0.22, 0.6)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
+resource_name = "hull"
+albedo_color = Color(0.62, 0.05, 0.08, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_12"]
 size = Vector3(0.34, 0.05, 0.62)
 
 [sub_resource type="PrismMesh" id="PrismMesh_13"]
-left_to_right = 0.5
 size = Vector3(0.05, 0.5, 0.25)
 
 [sub_resource type="PrismMesh" id="PrismMesh_14"]
-left_to_right = 0.5
 size = Vector3(0.05, 0.4, 0.25)
 
 [sub_resource type="PrismMesh" id="PrismMesh_15"]
-left_to_right = 0.5
 size = Vector3(0.05, 0.3, 0.25)
 
 [node name="CrimsonLancer" instance=ExtResource("1_player_mech")]
 script = ExtResource("2_boss_visual")
 palette = Dictionary[StringName, Color]({
-&"hull": Color(0.62, 0.05, 0.08, 1),
-&"metal": Color(0.22, 0.22, 0.25, 1),
-&"frame": Color(0.06, 0.06, 0.08, 1),
 &"accent": Color(0.95, 0.72, 0.2, 1),
-&"glow": Color(1, 0.85, 0.2, 1)
+&"frame": Color(0.06, 0.06, 0.08, 1),
+&"glow": Color(1, 0.85, 0.2, 1),
+&"hull": Color(0.62, 0.05, 0.08, 1),
+&"metal": Color(0.22, 0.22, 0.25, 1)
 })
 phase_count = 3
 turret_count = 0

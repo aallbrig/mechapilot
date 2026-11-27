@@ -282,6 +282,17 @@ write_media_variants() {
     "albedo_texture = ${object}" >"$1/art/object.tres"
   printf '%s\n' '[gd_scene format=3]' '' '[node name="Logo" type="Sprite2D"]' \
     "texture = ${object}" >"$1/art/object.tscn"
+  # Godot reads every byte up to 0x20 as whitespace, so a vertical tab (\013)
+  # or form feed (\014) can stand where a space or nothing was; and with two
+  # type keys in a header, Godot uses the last.
+  printf '[gd_resource\013type="DPITexture" format=3]\n\n[resource]\n%s\n' "${svg}" >"$1/art/vt-header.tres"
+  printf '[gd_resource type="DPITexture"\014format=3]\n\n[resource]\n%s\n' "${svg}" >"$1/art/ff-header.tres"
+  printf '[gd_scene format=3]\n\n[sub_resource\014type="DPITexture" id="1"]\n%s\n\n[node name="Logo" type="Sprite2D"]\ntexture = SubResource("1")\n' \
+    "${svg}" >"$1/art/ff-sub.tscn"
+  printf '[gd_resource type="StandardMaterial3D" format=3]\n\n[resource]\nalbedo_texture = Object\013(DPITexture,"_source":"<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"8\\" height=\\"8\\"/>")\n' \
+    >"$1/art/vt-object.tres"
+  printf '[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/blob = PackedByteArray\014("AAAA")\n' >"$1/art/ff-bytes.tres"
+  printf '%s\n' '[gd_resource type="StandardMaterial3D" type="DPITexture" format=3]' '' '[resource]' "${svg}" >"$1/art/dup-type.tres"
 }
 
 test_asset_credits_rejects_embedded_media_in_any_formatting_godot_parses() {
@@ -299,7 +310,8 @@ test_asset_credits_rejects_embedded_media_in_any_formatting_godot_parses() {
   parsed="$(printf '%s\n' "${out}" | sed -n 's/^LOADED:\(.*\):true$/\1/p' | sort)"
   # Only variants the pinned Godot really loads count, and there must be some
   # of each kind: a .tres, a .tscn and the PackedByteArray spelling.
-  for must in spaced.tres indented.tres split.tres bytes.tres split.tscn object.tres object.tscn; do
+  for must in spaced.tres indented.tres split.tres bytes.tres split.tscn object.tres object.tscn \
+    vt-header.tres ff-header.tres ff-sub.tscn vt-object.tres ff-bytes.tres dup-type.tres; do
     printf '%s\n' "${parsed}" | grep -Fqx "${must}" || {
       printf 'Godot did not load %s:\n%s\n' "${must}" "${out}"
       return 1

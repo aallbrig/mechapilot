@@ -3,25 +3,44 @@
 [ext_resource type="Script" path="res://game/visuals/bosses/boss_visual.gd" id="1_boss_visual"]
 [ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
 
+[sub_resource type="SphereMesh" id="SphereMesh_7"]
+radius = 6.0
+height = 12.0
+radial_segments = 16
+rings = 8
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
 resource_name = "hull"
 albedo_color = Color(0.88, 0.86, 0.8, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_8"]
+radius = 3.0
+height = 6.0
+radial_segments = 14
+rings = 6
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
 resource_name = "trim"
 albedo_color = Color(0.7, 0.62, 0.45, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
-resource_name = "frame"
-albedo_color = Color(0.2, 0.16, 0.24, 1)
+[sub_resource type="TorusMesh" id="TorusMesh_9"]
+inner_radius = 5.4
+outer_radius = 6.0
+rings = 20
+ring_segments = 4
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
 resource_name = "accent"
 albedo_color = Color(0.85, 0.65, 0.25, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
-resource_name = "metal"
-albedo_color = Color(0.6, 0.6, 0.65, 1)
+[sub_resource type="PrismMesh" id="PrismMesh_10"]
+size = Vector3(3, 1.2, 0.6)
+
+[sub_resource type="PrismMesh" id="PrismMesh_11"]
+size = Vector3(0.6, 1.4, 0.3)
+
+[sub_resource type="BoxMesh" id="BoxMesh_12"]
+size = Vector3(14, 0.15, 0.2)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
 resource_name = "glow"
@@ -29,40 +48,15 @@ albedo_color = Color(1, 0.25, 0.85, 1)
 emission_enabled = true
 emission = Color(1, 0.25, 0.85, 1)
 
-[sub_resource type="SphereMesh" id="SphereMesh_7"]
-radius = 6
-height = 12
-radial_segments = 16
-rings = 8
-
-[sub_resource type="SphereMesh" id="SphereMesh_8"]
-radius = 3
-height = 6
-radial_segments = 14
-rings = 6
-
-[sub_resource type="TorusMesh" id="TorusMesh_9"]
-inner_radius = 5.4
-outer_radius = 6
-rings = 20
-ring_segments = 4
-
-[sub_resource type="PrismMesh" id="PrismMesh_10"]
-left_to_right = 0.5
-size = Vector3(3, 1.2, 0.6)
-
-[sub_resource type="PrismMesh" id="PrismMesh_11"]
-left_to_right = 0.5
-size = Vector3(0.6, 1.4, 0.3)
-
-[sub_resource type="BoxMesh" id="BoxMesh_12"]
-size = Vector3(14, 0.15, 0.2)
-
 [sub_resource type="SphereMesh" id="SphereMesh_13"]
 radius = 0.6
 height = 1.2
 radial_segments = 6
 rings = 3
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.2, 0.16, 0.24, 1)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_14"]
 top_radius = 0.15
@@ -89,15 +83,19 @@ outer_radius = 1.05
 rings = 10
 ring_segments = 3
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "metal"
+albedo_color = Color(0.6, 0.6, 0.65, 1)
+
 [sub_resource type="SphereMesh" id="SphereMesh_18"]
 radius = 1.5
-height = 3
+height = 3.0
 radial_segments = 8
 rings = 4
 
 [sub_resource type="TorusMesh" id="TorusMesh_19"]
 inner_radius = 1.7
-outer_radius = 2
+outer_radius = 2.0
 rings = 14
 ring_segments = 3
 
@@ -108,7 +106,6 @@ radial_segments = 10
 rings = 5
 
 [sub_resource type="PrismMesh" id="PrismMesh_21"]
-left_to_right = 0.5
 size = Vector3(0.5, 1.6, 0.4)
 
 [node name="Ascendant" type="Node3D"]

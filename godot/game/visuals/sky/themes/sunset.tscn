@@ -12,8 +12,14 @@ shader_parameter/upper_color = Color(0.85, 0.4, 0.25, 1)
 shader_parameter/horizon_color = Color(1, 0.75, 0.3, 1)
 shader_parameter/low_color = Color(0.75, 0.3, 0.2, 1)
 shader_parameter/horizon_height = -0.3
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
 shader_parameter/sun_position = Vector2(-0.4, -0.2)
 shader_parameter/sun_color = Color(1, 0.65, 0.25, 1)
+shader_parameter/sun_radius = null
+shader_parameter/sun_halo = null
+shader_parameter/haze_tint = null
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("ShaderMaterial_1")
@@ -35,14 +41,12 @@ fog_light_color = Color(0.95, 0.6, 0.35, 1)
 fog_density = 0.004
 fog_sky_affect = 0.0
 
-[sub_resource type="QuadMesh" id="QuadMesh_4"]
-size = Vector2(2, 2)
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = Color(1, 0.72, 0.42, 1)
-shader_parameter/shade_color = Color(0.5, 0.25, 0.35, 1)
+shader_parameter/lit_color = null
+shader_parameter/shade_color = null
+shader_parameter/softness = null
 
 [node name="SunsetSky" type="Node3D"]
 script = ExtResource("1_sky_environm")

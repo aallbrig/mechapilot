@@ -3,4 +3,6 @@
 [ext_resource type="Shader" path="res://game/visuals/kit/flash.gdshader" id="1_flash"]
 
 [resource]
+render_priority = 0
 shader = ExtResource("1_flash")
+shader_parameter/flash_color = null

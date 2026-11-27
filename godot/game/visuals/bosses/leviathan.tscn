@@ -3,25 +3,39 @@
 [ext_resource type="Script" path="res://game/visuals/bosses/boss_visual.gd" id="1_boss_visual"]
 [ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
 
+[sub_resource type="BoxMesh" id="BoxMesh_7"]
+size = Vector3(20, 2.5, 4)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
 resource_name = "hull"
 albedo_color = Color(0.2, 0.25, 0.38, 1)
+
+[sub_resource type="PrismMesh" id="PrismMesh_8"]
+size = Vector3(4, 3, 2.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_9"]
+size = Vector3(23, 0.4, 5)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
 resource_name = "trim"
 albedo_color = Color(0.32, 0.36, 0.45, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
-resource_name = "frame"
-albedo_color = Color(0.1, 0.12, 0.18, 1)
+[sub_resource type="BoxMesh" id="BoxMesh_10"]
+size = Vector3(23.02, 0.12, 5.02)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
 resource_name = "accent"
 albedo_color = Color(0.8, 0.15, 0.15, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
-resource_name = "metal"
-albedo_color = Color(0.5, 0.52, 0.58, 1)
+[sub_resource type="BoxMesh" id="BoxMesh_11"]
+size = Vector3(2.6, 3, 1.6)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.1, 0.12, 0.18, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_12"]
+size = Vector3(2.62, 0.3, 1.62)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
 resource_name = "glow"
@@ -29,31 +43,16 @@ albedo_color = Color(1, 0.3, 0.25, 1)
 emission_enabled = true
 emission = Color(1, 0.3, 0.25, 1)
 
-[sub_resource type="BoxMesh" id="BoxMesh_7"]
-size = Vector3(20, 2.5, 4)
-
-[sub_resource type="PrismMesh" id="PrismMesh_8"]
-left_to_right = 0.5
-size = Vector3(4, 3, 2.5)
-
-[sub_resource type="BoxMesh" id="BoxMesh_9"]
-size = Vector3(23, 0.4, 5)
-
-[sub_resource type="BoxMesh" id="BoxMesh_10"]
-size = Vector3(23.02, 0.12, 5.02)
-
-[sub_resource type="BoxMesh" id="BoxMesh_11"]
-size = Vector3(2.6, 3, 1.6)
-
-[sub_resource type="BoxMesh" id="BoxMesh_12"]
-size = Vector3(2.62, 0.3, 1.62)
-
 [sub_resource type="CylinderMesh" id="CylinderMesh_13"]
 top_radius = 0.1
 bottom_radius = 0.12
 height = 2.2
 radial_segments = 6
 rings = 1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "metal"
+albedo_color = Color(0.5, 0.52, 0.58, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_14"]
 size = Vector3(1.4, 0.15, 0.15)

@@ -30,6 +30,12 @@
 # file added to that folder later, so original work is credited file by file
 # (or, when it ships no asset files, with no paths at all).
 #
+# Its scan of text resources and scenes reads them in Godot's own saved form,
+# which scripts/checks/godot-canonical (run just before it by `task checks`)
+# requires of every committed .tres, .tscn and .escn. It also stands on its own:
+# a control byte, a tag that is not laid out the way Godot writes one, or a
+# duplicate type key makes the file an asset or an error here too.
+#
 # Usage: scripts/checks/asset-credits [project-dir]   (default: godot)
 #        scripts/checks/asset-credits --list-types         (prints "media <T>"
 #        and "procedural <T>" lines, for the classification test)
@@ -125,6 +131,9 @@ scan_tags() {
   awk '
 { text = text $0 "\n" }
 function emit(tag,    name, rest, found, t) {
+  # Godot writes a tag on one line, its words separated by single spaces. Any
+  # other layout is not Godot'"'"'s own and is refused before it is read.
+  if (tag ~ /[\t\r\n]/ || tag ~ /  / || tag ~ /^ / || tag ~ / $/) print "BAD tag layout"
   gsub(/[ \t\r\n]+/, " ", tag)
   sub(/^ /, "", tag)
   name = tag
@@ -137,10 +146,11 @@ function emit(tag,    name, rest, found, t) {
       sub(/^[^"]*"/, "", t)
       sub(/"$/, "", t)
       print "TYPE " t
-      found = 1
+      found++
       rest = substr(rest, RSTART + RLENGTH)
     }
     if (!found) print "BAD untyped " name
+    if (found > 1) print "BAD duplicate type in " name
   } else if (name == "node") {
     rest = " " tag
     while (match(rest, /[^A-Za-z0-9_]type ?= ?[&^]?"[^"]*"/)) {
@@ -183,7 +193,10 @@ END {
     if (c == "[" && (word == "Array" || word == "Dictionary")) { word = ""; depth++; prev = c; i++; continue }
     word = ""
     if (c == " " || c == "\t" || c == "\r" || c == "\n") { i++; continue }
-    if (c == "[" && depth == 0 && prev != "=") { intag = 1; tdepth = 0; tag = ""; i++; continue }
+    if (c == "[" && depth == 0 && prev != "=") {
+      if (i > 1 && substr(text, i - 1, 1) != "\n") print "BAD tag not at a line start"
+      intag = 1; tdepth = 0; tag = ""; i++; continue
+    }
     if (c == "[" || c == "(" || c == "{") depth++
     else if (c == "]" || c == ")" || c == "}") { depth--; if (depth < 0) print "BAD unbalanced" }
     prev = c
@@ -202,6 +215,14 @@ allowed_types=" $(printf '%s %s' "${PROCEDURAL_TYPES}" "${PLAIN_TYPES}" | tr -s 
 
 grep -Ei '\.(tres|tscn|escn)$' "${work}/files" >"${work}/text-files" || true
 while IFS= read -r f; do
+  # A control byte (anything below 0x20 but tab, LF and CR, or DEL) is never in
+  # a file Godot wrote, and Godot reads some of them as whitespace: refused.
+  controls="$(tr -d '\011\012\015\040-\176\200-\377' <"${root}/${f}" | wc -c | tr -d ' ')"
+  if [ "${controls}" -ne 0 ]; then
+    printf '%s\n' "${f}" >>"${work}/control-bytes"
+    printf '%s\n' "${f}"
+    continue
+  fi
   if grep -Eq 'PackedByteArray[[:space:]]*\(' "${root}/${f}"; then
     printf '%s\n' "${f}"
     continue
@@ -228,6 +249,11 @@ while IFS= read -r f; do
   if [ "${clear}" = no ]; then printf '%s\n' "${f}"; fi
 done <"${work}/text-files" >>"${work}/assets"
 sort -u -o "${work}/assets" "${work}/assets"
+if [ -s "${work}/control-bytes" ]; then
+  while IFS= read -r f; do
+    fail "${f}: contains a control byte (not a file Godot wrote; open and save it in Godot)"
+  done <"${work}/control-bytes"
+fi
 
 # Credit rows: "<paths>\t<licence>\t<origin>", one row per line. The licence is
 # the last cell, with a Markdown link reduced to its text; origin is "original"

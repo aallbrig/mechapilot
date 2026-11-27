@@ -3,4 +3,10 @@
 [ext_resource type="Shader" path="res://game/visuals/kit/hull.gdshader" id="1_hull"]
 
 [resource]
+render_priority = 0
 shader = ExtResource("1_hull")
+shader_parameter/glow_energy = null
+shader_parameter/rim_amount = null
+shader_parameter/rim_tint = null
+shader_parameter/roughness_value = null
+shader_parameter/metallic_value = null

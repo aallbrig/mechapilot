@@ -3,38 +3,12 @@
 [ext_resource type="Script" path="res://game/visuals/bosses/boss_visual.gd" id="1_boss_visual"]
 [ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
 
+[sub_resource type="BoxMesh" id="BoxMesh_8"]
+size = Vector3(6, 1.6, 1.8)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
 resource_name = "hull"
 albedo_color = Color(0.95, 0.75, 0.1, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
-resource_name = "trim"
-albedo_color = Color(0.2, 0.2, 0.22, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
-resource_name = "frame"
-albedo_color = Color(0.12, 0.12, 0.14, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
-resource_name = "accent"
-albedo_color = Color(0.1, 0.1, 0.1, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
-resource_name = "canopy"
-albedo_color = Color(0.3, 0.5, 0.6, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
-resource_name = "metal"
-albedo_color = Color(0.5, 0.5, 0.55, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7"]
-resource_name = "glow"
-albedo_color = Color(1, 0.4, 0.1, 1)
-emission_enabled = true
-emission = Color(1, 0.4, 0.1, 1)
-
-[sub_resource type="BoxMesh" id="BoxMesh_8"]
-size = Vector3(6, 1.6, 1.8)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_9"]
 top_radius = 0.2
@@ -49,17 +23,33 @@ height = 1.6
 radial_segments = 8
 rings = 4
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "canopy"
+albedo_color = Color(0.3, 0.5, 0.6, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_11"]
 size = Vector3(6.02, 0.3, 1.82)
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
+resource_name = "accent"
+albedo_color = Color(0.1, 0.1, 0.1, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_12"]
 size = Vector3(0.9, 0.9, 0.7)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.12, 0.12, 0.14, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_13"]
 size = Vector3(1.2, 1.7, 0.8)
 
 [sub_resource type="BoxMesh" id="BoxMesh_14"]
 size = Vector3(1.4, 0.2, 3.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
+resource_name = "trim"
+albedo_color = Color(0.2, 0.2, 0.22, 1)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_15"]
 top_radius = 0.28
@@ -75,6 +65,12 @@ height = 0.05
 radial_segments = 8
 rings = 1
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7"]
+resource_name = "glow"
+albedo_color = Color(1, 0.4, 0.1, 1)
+emission_enabled = true
+emission = Color(1, 0.4, 0.1, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_17"]
 size = Vector3(0.9, 0.4, 0.1)
 
@@ -84,6 +80,10 @@ bottom_radius = 0.3
 height = 0.35
 radial_segments = 8
 rings = 1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
+resource_name = "metal"
+albedo_color = Color(0.5, 0.5, 0.55, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_19"]
 size = Vector3(6, 0.06, 0.38)
@@ -113,7 +113,7 @@ size = Vector3(1.6, 0.6, 0.12)
 [sub_resource type="CylinderMesh" id="CylinderMesh_25"]
 top_radius = 0.3
 bottom_radius = 0.35
-height = 1
+height = 1.0
 radial_segments = 8
 rings = 1
 
@@ -130,7 +130,10 @@ phase_count = 2
 turret_count = 1
 weak_point_count = 1
 extra_markers = Array[StringName]([&"RotorFront", &"RotorRear"])
-spin_rates = Dictionary[StringName, float]({&"RotorFront": 22, &"RotorRear": -22})
+spin_rates = Dictionary[StringName, float]({
+&"RotorFront": 22.0,
+&"RotorRear": -22.0
+})
 
 [node name="Hull" type="MeshInstance3D" parent="."]
 unique_name_in_owner = true

@@ -12,6 +12,17 @@ shader_parameter/upper_color = Color(0.03, 0.06, 0.18, 1)
 shader_parameter/horizon_color = Color(0.08, 0.14, 0.32, 1)
 shader_parameter/low_color = Color(0.04, 0.06, 0.14, 1)
 shader_parameter/horizon_height = -0.3
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/star_density = null
+shader_parameter/star_amount = null
+shader_parameter/star_color = null
+shader_parameter/beam_color = null
+shader_parameter/beam_strength = null
+shader_parameter/beam_width = null
+shader_parameter/beam_sweep = null
+shader_parameter/beam_speed = null
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("ShaderMaterial_1")
@@ -33,14 +44,12 @@ fog_light_color = Color(0.06, 0.1, 0.22, 1)
 fog_density = 0.004
 fog_sky_affect = 0.0
 
-[sub_resource type="QuadMesh" id="QuadMesh_4"]
-size = Vector2(2, 2)
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = Color(0.25, 0.3, 0.45, 1)
-shader_parameter/shade_color = Color(0.06, 0.08, 0.15, 1)
+shader_parameter/lit_color = null
+shader_parameter/shade_color = null
+shader_parameter/softness = null
 
 [node name="NightSky" type="Node3D"]
 script = ExtResource("1_sky_environm")

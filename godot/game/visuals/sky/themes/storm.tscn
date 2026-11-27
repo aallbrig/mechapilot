@@ -13,6 +13,13 @@ shader_parameter/upper_color = Color(0.3, 0.32, 0.36, 1)
 shader_parameter/horizon_color = Color(0.45, 0.47, 0.5, 1)
 shader_parameter/low_color = Color(0.3, 0.32, 0.35, 1)
 shader_parameter/horizon_height = -0.3
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/flash = null
+shader_parameter/bolt_x = null
+shader_parameter/flash_color = null
+shader_parameter/churn_speed = null
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("ShaderMaterial_1")
@@ -34,18 +41,24 @@ fog_light_color = Color(0.4, 0.42, 0.46, 1)
 fog_density = 0.004
 fog_sky_affect = 0.0
 
-[sub_resource type="QuadMesh" id="QuadMesh_4"]
-size = Vector2(2, 2)
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = Color(0.55, 0.57, 0.62, 1)
-shader_parameter/shade_color = Color(0.22, 0.23, 0.27, 1)
+shader_parameter/lit_color = null
+shader_parameter/shade_color = null
+shader_parameter/softness = null
+
+[sub_resource type="QuadMesh" id="QuadMesh_4"]
+size = Vector2(2, 2)
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_6"]
 render_priority = 1
 shader = ExtResource("5_rain")
+shader_parameter/rain_color = null
+shader_parameter/opacity = null
+shader_parameter/slant = null
+shader_parameter/speed = null
+shader_parameter/parallax = null
 
 [node name="StormSky" type="Node3D"]
 script = ExtResource("1_sky_environm")

@@ -12,6 +12,17 @@ shader_parameter/upper_color = Color(0.01, 0.01, 0.04, 1)
 shader_parameter/horizon_color = Color(0.05, 0.08, 0.2, 1)
 shader_parameter/low_color = Color(0.02, 0.04, 0.1, 1)
 shader_parameter/horizon_height = -0.45
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/star_density = null
+shader_parameter/star_amount = null
+shader_parameter/earth_radius = null
+shader_parameter/ocean_color = null
+shader_parameter/land_color = null
+shader_parameter/cloud_color = null
+shader_parameter/atmosphere_color = null
+shader_parameter/atmosphere_width = null
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("ShaderMaterial_1")
@@ -28,19 +39,16 @@ glow_enabled = true
 glow_intensity = 0.8
 glow_bloom = 0.05
 glow_hdr_threshold = 0.9
-fog_enabled = false
 fog_light_color = Color(0.02, 0.04, 0.1, 1)
 fog_density = 0.004
 fog_sky_affect = 0.0
 
-[sub_resource type="QuadMesh" id="QuadMesh_4"]
-size = Vector2(2, 2)
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = Color(1, 1, 1, 1)
-shader_parameter/shade_color = Color(0.8, 0.86, 1, 1)
+shader_parameter/lit_color = null
+shader_parameter/shade_color = null
+shader_parameter/softness = null
 
 [node name="OrbitSky" type="Node3D"]
 script = ExtResource("1_sky_environm")

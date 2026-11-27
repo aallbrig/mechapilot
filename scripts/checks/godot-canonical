@@ -1,0 +1,108 @@
+#!/bin/sh
+# Every Godot text resource and scene (.tres, .tscn, .escn) is in the pinned
+# Godot's own saved form: the exact bytes Godot writes when it saves the file.
+#
+# Text resources can be written many ways that Godot still loads (any byte up to
+# 0x20 as whitespace, split or indented headers, duplicate keys, ...). Requiring
+# Godot's own output shuts that whole class out: scripts/checks/asset-credits
+# then scans files whose form is known exactly. A hand-edited file fails here
+# until it is opened and saved in Godot (or rewritten with --write).
+#
+# How: the project is copied to a private directory, imported, and every text
+# resource and scene is loaded and re-saved in place by scripts/godot-canonical.gd
+# through scripts/godot-run (bubblewrap on Linux, as for every step that loads
+# project code). The checker compares Godot's saved bytes with the committed
+# original, read from the real project (mounted read-only), so an import or
+# project code that rewrote the copy first cannot launder a file. A file that
+# does not load, or any difference, fails; so does a run whose summary line is
+# missing, carries the wrong nonce (a random value project code cannot read),
+# or counts fewer files than are on disk.
+#
+# Usage: scripts/checks/godot-canonical [--write] [project-dir]   (default: godot)
+#   --write  copy Godot's saved form back over every file that differs
+set -eu
+LC_ALL=C
+export LC_ALL
+
+write=no
+if [ "${1:-}" = "--write" ]; then
+  write=yes
+  shift
+fi
+root="${1:-godot}"
+here="$(cd "$(dirname "$0")/.." && pwd -P)"
+checker="${here}/godot-canonical.gd"
+timeout_secs="${GODOT_CHECK_TIMEOUT:-300}"
+
+if [ ! -f "${root}/project.godot" ]; then
+  printf 'godot-canonical: no project.godot in %s\n' "${root}" >&2
+  exit 1
+fi
+root="$(cd "${root}" && pwd -P)"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+copy="${work}/project"
+box="${work}/box"
+log="${work}/log"
+mkdir -p "${copy}" "${box}/dotgodot"
+# A private copy, so the in-place re-save can never touch the real project.
+(cd "${root}" && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
+  mkdir -p "${copy}/${f%/*}"
+  cp -p "${root}/${f}" "${copy}/${f}"
+done
+if [ -d "${root}/.godot" ]; then cp -R "${root}/.godot/." "${box}/dotgodot/"; fi
+
+rc=0
+GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${copy}" -- --import >"${log}" 2>&1 || rc=$?
+if [ "${rc}" -ne 0 ]; then
+  cat "${log}" >&2
+  printf 'godot-canonical: import failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+rc=0
+GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${copy}" --readable "${checker}" \
+  --readable "${root}" -- -s "${checker}" -- "--original=${root}" "--nonce=${nonce}" >"${log}" 2>&1 || rc=$?
+
+# Under the sandbox Godot worked on the box's own copy of the project.
+saved="${copy}"
+if [ -d "${box}/project" ]; then saved="${box}/project"; fi
+
+status=0
+on_disk="$(find "${root}" -path "${root}/.godot" -prune -o -path "${root}/addons" -prune -o -type f \
+  \( -iname '*.tres' -o -iname '*.tscn' -o -iname '*.escn' \) -print | wc -l | tr -d ' ')"
+checked="$(sed -n "s/^canonical: checked \\([0-9]*\\) ${nonce}\$/\\1/p" "${log}")"
+summaries="$(grep -c '^canonical: checked ' "${log}")" || true
+if [ "${rc}" -ne 0 ] || [ -z "${checked}" ] || [ "${summaries}" -ne 1 ]; then
+  cat "${log}" >&2
+  printf 'godot-canonical: the re-save run failed (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
+while IFS= read -r line; do
+  case "${line}" in
+    'canonical: differs res://'*)
+      f="${line#canonical: differs res://}"
+      if [ "${write}" = yes ]; then
+        cp "${saved}/${f}" "${root}/${f}"
+        printf 'godot-canonical: rewrote %s in Godot'"'"'s saved form\n' "${f}"
+      else
+        printf 'godot-canonical: %s is not in Godot'"'"'s saved form; open and save it in Godot (or run scripts/checks/godot-canonical --write)\n' "${f}" >&2
+        status=1
+      fi
+      ;;
+    'canonical: unloadable res://'* | 'canonical: unsavable res://'*)
+      printf 'godot-canonical: %s\n' "${line#canonical: }" >&2
+      status=1
+      ;;
+    *) ;;
+  esac
+done <"${log}"
+if [ "${checked}" -ne "${on_disk}" ]; then
+  printf 'godot-canonical: checked %s files but %s are on disk\n' "${checked}" "${on_disk}" >&2
+  status=1
+fi
+if [ "${status}" -eq 0 ]; then
+  printf 'godot-canonical: ok (%s text resources and scenes in Godot'"'"'s saved form)\n' "${checked}"
+fi
+exit "${status}"

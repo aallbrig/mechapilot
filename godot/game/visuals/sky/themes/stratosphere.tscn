@@ -12,6 +12,16 @@ shader_parameter/upper_color = Color(0.3, 0.12, 0.5, 1)
 shader_parameter/horizon_color = Color(0.75, 0.45, 0.85, 1)
 shader_parameter/low_color = Color(0.55, 0.4, 0.75, 1)
 shader_parameter/horizon_height = -0.55
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/sun_position = null
+shader_parameter/sun_color = null
+shader_parameter/sun_radius = null
+shader_parameter/sun_halo = null
+shader_parameter/haze_color = null
+shader_parameter/star_density = null
+shader_parameter/star_amount = null
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("ShaderMaterial_1")
@@ -33,14 +43,12 @@ fog_light_color = Color(0.6, 0.45, 0.8, 1)
 fog_density = 0.004
 fog_sky_affect = 0.0
 
-[sub_resource type="QuadMesh" id="QuadMesh_4"]
-size = Vector2(2, 2)
-
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = Color(0.95, 0.85, 1, 1)
-shader_parameter/shade_color = Color(0.5, 0.35, 0.7, 1)
+shader_parameter/lit_color = null
+shader_parameter/shade_color = null
+shader_parameter/softness = null
 
 [node name="StratosphereSky" type="Node3D"]
 script = ExtResource("1_sky_environm")

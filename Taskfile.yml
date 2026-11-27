@@ -198,6 +198,7 @@ tasks:
       - scripts/checks/godot-architecture
       - scripts/checks/godot-safe-api
       - scripts/checks/godot-addons
+      - scripts/checks/godot-canonical
       - scripts/checks/asset-credits
 
   infra:validate:

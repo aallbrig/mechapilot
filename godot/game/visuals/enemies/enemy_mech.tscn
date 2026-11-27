@@ -3,40 +3,26 @@
 [ext_resource type="Script" path="res://game/visuals/enemies/enemy_visual.gd" id="1_enemy_visual"]
 [ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
 
+[sub_resource type="BoxMesh" id="BoxMesh_7"]
+size = Vector3(0.7, 0.8, 0.8)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
 resource_name = "hull"
 albedo_color = Color(0.35, 0.36, 0.4, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_8"]
+size = Vector3(0.45, 0.42, 0.86)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
 resource_name = "trim"
 albedo_color = Color(0.6, 0.12, 0.14, 1)
 
+[sub_resource type="BoxMesh" id="BoxMesh_9"]
+size = Vector3(0.38, 0.32, 0.4)
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
 resource_name = "frame"
 albedo_color = Color(0.1, 0.1, 0.12, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
-resource_name = "accent"
-albedo_color = Color(0.95, 0.7, 0.15, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
-resource_name = "metal"
-albedo_color = Color(0.5, 0.52, 0.55, 1)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
-resource_name = "glow"
-albedo_color = Color(0.35, 1, 0.35, 1)
-emission_enabled = true
-emission = Color(0.35, 1, 0.35, 1)
-
-[sub_resource type="BoxMesh" id="BoxMesh_7"]
-size = Vector3(0.7, 0.8, 0.8)
-
-[sub_resource type="BoxMesh" id="BoxMesh_8"]
-size = Vector3(0.45, 0.42, 0.86)
-
-[sub_resource type="BoxMesh" id="BoxMesh_9"]
-size = Vector3(0.38, 0.32, 0.4)
 
 [sub_resource type="SphereMesh" id="SphereMesh_10"]
 radius = 0.09
@@ -44,8 +30,18 @@ height = 0.18
 radial_segments = 6
 rings = 3
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
+resource_name = "glow"
+albedo_color = Color(0.35, 1, 0.35, 1)
+emission_enabled = true
+emission = Color(0.35, 1, 0.35, 1)
+
 [sub_resource type="BoxMesh" id="BoxMesh_11"]
 size = Vector3(0.04, 0.4, 0.04)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
+resource_name = "accent"
+albedo_color = Color(0.95, 0.7, 0.15, 1)
 
 [sub_resource type="BoxMesh" id="BoxMesh_12"]
 size = Vector3(0.5, 0.75, 0.7)
@@ -56,6 +52,10 @@ bottom_radius = 0.16
 height = 0.4
 radial_segments = 8
 rings = 1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "metal"
+albedo_color = Color(0.5, 0.52, 0.55, 1)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_14"]
 top_radius = 0.12
