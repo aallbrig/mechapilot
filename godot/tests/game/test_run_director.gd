@@ -11,6 +11,8 @@ const ON_TOP: float = 0.5
 const IN_RANGE: float = 9.0
 ## Off screen at any aspect (units from the player).
 const FAR_AWAY: float = 60.0
+## Life of the probe shots in the miss test (s).
+const MISS_LIFE: float = 0.5
 
 var _h: FightHarness
 
@@ -212,3 +214,31 @@ func test_run_director_ticks_field_then_arena_then_referee() -> void:
 		guard += 1
 	var _field: GdUnitAssert = assert_bool(field_first).is_true()
 	var _arena: GdUnitAssert = assert_bool(damaged_on_entry_tick).is_true()
+
+
+func test_hit_shot_is_not_a_miss() -> void:
+	# A shot the ShotReferee spends on a hit (PlayerShot.spend(), which also
+	# emits `expired`) must never be reported as `shot_missed`; a shot that
+	# runs out of life in empty sky is reported once, so the check can fail.
+	_h.reach_skirmish()
+	var misses: Array[Vector3] = []
+	var _heard: int = _h.bus.player.shot_missed.connect(
+		func(at: Vector3) -> void: misses.append(at)
+	)
+	var enemy: Enemy = _h.order(EnemyKind.Kind.FIGHTER, 0.0, IN_RANGE)
+	var enemy_id: int = enemy.enemy_id
+	# A shot sitting on the enemy: the referee spends it on the hit this tick.
+	var _on_target: PlayerShot = _h.shots.fire(enemy.position, Vector3.ZERO, MISS_LIFE, 0.0)
+	_h.director.step(STEP)
+	var hit: bool = _h.destroyed.has(enemy_id)
+	# Long past that shot's life: the spent shot stays quiet.
+	_h.advance(MISS_LIFE * 2.0)
+	var after_hit: int = misses.size()
+	# Control: a shot into empty sky runs out and is reported as a miss.
+	var empty_sky: Vector3 = _h.mech.position + Vector3.UP * FAR_AWAY * 0.5
+	var _stray: PlayerShot = _h.shots.fire(empty_sky, Vector3.ZERO, MISS_LIFE, 0.0)
+	_h.advance(MISS_LIFE * 2.0)
+	var _hit_landed: GdUnitAssert = assert_bool(hit).is_true()
+	var _shot_down: GdUnitAssert = assert_int(_cause_of(enemy_id)).is_equal(DestroyCause.Cause.SHOT)
+	var _no_miss: GdUnitAssert = assert_int(after_hit).is_equal(0)
+	var _stray_missed: GdUnitAssert = assert_int(misses.size()).is_equal(1)
