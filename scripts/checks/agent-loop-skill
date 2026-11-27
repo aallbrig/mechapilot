@@ -53,6 +53,13 @@ task ci
 scripts/verify-acceptance <n>
 review-verdict: pass sha=<40-char head SHA> reviewer=<tag>
 distinct lowercase tag
+attack your own change
+Threat models checked:
+Block only on a concrete reproduced failure or attack
+From its third verdict on the PR, block only on a demonstrated exploitable hole or a demonstrated correctness bug.
+Accepted residuals in `docs/threat-models/` never block.
+regression test plus a threat-model entry
+Only rows in main's copy of docs/threat-models/ count as accepted or tracked.
 task merge-gate -- <pr> --merge
 Merges happen only through the merge gate, never any other way.
 needs-info

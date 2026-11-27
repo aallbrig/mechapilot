@@ -25,7 +25,7 @@ while IFS="${tab}" read -r change path; do
       .mise.toml | mise.toml | mise.lock | .mise.lock | package.json | package-lock.json | \
       CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg | \
       .mise/* | */.mise/* | mise/* | */mise/* | .config/mise.toml | */.config/mise.toml | \
-      AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | .gitmodules | GLOSSARY.md)
+      AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | docs/threat-models/* | .gitmodules | GLOSSARY.md)
       why="verification path"
       ;;
     *) ;;

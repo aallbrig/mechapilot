@@ -17,4 +17,6 @@ scripts/checks/forbidden-paths --staged
 scripts/checks/large-files --staged
 
 printf 'pre-commit: lint\n'
-task lint
+# This commit's message (and any threat-model-downgrade trailer) doesn't exist
+# yet; pre-push and CI enforce the threat-model comparison (scripts/checks/threat-models).
+THREAT_MODELS_PENDING_COMMIT=1 task lint
