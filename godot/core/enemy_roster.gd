@@ -2,8 +2,8 @@ class_name EnemyRoster
 extends RefCounted
 ## What the Intel codex says about each enemy kind (#73 "Enemy behaviours"):
 ## its name, its one-line description and its hit points. #73 fixes the Heavy
-## (4) and the Drone (1); the rest are tuned here, and the enemy nodes (#23)
-## take their hit points from hit_points() so the codex never disagrees.
+## (4) and the Drone (1); the rest are tuned here, and EnemyProfile (#23)
+## takes its hit points from hit_points() so the codex never disagrees.
 
 const NAMES: Dictionary[EnemyKind.Kind, String] = {
 	EnemyKind.Kind.FIGHTER: "Fighter",
@@ -26,8 +26,8 @@ const HIT_POINTS: Dictionary[EnemyKind.Kind, int] = {
 	EnemyKind.Kind.HEAVY: 4,
 	EnemyKind.Kind.INTERCEPTOR: 2,
 	EnemyKind.Kind.DRONE: 1,
-	EnemyKind.Kind.BOMBER: 6,
-	EnemyKind.Kind.ENEMY_MECH: 8,
+	EnemyKind.Kind.BOMBER: 4,
+	EnemyKind.Kind.ENEMY_MECH: 6,
 }
 
 

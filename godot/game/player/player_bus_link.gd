@@ -3,7 +3,9 @@ extends Node
 ## The one place the player mech and its input meet the Events bus (#21's
 ## catalog, see godot/core/README.md). Nodes report, rules decide:
 ##
-##   reported   PlayerMech.fired         -> player.player_fired
+##   reported   PlayerMech.steered       -> player.player_moved
+##              PlayerMech.fired         -> player.player_fired
+##              ShotPool.missed          -> player.shot_missed (when the mech has a pool)
 ##              PlayerMech.hit_taken     -> player.player_hit
 ##              PlayerMech.repaired      -> player.repair_collected
 ##              PlayerInput.device_changed -> flow.input_device_changed
@@ -28,7 +30,10 @@ var _errors: int = 0
 func link(bus: EventBus, player: PlayerMech, input: PlayerInput) -> void:
 	_player = player
 	player.self_guarding = false
+	_check(player.steered.connect(bus.player.announce_player_moved) as Error)
 	_check(player.fired.connect(bus.player.announce_player_fired) as Error)
+	if player.shots != null:
+		_check(player.shots.missed.connect(bus.player.announce_shot_missed) as Error)
 	_check(player.hit_taken.connect(bus.player.announce_player_hit) as Error)
 	_check(player.repaired.connect(bus.player.announce_repair_collected) as Error)
 	_check(input.device_changed.connect(bus.flow.announce_input_device_changed) as Error)

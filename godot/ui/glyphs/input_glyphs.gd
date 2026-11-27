@@ -101,6 +101,14 @@ static func aim_and_fire(device: InputDevice.Kind) -> Array[Segment]:
 			return [Segment.new("Arrows", "aim and fire"), Segment.new("Space", "fire ahead")]
 
 
+## Every flight control of this device: move, aim and fire, pause.
+static func every_control(device: InputDevice.Kind) -> Array[Segment]:
+	var segments: Array[Segment] = [Segment.new(move(device), "move")]
+	segments.append_array(aim_and_fire(device))
+	segments.append(Segment.new(pause(device), "pause"))
+	return segments
+
+
 ## A first-flight tutorial prompt for this device.
 static func tutorial(prompt: TutorialPrompt.Id, device: InputDevice.Kind) -> Array[Segment]:
 	match prompt:

@@ -13,6 +13,8 @@ extends Node3D
 ##
 ## It reaches only the nodes it is given: `input`, `shots`, `debris` and `view`.
 
+## The pilot started steering (the move input crossed the thrust deadzone).
+signal steered
 ## A shot left the muzzle.
 signal fired(origin: Vector3, direction: Vector3)
 ## Something hit the mech outside its invulnerability window. `attack_damage`
@@ -65,6 +67,7 @@ var _was_firing: bool = false
 ## under the tap when it was tapped, so a moving camera can't shift it.
 var _tap_queued: bool = false
 var _tap_target: Vector3 = Vector3.ZERO
+var _was_steering: bool = false
 var _flash_left: float = 0.0
 var _alive: bool = true
 var _last_hit_direction: Vector3 = Vector3.ZERO
@@ -100,6 +103,10 @@ func tick(delta: float, intent: PilotIntent) -> void:
 		_model.set_flash(_flash_left > 0.0)
 
 	thrust = minf(intent.move.length(), 1.0)
+	var steering: bool = thrust > tuning.thrust_deadzone
+	if steering and not _was_steering:
+		steered.emit()
+	_was_steering = steering
 	velocity = FlightModel.step_velocity(velocity, intent.move, delta, tuning)
 	position += velocity * delta
 	position.z = 0.0

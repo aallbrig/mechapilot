@@ -25,14 +25,24 @@ func test_how_to_play_shows_current_device_glyphs() -> void:
 	_h.reach_title()
 	_h.ui.open(&"how_to_play")
 	var guide: HowToPlayScreen = _h.screen(&"HowToPlay") as HowToPlayScreen
+	var every_control: String = guide.controls_text()
+	guide.turn(1)
 	var seen: Array[String] = [guide.controls_text()]
 	for device: InputDevice.Kind in [InputDevice.Kind.GAMEPAD, InputDevice.Kind.TOUCH]:
 		_h.bus.flow.announce_input_device_changed(device)
 		seen.append(guide.controls_text())
-	guide.turn(1)
+	guide.turn(-1)
+	var every_touch_control: String = guide.controls_text()
+	guide.turn(2)
 	var aiming_touch: String = guide.controls_text()
 	_h.bus.flow.announce_input_device_changed(InputDevice.Kind.KEYBOARD_MOUSE)
 	var aiming_mouse: String = guide.controls_text()
+	var _overview: GdUnitAssert = assert_str(every_control).is_equal(
+		"[WASD] move [Arrows] aim and fire [Space] fire ahead [Esc] pause"
+	)
+	var _touch_overview: GdUnitAssert = assert_str(every_touch_control).is_equal(
+		"[Left thumb] move [Tap right] fire there [Hold right] aim and fire [II] pause"
+	)
 	var _glyphs: GdUnitAssert = assert_array(seen).is_equal(
 		["[WASD] move", "[Left stick] move", "[Left thumb] move"]
 	)
@@ -49,20 +59,73 @@ func test_how_to_play_has_a_page_per_topic() -> void:
 	for i: int in GuidePages.count():
 		titles.append(guide.page_title())
 		guide.turn(1)
-	var _six: GdUnitAssert = (
+	var _every_topic: GdUnitAssert = (
 		assert_array(titles)
 		. is_equal(
 			[
+				"CONTROLS",
 				"MOVING",
 				"AIMING AND GRAVITY SHOTS",
 				"ARMOR AND REPAIR KITS",
 				"LIVES AND THE BONUS LIFE",
-				"THE BOSS GAUGE AND BOSSES",
 				"COMBOS",
+				"THE BOSS GAUGE AND BOSSES",
+				"LEVELS",
 			]
 		)
 	)
 	var _wraps: GdUnitAssert = assert_int(guide.page()).is_equal(0)
+
+
+func test_how_to_play_states_the_rules() -> void:
+	# ui/ may not read core/, so the guide's numbers are text: keep them RunRules'.
+	var expected: Dictionary[GuidePages.Topic, Array] = {
+		GuidePages.Topic.ARMOR:
+		[
+			"%d Armor" % RunRules.MAX_ARMOR,
+			"crash costs %d" % RunRules.COLLISION_DAMAGE,
+			"bullet %d" % RunRules.BULLET_DAMAGE,
+			"bomb or missile %d" % RunRules.BOMB_DAMAGE,
+			"+%d" % RunRules.REPAIR_ARMOR,
+		],
+		GuidePages.Topic.LIVES:
+		[
+			"safe for %d seconds" % int(RunRules.RESPAWN_INVULNERABILITY),
+			"start with %d lives" % RunRules.START_LIVES,
+			"at %s points" % _grouped(RunRules.BONUS_LIFE_SCORE),
+		],
+		GuidePages.Topic.COMBOS:
+		[
+			"within %.1f seconds" % RunRules.COMBO_WINDOW,
+			"up to x%d" % RunRules.COMBO_MAX_MULTIPLIER,
+		],
+		GuidePages.Topic.LEVELS:
+		[
+			"%d Levels" % RunRules.LEVEL_COUNT,
+			"%d points per Armor" % RunRules.ARMOR_BONUS_PER_POINT,
+			"plus %s if" % _grouped(RunRules.NO_DEATH_BONUS),
+		],
+	}
+	var missing: Array[String] = []
+	for topic: GuidePages.Topic in expected:
+		var body: String = GuidePages.BODIES[topic]
+		for fact: Variant in expected[topic]:
+			if not body.contains(str(fact)):
+				missing.append("%s: %s" % [GuidePages.TITLES[topic], str(fact)])
+	var _bomb_is_missile: GdUnitAssert = assert_int(RunRules.MISSILE_DAMAGE).is_equal(
+		RunRules.BOMB_DAMAGE
+	)
+	var _stated: GdUnitAssert = assert_array(missing).is_empty()
+
+
+## `value` with thousands separators: 100000 -> "100,000".
+func _grouped(value: int) -> String:
+	var rest: String = str(value)
+	var out: String = ""
+	while rest.length() > 3:
+		out = "," + rest.right(3) + out
+		rest = rest.left(rest.length() - 3)
+	return rest + out
 
 
 func test_how_to_play_reachable_from_title_and_pause() -> void:
