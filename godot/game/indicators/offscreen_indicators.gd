@@ -2,8 +2,9 @@ class_name OffscreenIndicators
 extends Control
 ## A yellow (#FFF800) arrow at the screen edge for every enemy that is off
 ## screen, pointing the way to it, so the player always knows where the fight
-## is. Arrows are pooled: one per enemy, reused as enemies come and go. It
-## spans the whole screen (its size is the screen's) and ignores the mouse.
+## is. Arrows are pooled: one per enemy, reused as enemies come and go. Its
+## parent lays it over the whole screen (its size is the screen's); it ignores
+## the mouse.
 
 const COLOR: Color = Color("#FFF800")
 ## Pixels between the screen edge and an arrow's tip.
@@ -31,7 +32,6 @@ var _clock: float = 0.0
 
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	set_anchors_preset(Control.PRESET_FULL_RECT)
 
 
 func _process(delta: float) -> void:
