@@ -102,7 +102,7 @@ hook_repo() {
   git -C "${d}/w" checkout -q -b main
   mkdir -p "${d}/w/.githooks" "${d}/w/scripts/checks"
   for f in .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit scripts/lib-toolchain \
-    scripts/hook-timing scripts/pre-push-select scripts/checks/verification-guard scripts/lib-paths \
+    scripts/hook-timing scripts/pre-push-select scripts/pre-push-run scripts/checks/verification-guard scripts/lib-paths \
     scripts/checks/safe-filenames scripts/checks/forbidden-paths scripts/checks/large-files; do
     cp "${root}/${f}" "${d}/w/${f}"
   done
@@ -121,7 +121,7 @@ hook_repo() {
 run_hook() {
   h="$1"
   shift
-  (cd "${d}/w" && PATH="${d}/bin:${PATH}" ".githooks/${h}" "$@" </dev/null) >"${d}/hook.out" 2>&1 || {
+  (cd "${d}/w" && unset HOOK_TIMING_CHILD && PATH="${d}/bin:${PATH}" ".githooks/${h}" "$@" </dev/null) >"${d}/hook.out" 2>&1 || {
     cat "${d}/hook.out"
     return 1
   }

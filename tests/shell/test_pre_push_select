@@ -56,7 +56,8 @@ fresh() {
 test_pre_push_selects_shell_checks_for_shell_test_change() {
   select_fixture
   commit_file tests/shell/test_new 'test_b() { true; }'
-  selects "checks test:shell" || return 1
+  # A new test file runs on its own (the guard sends changed tests to the full gate).
+  selects "checks shell-test:tests/shell/test_new" || return 1
   # A shell script anywhere outside the verification stack: shellcheck, shfmt and the shell tests.
   commit_file tests/fixtures/tool.sh '#!/bin/sh'
   selects "checks lint:sh test:shell"
@@ -227,4 +228,37 @@ test_pre_merge_commit_and_ci_run_full_gate() {
   [ "${ci}" = "ci:fast site secrets " ] || return 1
   # The pre-push fallback is the gate the hook ran before #66.
   grep -qx 'full=ci:fast' scripts/pre-push-select
+}
+
+test_pre_push_runs_only_new_shell_test_files() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/scripts" "${d}/tests/shell" "${d}/bin"
+  cp scripts/test-shell scripts/lib-tests scripts/pre-push-run "${d}/scripts/"
+  printf 'test_new_one() {\n  true\n}\n' >"${d}/tests/shell/test_new"
+  printf 'test_old_one() {\n  false\n}\n' >"${d}/tests/shell/test_old"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/task-calls"\n' "${d}" >"${d}/bin/task"
+  chmod +x "${d}/bin/task"
+  sel="$(printf 'checks\nshell-test:tests/shell/test_new')"
+  (cd "${d}" && PATH="${d}/bin:${PATH}" scripts/pre-push-run "${sel}") >"${d}/out" 2>&1 || {
+    cat "${d}/out"
+    return 1
+  }
+  calls="$(cat "${d}/task-calls")"
+  [ "${calls}" = checks ] || return 1
+  # Only the new file ran, and its results are not in build/test-results.
+  grep -q 'tests="1" failures="0"' "${d}/build/pre-push-results/shell.xml" || return 1
+  [ ! -e "${d}/build/test-results" ] || return 1
+  # A failing new test fails the push.
+  sel="shell-test:tests/shell/test_old"
+  ! (cd "${d}" && PATH="${d}/bin:${PATH}" scripts/pre-push-run "${sel}") >/dev/null 2>&1 || return 1
+  # Names that are not tasks or test files are refused, not run.
+  : >"${d}/task-calls"
+  ! (cd "${d}" && PATH="${d}/bin:${PATH}" scripts/pre-push-run "checks --dry") >/dev/null 2>&1 || return 1
+  ! (cd "${d}" && PATH="${d}/bin:${PATH}" scripts/pre-push-run "shell-test:scripts/test-shell") >/dev/null 2>&1 || return 1
+  ! (cd "${d}" && PATH="${d}/bin:${PATH}" scripts/pre-push-run "shell-test:tests/shell/../../x") >/dev/null 2>&1 || return 1
+  [ ! -s "${d}/task-calls" ] || return 1
+  # Without file arguments test-shell still runs every test file.
+  ! (cd "${d}" && "${root}/scripts/test-shell" "${d}/all" >/dev/null 2>&1) || return 1
+  grep -q 'tests="2" failures="1"' "${d}/all/shell.xml"
 }

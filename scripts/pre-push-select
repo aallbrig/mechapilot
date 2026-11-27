@@ -4,7 +4,8 @@
 # (task ci:fast) whenever the change can't be mapped with certainty.
 #
 # Usage: scripts/pre-push-select < <git pre-push stdin>
-# Prints the task names to run, one per line. Reasons go to stderr.
+# Prints the task names to run, one per line, then a `shell-test:<file>` line
+# for each new shell test file to run on its own. Reasons go to stderr.
 #
 # This only trims local work. pre-merge-commit and the `ci` check still run the
 # full `task ci`, and the merge gate judges only that, so nothing skipped here
@@ -75,6 +76,7 @@ git -c core.quotePath=true diff --no-renames --name-only "${base}" "${snapshot}"
 
 # The mapping table: path pattern -> tasks. `checks` (hygiene) always runs.
 : >"${work}/tasks"
+: >"${work}/new-tests"
 add() { printf '%s\n' "$@" >>"${work}/tasks"; }
 add checks
 while IFS= read -r path; do
@@ -84,7 +86,9 @@ while IFS= read -r path; do
     site/*) add lint:yaml lint:schema site:static site:links ;;
     infra/*) add infra:validate infra:lint infra:scan ;;
     *.sh) add lint:sh test:shell ;;
-    tests/shell/test_*) add test:shell ;;
+    # Only a new test file gets here (the guard flags changed or deleted
+    # tests): run just that file, unless the whole suite is selected anyway.
+    tests/shell/test_*) printf '%s\n' "${path}" >>"${work}/new-tests" ;;
     tests/fixtures/*) add lint:schema test:shell ;;
     docs/*.md | README.md | CREDITS.md | media/* | unity/*) ;;
     *) full_gate "no mapping for ${path}" ;;
@@ -97,5 +101,8 @@ for t in checks lint:sh lint:yaml lint:schema lint:gd infra:validate infra:lint 
   if [ "${t}" = test:shell ] && grep -qx test "${work}/tasks"; then continue; fi
   printf '%s\n' "${t}"
 done
+if [ -s "${work}/new-tests" ] && ! grep -qx -e test:shell -e test "${work}/tasks"; then
+  sed 's/^/shell-test:/' "${work}/new-tests"
+fi
 count="$(wc -l <"${work}/paths" | tr -d ' ' || true)"
 printf 'pre-push-select: %s changed file(s) since the merge-base with origin/main\n' "${count}" >&2
