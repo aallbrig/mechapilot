@@ -72,3 +72,60 @@ func test_bus_link_reports_steering_and_missed_shots() -> void:
 	var _steered_again: GdUnitAssert = assert_int(again).is_equal(2)
 	var _hit_is_no_miss: GdUnitAssert = assert_int(after_hit).is_equal(0)
 	var _missed_once: GdUnitAssert = assert_array(misses).is_equal([last_position])
+
+
+func test_tutorial_move_completes_when_steering_through_the_intro() -> void:
+	# A pilot who starts flying during Level 1's intro and keeps holding the stick
+	# has already moved: MOVE must not appear (or stay) once the Skirmish starts.
+	var bus: EventBus = EventBus.new()
+	var mech: PlayerMech = PlayerMech.new()
+	add_child(mech)
+	var input: PlayerInput = PlayerInput.new()
+	add_child(input)
+	var link: PlayerBusLink = PlayerBusLink.new()
+	add_child(link)
+	link.link(bus, mech, input)
+	var progress: TutorialProgress = TutorialProgress.new(MemoryDocumentStore.new())
+	progress.restore()
+	var coach: TutorialCoach = TutorialCoach.new(bus, progress)
+	var steer: PilotIntent = PilotIntent.new()
+	steer.move = Vector2.RIGHT
+	bus.run.announce_run_started(1)
+	bus.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.LEVEL_INTRO)
+	for _i: int in 30:
+		mech.tick(TICK, steer)
+	bus.flow.announce_game_state_changed(GameState.Phase.LEVEL_INTRO, GameState.Phase.SKIRMISH)
+	bus.run.announce_level_intro_completed(1)
+	var on_skirmish: int = coach.current()
+	for _i: int in 60:
+		mech.tick(TICK, steer)
+		coach.tick(TICK)
+	var after_a_second: int = coach.current()
+	var move_done: bool = progress.is_done(TutorialPrompt.Id.MOVE)
+	link.free()
+	input.free()
+	mech.free()
+	bus.free()
+	var _skips_move: GdUnitAssert = assert_int(on_skirmish).is_equal(TutorialPrompt.Id.AIM_AND_FIRE)
+	var _still_aim: GdUnitAssert = assert_int(after_a_second).is_equal(
+		TutorialPrompt.Id.AIM_AND_FIRE
+	)
+	var _done: GdUnitAssert = assert_bool(move_done).is_true()
+
+
+func test_steering_outside_level_one_play_never_completes_move() -> void:
+	# Steering on the Title (attract) or before a Run starts is not the pilot
+	# learning to fly in Level 1: MOVE still shows when the Skirmish starts.
+	var bus: EventBus = EventBus.new()
+	var progress: TutorialProgress = TutorialProgress.new(MemoryDocumentStore.new())
+	progress.restore()
+	var coach: TutorialCoach = TutorialCoach.new(bus, progress)
+	bus.flow.announce_game_state_changed(GameState.Phase.BOOT, GameState.Phase.TITLE)
+	bus.player.announce_player_moved()
+	bus.run.announce_run_started(1)
+	bus.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.LEVEL_INTRO)
+	bus.flow.announce_game_state_changed(GameState.Phase.LEVEL_INTRO, GameState.Phase.SKIRMISH)
+	bus.run.announce_level_intro_completed(1)
+	var shown: int = coach.current()
+	bus.free()
+	var _move: GdUnitAssert = assert_int(shown).is_equal(TutorialPrompt.Id.MOVE)

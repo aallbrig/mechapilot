@@ -17,6 +17,13 @@ extends RefCounted
 ## Level 1 or ending the first Run ends the tutorial for good. Turning
 ## GameSettings.tutorial_hints off hides every prompt at once.
 ##
+## The mech reports steering once per press, and it flies during the Level
+## intro, before any prompt shows. A press during Level 1's intro of the first
+## Run therefore completes MOVE when the Skirmish starts, so a pilot who holds
+## the stick through the intro is never told to do what they are doing. Any
+## other steering (the Title's attract mode, before a Run starts, Levels 2 to
+## 6) is ignored by design: it is not the pilot learning to fly in Level 1.
+##
 ## Listens: profile.settings_changed, flow.game_state_changed, run.run_started,
 ## run.level_intro_completed, run.level_cleared, run.run_ended,
 ## run.boss_gauge_changed, player.player_moved, player.player_fired,
@@ -51,6 +58,8 @@ var _current: int = NONE
 var _shown_for: float = 0.0
 var _queue: Array[TutorialPrompt.Id] = []
 var _shots: int = 0
+## The pilot steered after this Run started, before Level 1's Skirmish.
+var _moved_before_skirmish: bool = false
 
 
 func _init(events: EventBus, progress: TutorialProgress) -> void:
@@ -173,10 +182,14 @@ func _on_run_started(_level_number: int) -> void:
 	_first_run = not _progress.is_first_run_done() and not _progress.is_complete()
 	_in_level = false
 	_shots = 0
+	_moved_before_skirmish = false
 
 
 func _on_level_intro_completed(level_number: int) -> void:
 	_in_level = level_number == TUTORIAL_LEVEL
+	if _moved_before_skirmish and is_running():
+		var _new: bool = _progress.mark_done(TutorialPrompt.Id.MOVE)
+	_moved_before_skirmish = false
 	_offer(TutorialPrompt.Id.MOVE)
 	_offer(TutorialPrompt.Id.AIM_AND_FIRE)
 
@@ -196,6 +209,8 @@ func _on_boss_gauge_changed(points: int, threshold: int) -> void:
 
 
 func _on_player_moved() -> void:
+	if _first_run and not _in_level and _phase == GameState.Phase.LEVEL_INTRO:
+		_moved_before_skirmish = true
 	_complete(TutorialPrompt.Id.MOVE)
 
 
