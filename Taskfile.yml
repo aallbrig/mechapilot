@@ -150,6 +150,7 @@ tasks:
       - scripts/checks/no-symlinks
       - scripts/checks/agent-loop-skill
       - scripts/checks/agent-loop-skill-commands
+      - scripts/checks/threat-models
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack

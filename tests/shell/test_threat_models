@@ -1,0 +1,295 @@
+#!/bin/sh
+# Tests for scripts/checks/threat-models, the AGENTS.md review policy, the PR
+# template and the Agent Loop skill's review rules (#65).
+
+tm_header='| ID | Attack class | Description | Found | Status | Mitigation | Proof |
+| --- | --- | --- | --- | --- | --- | --- |'
+tm_found='[#1](https://github.com/aallbrig/mechapilot/pull/1)'
+
+# A row: tm_row <id> <status> <proof> [found]
+tm_row() {
+  printf '| %s | Class | One line. | %s | %s | What stops it. | %s |\n' "$1" "${4:-${tm_found}}" "$2" "$3"
+}
+
+# tm_model <repo> <name> <rows...>: write a model with the header and the rows.
+tm_model() {
+  f="$1/docs/threat-models/$2.md"
+  shift 2
+  {
+    printf '# Threat model\n\nIntro.\n\n%s\n' "${tm_header}"
+    for row in "$@"; do printf '%s\n' "${row}"; done
+  } >"${f}"
+}
+
+# A throwaway repository with every required model, one valid entry each, a
+# tracked shell test and a tracked, executable check. All of it staged.
+tm_repo() {
+  r="$(mktemp -d)"
+  git -C "${r}" init --quiet
+  mkdir -p "${r}/docs/threat-models" "${r}/tests/shell" "${r}/scripts/checks"
+  printf 'test_real_one() {\n  true\n}\n' >"${r}/tests/shell/test_fixture"
+  printf '#!/bin/sh\nexit 0\n' >"${r}/scripts/checks/real-check"
+  chmod +x "${r}/scripts/checks/real-check"
+  bt="$(printf '\140')"
+  tm_one "${r}" merge-gate MG-01 mitigated "${bt}test:test_real_one${bt}"
+  tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:real-check${bt}"
+  tm_one "${r}" godot-test-evidence GT-01 residual '#37'
+  tm_one "${r}" hooks-and-toolchain HT-01 open '#46'
+  tm_one "${r}" infra IN-01 mitigated "${bt}test:test_real_one${bt}"
+  printf '# Threat models\n' >"${r}/docs/threat-models/README.md"
+  git -C "${r}" add -A
+  printf '%s' "${r}"
+}
+
+# tm_one <repo> <name> <id> <status> <proof> [found]: a model with one row.
+tm_one() {
+  row="$(tm_row "$3" "$4" "$5" "${6:-}")"
+  tm_model "$1" "$2" "${row}"
+}
+
+# tm_fails <repo> <expected message fragment>: the check exits 1 and says so.
+tm_fails() {
+  rc=0
+  out="$(scripts/checks/threat-models "$1" 2>&1)" || rc=$?
+  [ "${rc}" = 1 ] || {
+    printf 'expected exit 1, got %s: %s\n' "${rc}" "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -qF -- "$2" || {
+    printf 'expected "%s" in: %s\n' "$2" "${out}"
+    return 1
+  }
+}
+
+tm_passes() {
+  scripts/checks/threat-models "$1" >/dev/null
+}
+
+test_threat_models_passes_on_committed_tree() {
+  scripts/checks/threat-models || return 1
+  r="$(tm_repo)"
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_check_runs_in_task_lint() {
+  yq -e '.tasks.checks.cmds[] | select(. == "scripts/checks/threat-models")' Taskfile.yml >/dev/null || return 1
+  yq -e '.tasks.lint.cmds[] | select(.task == "checks")' Taskfile.yml >/dev/null || return 1
+  entry="$(git ls-files -s scripts/checks/threat-models)"
+  [ "${entry%% *}" = 100755 ]
+}
+
+test_threat_models_rejects_undefined_test() {
+  r="$(tm_repo)"
+  bt="$(printf '\140')"
+  tm_one "${r}" infra IN-01 mitigated "${bt}test:test_missing_one${bt}"
+  tm_fails "${r}" 'infra.md:7: test:test_missing_one is not defined' || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_test_the_runner_would_not_discover() {
+  bt="$(printf '\140')"
+  # A space before the parens: the runner never runs it.
+  r="$(tm_repo)"
+  printf 'test_spaced () {\n  true\n}\n' >>"${r}/tests/shell/test_fixture"
+  git -C "${r}" add -A
+  tm_one "${r}" infra IN-01 mitigated "${bt}test:test_spaced${bt}"
+  tm_fails "${r}" 'test:test_spaced is not defined' || return 1
+  rm -rf "${r}"
+  # Defined outside the runner's glob, in a nested directory, or untracked.
+  for place in tests/fixtures/test_helper tests/shell/sub/test_nested tests/shell/test_dir/test_inner tests/shell/test_untracked godot/tests/helper.gd; do
+    r="$(tm_repo)"
+    mkdir -p "${r}/${place%/*}"
+    printf 'test_elsewhere() {\n  true\n}\nfunc test_elsewhere() -> void:\n' >"${r}/${place}"
+    case "${place}" in
+    *untracked) ;;
+    *) git -C "${r}" add -A ;;
+    esac
+    tm_one "${r}" infra IN-01 mitigated "${bt}test:test_elsewhere${bt}"
+    tm_fails "${r}" 'test:test_elsewhere is not defined' || return 1
+    rm -rf "${r}"
+  done
+  # A GdUnit4 test in a tracked godot/tests/**/test_*.gd file counts.
+  r="$(tm_repo)"
+  mkdir -p "${r}/godot/tests/core"
+  printf 'extends GdUnitTestSuite\n\nfunc test_godot_one() -> void:\n\tassert_bool(true).is_true()\n' >"${r}/godot/tests/core/test_rules.gd"
+  git -C "${r}" add -A
+  tm_one "${r}" infra IN-01 mitigated "${bt}test:test_godot_one${bt}"
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_missing_or_untracked_check() {
+  bt="$(printf '\140')"
+  r="$(tm_repo)"
+  tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:no-such-check${bt}"
+  tm_fails "${r}" 'check:no-such-check is not a tracked, executable' || return 1
+  rm -rf "${r}"
+  # Untracked, though executable.
+  r="$(tm_repo)"
+  printf '#!/bin/sh\nexit 0\n' >"${r}/scripts/checks/untracked"
+  chmod +x "${r}/scripts/checks/untracked"
+  tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:untracked${bt}"
+  tm_fails "${r}" 'check:untracked is not a tracked, executable' || return 1
+  rm -rf "${r}"
+  # Tracked, but not executable.
+  r="$(tm_repo)"
+  printf '#!/bin/sh\nexit 0\n' >"${r}/scripts/checks/plain"
+  git -C "${r}" add -A
+  tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:plain${bt}"
+  tm_fails "${r}" 'check:plain is not a tracked, executable' || return 1
+  rm -rf "${r}"
+  # Path traversal, a bare reference without backticks, and two references.
+  for proof in "${bt}check:../checks/real-check${bt}" 'check:real-check' \
+    "${bt}check:real-check${bt} ${bt}test:test_real_one${bt}" "${bt}task:lint${bt}"; do
+    r="$(tm_repo)"
+    tm_one "${r}" agent-loop AL-01 mitigated "${proof}"
+    tm_fails "${r}" "a mitigated entry's proof must be" || return 1
+    rm -rf "${r}"
+  done
+}
+
+test_threat_models_rejects_residual_without_issue() {
+  bt="$(printf '\140')"
+  for status in residual open; do
+    for proof in "${bt}test:test_real_one${bt}" '#' '#x' 'issue 12' '#12 #13' '[#12](x)'; do
+      r="$(tm_repo)"
+      tm_one "${r}" godot-test-evidence GT-01 "${status}" "${proof}"
+      tm_fails "${r}" "a ${status} entry's proof must be its tracking issue" || return 1
+      rm -rf "${r}"
+    done
+  done
+}
+
+test_threat_models_rejects_malformed_table() {
+  bt="$(printf '\140')"
+  good="$(tm_row IN-01 mitigated "${bt}test:test_real_one${bt}")"
+  # Wrong header or separator.
+  r="$(tm_repo)"
+  printf '| ID | Class | Proof |\n| --- | --- | --- |\n%s\n' "${good}" >"${r}/docs/threat-models/infra.md"
+  tm_fails "${r}" 'the first table line must be the header' || return 1
+  printf '%s\n' "${tm_header}" | sed '2s/---/:--/' >"${r}/docs/threat-models/infra.md"
+  printf '%s\n' "${good}" >>"${r}/docs/threat-models/infra.md"
+  tm_fails "${r}" 'the second table line must be the separator' || return 1
+  # No table, and a table with no entries.
+  printf '# Threat model\n' >"${r}/docs/threat-models/infra.md"
+  tm_fails "${r}" 'infra.md: no table' || return 1
+  tm_model "${r}" infra
+  tm_fails "${r}" 'infra.md: the table has no entries' || return 1
+  # A second table later in the file.
+  tm_model "${r}" infra "${good}"
+  row="$(tm_row IN-02 residual '#1')"
+  printf '\nMore.\n\n%s\n' "${row}" >>"${r}/docs/threat-models/infra.md"
+  tm_fails "${r}" 'the file may hold only one table' || return 1
+  # Too few cells, too many (a pipe inside a cell), and a row that does not close.
+  tm_model "${r}" infra '| IN-01 | c | d | x | mitigated | m |'
+  tm_fails "${r}" '6 cells, expected 7' || return 1
+  tm_one "${r}" infra IN-01 mitigated "${bt}test:a|b${bt}"
+  tm_fails "${r}" '8 cells, expected 7' || return 1
+  tm_model "${r}" infra "${good}x"
+  tm_fails "${r}" "a row must start with '| ' and end with ' |'" || return 1
+  # An empty cell, an unknown status, a wrong ID prefix or shape.
+  tm_model "${r}" infra "| IN-01 |  | d | ${tm_found} | mitigated | m | ${bt}test:test_real_one${bt} |"
+  tm_fails "${r}" 'empty cell' || return 1
+  tm_one "${r}" infra IN-01 accepted '#1'
+  tm_fails "${r}" "status 'accepted' must be mitigated, residual or open" || return 1
+  for id in MG-01 IN-1 IN-001 in-01; do
+    tm_one "${r}" infra "${id}" residual '#1'
+    tm_fails "${r}" "ID '${id}' must be IN-<two digits>" || return 1
+  done
+  # A model whose area the check does not know.
+  tm_model "${r}" infra "${good}"
+  tm_one "${r}" surprise SU-01 residual '#1'
+  tm_fails "${r}" 'surprise.md: unknown model' || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_missing_model_file() {
+  for m in merge-gate agent-loop godot-test-evidence hooks-and-toolchain infra; do
+    r="$(tm_repo)"
+    rm "${r}/docs/threat-models/${m}.md"
+    tm_fails "${r}" "missing required model ${m}.md" || return 1
+    rm -rf "${r}"
+  done
+  r="$(mktemp -d)"
+  tm_fails "${r}" 'no ' || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_duplicate_ids() {
+  r="$(tm_repo)"
+  row1="$(tm_row GT-01 residual '#37')"
+  row2="$(tm_row GT-01 open '#17')"
+  tm_model "${r}" godot-test-evidence "${row1}" "${row2}"
+  tm_fails "${r}" 'duplicate ID GT-01' || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_found_without_pr_link() {
+  for found in '#1' '[#1](https://github.com/aallbrig/mechapilot/pull/2)' \
+    '[#1](https://github.com/someone/else/pull/1)' '[#1](https://githubXcom/aallbrig/mechapilot/pull/1)' \
+    '[#1](https://github.com/aallbrig/mechapilot/issues/1)' '[PR](https://github.com/aallbrig/mechapilot/pull/1)'; do
+    r="$(tm_repo)"
+    tm_one "${r}" godot-test-evidence GT-01 residual '#37' "${found}"
+    tm_fails "${r}" 'Found must be [#<n>](https://github.com/aallbrig/mechapilot/pull/<n>)' || return 1
+    rm -rf "${r}"
+  done
+}
+
+test_threat_models_rejects_identifiers() {
+  account='123456789012'
+  for where in model readme; do
+    r="$(tm_repo)"
+    case "${where}" in
+    model) tm_model "${r}" godot-test-evidence "| GT-01 | Class | Seen in account ${account}. | ${tm_found} | residual | m | #37 |" ;;
+    *) printf 'Contact someone@example.com for access.\n' >>"${r}/docs/threat-models/README.md" ;;
+    esac
+    tm_fails "${r}" 'identifiers are not allowed in a public threat model' || return 1
+    # The value itself never reaches the (public) log.
+    out="$(scripts/checks/threat-models "${r}" 2>&1)" && return 1
+    case "${out}" in *"${account}"* | *someone@*) return 1 ;; *) ;; esac
+    rm -rf "${r}"
+  done
+}
+
+test_agents_md_states_the_review_policy() {
+  bt="$(printf '\140')"
+  for needle in '## Review policy' "${bt}docs/threat-models/${bt}" \
+    'A block requires a concrete reproduced failure or attack' \
+    'From round 3' 'only a demonstrated exploitable hole or a demonstrated correctness bug may block' \
+    'Accepted residuals never block.' \
+    'Every reproduced attack becomes a regression test plus a threat-model entry' \
+    'red-team the change against the threat models' 'Threat models checked:'; do
+    grep -qF -- "${needle}" AGENTS.md || {
+      printf 'AGENTS.md is missing: %s\n' "${needle}"
+      return 1
+    }
+  done
+}
+
+test_pull_request_template_has_threat_models_line() {
+  f=.github/pull_request_template.md
+  tracked="$(git ls-files -- "${f}")"
+  [ "${tracked}" = "${f}" ] || return 1
+  grep -q '^Closes #' "${f}" || return 1
+  count="$(grep -c '^Threat models checked:' "${f}" || true)"
+  [ "${count}" = 1 ]
+}
+
+test_agent_loop_skill_requires_the_review_policy() {
+  bt="$(printf '\140')"
+  skill=.claude/skills/agent-loop/SKILL.md
+  scripts/checks/agent-loop-skill >/dev/null || return 1
+  d="$(mktemp -d)"
+  for needle in 'attack your own change' 'Threat models checked:' \
+    'Block only on a concrete reproduced failure or attack' \
+    'From its third verdict on the PR, block only on a demonstrated exploitable hole or a demonstrated correctness bug.' \
+    "Accepted residuals in ${bt}docs/threat-models/${bt} never block." \
+    'regression test plus a threat-model entry'; do
+    grep -qF -- "${needle}" "${skill}" || return 1
+    grep -vF -- "${needle}" "${skill}" >"${d}/skill.md"
+    out="$(scripts/checks/agent-loop-skill "${d}/skill.md")" && return 1
+    printf '%s\n' "${out}" | grep -qF -- "missing: ${needle}" || return 1
+  done
+  rm -rf "${d}"
+}

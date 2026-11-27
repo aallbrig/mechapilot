@@ -158,3 +158,26 @@ test_guard_flags_html_validate_directives() {
     [ "${rc}" = 3 ] || return 1
   done
 }
+
+test_guard_flags_threat_model_changes() {
+  guard="$(pwd)/scripts/checks/verification-guard"
+  # Marking a finding residual stops it blocking, so it needs two reviews.
+  for path in docs/threat-models/merge-gate.md docs/threat-models/README.md docs/threat-models/new-area.md \
+    .github/pull_request_template.md; do
+    r="$(guard_repo)"
+    mkdir -p "${r}/${path%/*}"
+    printf '| MG-01 | x | y | z | residual | w | #1 |\n' >"${r}/${path}"
+    commit_all "${r}"
+    rc="$(run_guard "${r}")"
+    rm -rf "${r}"
+    [ "${rc}" = 3 ] || return 1
+  done
+  # Other docs stay single-review.
+  r="$(guard_repo)"
+  mkdir -p "${r}/docs/threat-models-notes"
+  printf 'a\n' >"${r}/docs/threat-models-notes/a.md"
+  commit_all "${r}"
+  rc="$(run_guard "${r}")"
+  rm -rf "${r}"
+  [ "${rc}" = 0 ]
+}

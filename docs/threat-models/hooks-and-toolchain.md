@@ -1,0 +1,16 @@
+# Threat model: hooks and toolchain
+
+Covers `.githooks/`, `scripts/lib-toolchain`, `scripts/test-shell`, `.mise.toml` and the dev environment (`.tmuxinator.yml`, `scripts/dev/`). The attacker is a change that makes local checks run against the wrong repository or with the wrong tools, or that runs code on a developer's machine.
+
+| ID | Attack class | Description | Found | Status | Mitigation | Proof |
+| --- | --- | --- | --- | --- | --- | --- |
+| HT-01 | Inherited git environment | Hooks export `GIT_DIR` and friends, so tests running `git -C <tmp>` rewrote the real repository. | [#44](https://github.com/aallbrig/mechapilot/pull/44) | mitigated | The shell runner drops git's repository variables. | `test:test_test_shell_drops_git_environment_from_hooks` |
+| HT-02 | Hook environment reaches checks | The hooks themselves passed git's variables to `task` targets. | [#44](https://github.com/aallbrig/mechapilot/pull/44) | mitigated | Every hook unsets them. | `test:test_hooks_unset_git_environment` |
+| HT-03 | Toolchain re-exports git variables | A mise `[env]` block sourced after the unset brought `GIT_DIR` back. | [#57](https://github.com/aallbrig/mechapilot/pull/57) | mitigated | The toolchain is loaded before the unset. | `test:test_hooks_load_toolchain_before_unsetting_git_environment` |
+| HT-04 | Unpinned tools in hooks | Hooks ran whatever linters the login PATH had, not the pinned ones. | [#57](https://github.com/aallbrig/mechapilot/pull/57) | mitigated | Hooks load the pinned toolchain before any check. | `test:test_hooks_load_the_pinned_toolchain_before_checks` |
+| HT-05 | Silent toolchain failure | A failing `mise env` let hooks continue with unpinned tools. | [#57](https://github.com/aallbrig/mechapilot/pull/57) | mitigated | The loader fails when `mise env` fails. | `test:test_lib_toolchain_fails_when_mise_env_fails` |
+| HT-06 | Template code in config | tmuxinator renders the raw file through ERB, so Ruby in a YAML comment passed the schema and ran. | [#43](https://github.com/aallbrig/mechapilot/pull/43) | mitigated | Any `<%` in the raw file is rejected before tmuxinator runs. | `test:test_erb_in_tmuxinator_config_is_rejected_before_ruby_runs` |
+| HT-07 | Check skipped by machine state | A running dev session made the config check exit early, so the test depended on the machine. | [#43](https://github.com/aallbrig/mechapilot/pull/43) | mitigated | The config is checked before the session probe; tests stub tmux. | `test:test_dev_check_ignores_a_running_session` |
+| HT-08 | Symlink carries config past checks | A tracked link points at content outside what content checks read. | [#48](https://github.com/aallbrig/mechapilot/pull/48) | mitigated | No tracked symlinks. | `check:no-symlinks` |
+| HT-09 | Incomplete git variable list | A hand-written unset list misses `GIT_CONFIG_PARAMETERS` and others git can pass to hooks. | [#44](https://github.com/aallbrig/mechapilot/pull/44) | open | Planned: use git's own `rev-parse --local-env-vars` list. | #46 |
+| HT-10 | Hooks lint the working tree | pre-commit checks the working tree, not the staged snapshot being committed. | [#16](https://github.com/aallbrig/mechapilot/pull/16) | open | Planned: lint the staged snapshot. | #38 |

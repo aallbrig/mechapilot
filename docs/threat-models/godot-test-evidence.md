@@ -1,0 +1,18 @@
+# Threat model: Godot test evidence
+
+Covers the GdUnit4 runner (`scripts/godot-test`), the GDScript static bans and the `godot.xml` evidence the runner writes. The mitigations are in the open Godot skeleton PR, so most entries stay `open` until it merges; that PR turns each one into `mitigated` with its regression test. The attacker is GDScript test or project code that wants a failing test reported as passed.
+
+| ID | Attack class | Description | Found | Status | Mitigation | Proof |
+| --- | --- | --- | --- | --- | --- | --- |
+| GT-01 | In-process result forgery | Test code shares a process with GdUnit4's counters and report writer, so it can rewrite its own suite's verdict. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | residual | Accepted: one process per suite, static bans on reflection, process and file APIs, and review of every test and the helpers it calls. | #37 |
+| GT-02 | Fail-open report on crash | A crashed or early-quitting suite left a `godot.xml` that claimed passes. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | A failed or crashed suite records every case as failed, plus its exit status. | #17 |
+| GT-03 | Reflection through bound methods | `.map(obj.get)` and similar reach runner internals by string without call syntax. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Ban bare references to reflective names, not only calls. | #17 |
+| GT-04 | Path escape from user:// | Concatenated paths and `globalize_path` let a test overwrite the harness or the Godot binary. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | File paths must be single literals; path-resolving APIs are banned; the tree must be unchanged after tests. | #17 |
+| GT-05 | Filesystem through instances | `DirAccess.open(...).copy(...)` overwrites a report through an instance, not a banned static call. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Ban `DirAccess` outside addons and route file access through one reviewed helper. | #17 |
+| GT-06 | Tampering in non-test helpers | Test-only bans do not follow calls into helpers outside `tests/`. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Apply scene-tree escape bans to all project code. | #17 |
+| GT-07 | Detached process from a test | `OS.create_process` starts a process that rewrites results after they are written. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Ban process and argv APIs in project code. | #17 |
+| GT-08 | Cross-runner overwrite | GDScript tests can overwrite `shell.xml`, which is written earlier. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Compare `shell.xml` after the Godot run. | #17 |
+| GT-09 | Watchdog holds stderr open | An orphaned watchdog `sleep` keeps a pipe open, so piped runs hang for the full limit. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Kill the watchdog as a unit; test that piped output returns quickly. | #17 |
+| GT-10 | Broken scene passes compile check | A scene with a missing `ext_resource` prints a parse error but exits 0. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Fail on any parse error. | #17 |
+| GT-11 | Cache poisoning | The CI cache was saved after project code ran, and a cache hit never re-hashed the binaries. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Save the cache right after install, and re-check binary hashes. | #17 |
+| GT-12 | Unguarded toolchain pins | `.godot-version` and its checksum file changed with one review. | [#49](https://github.com/aallbrig/mechapilot/pull/49) | open | Add the pins to the verification guard. | #17 |
