@@ -81,6 +81,13 @@ gdscript/warnings/property_used_as_function=2
 gdscript/warnings/constant_used_as_function=2
 gdscript/warnings/function_used_as_property=2
 
+[input_devices]
+
+; Touch (#25): taps reach every menu, the pause screen and the initials picker
+; as emulated clicks (the default, kept explicit). Emulated clicks never fire:
+; the fire binding matches real mouse devices only (tests/game/test_touch_overlay.gd).
+pointing/emulate_mouse_from_touch=true
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

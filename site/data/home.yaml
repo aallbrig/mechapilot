@@ -36,8 +36,8 @@ controls:
       move: "Left stick or D-pad"
       fire: "Right stick, or RT along your last aim"
     - device: "Touch"
-      move: "Left on-screen stick"
-      fire: "Right on-screen stick"
+      move: "Drag anywhere on the left half"
+      fire: "Tap the right half to fire at that point, or hold and drag to fire along the drag"
 
 cta:
   heading: "Ready for launch?"

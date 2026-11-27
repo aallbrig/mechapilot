@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://main.gd" id="1_main"]
 [ext_resource type="PackedScene" path="res://ui/ui_root.tscn" id="2_ui"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://game/attract/attract_dogfight.gd" id="4_attract"]
 [ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="5_stage"]
 [ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="6_mechfx"]
+[ext_resource type="Script" path="res://game/input/touch_controls.gd" id="7_touch"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_main")
@@ -18,6 +19,16 @@ script = ExtResource("6_mechfx")
 
 [node name="Attract" type="Node3D" parent="."]
 script = ExtResource("4_attract")
+
+[node name="TouchControls" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("7_touch")
 
 [node name="Ui" type="CanvasLayer" parent="."]
 layer = 10

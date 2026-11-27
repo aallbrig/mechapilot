@@ -1,7 +1,8 @@
 extends Node
 ## The composition root: the only script that knows the concrete classes. It
 ## builds the core/ rules on the Events bus, restores the persisted stores,
-## hands the player mech's mounts and motion to its feedback, boots the Game
+## hands the player mech's mounts and motion to its feedback, attaches the touch
+## controls (shown only on a touch screen) to the player's input, boots the Game
 ## State machine and ticks the rules on the fixed physics step.
 ## The screens (ui/), the UI sounds (feedback/) and the Title's attract mode
 ## (game/attract) are composed in main.tscn and hear only the Events bus.
@@ -21,6 +22,7 @@ var _tutorial: TutorialProgress
 @onready var _ui: UiRoot = $Ui/UiRoot
 @onready var _stage: FlightStage = $FlightStage
 @onready var _mech_feedback: MechFeedback = $MechFeedback
+@onready var _touch: TouchControls = $TouchControls
 
 
 func _ready() -> void:
@@ -40,6 +42,8 @@ func _ready() -> void:
 		Events, LocalDocumentStore.new(LocalDocumentStore.Slot.INTEL), IntelCodex.catalog(levels)
 	)
 	_tutorial = TutorialProgress.new(LocalDocumentStore.new(LocalDocumentStore.Slot.TUTORIAL))
+	# Before the stores restore, so the touch sticks hear the saved opacity.
+	_touch.attach(Events, _stage.player_input(), DisplayServer.is_touchscreen_available())
 	_settings.restore()
 	_scoreboard.restore()
 	_intel.restore()
