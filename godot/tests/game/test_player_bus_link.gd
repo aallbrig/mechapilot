@@ -201,3 +201,23 @@ func test_linked_respawn_blinks_for_the_ledger_window() -> void:
 	var _guarded: GdUnitAssert = assert_bool(guarded).is_true()
 	var _blinks: GdUnitAssert = assert_int(hidden_frames).is_greater(10)
 	var _no_reports: GdUnitAssert = assert_bool(ignored).is_true()
+
+
+func test_new_run_clears_a_leftover_invulnerability_window() -> void:
+	# A hit opens the ledger's window; a new Run then starts inside it.
+	# RunLedger.start_run() zeroes its window without announcing
+	# invulnerability_ended, so the mech must drop its copy on run_started.
+	var ledger: RunLedger = RunLedger.new(_bus)
+	ledger.start_run()
+	_bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.SKIRMISH)
+	var _hit: bool = _mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	var guarded_in_old_run: bool = _mech.is_invulnerable()
+	ledger.start_run()
+	_bus.run.announce_run_started(1)
+	var mech_guarded: bool = _mech.is_invulnerable()
+	var ledger_guarded: bool = ledger.is_invulnerable()
+	var hittable: bool = _mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	var _was_guarded: GdUnitAssert = assert_bool(guarded_in_old_run).is_true()
+	var _cleared: GdUnitAssert = assert_bool(mech_guarded).is_false()
+	var _agrees: GdUnitAssert = assert_bool(ledger_guarded).is_false()
+	var _hittable: GdUnitAssert = assert_bool(hittable).is_true()

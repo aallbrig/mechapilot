@@ -12,7 +12,7 @@ extends Node
 ##              player.invulnerability_ended   -> PlayerMech.end_guard()
 ##              player.player_destroyed        -> PlayerMech.destroy()
 ##              player.player_respawned        -> PlayerMech.respawn() where it fell
-##              run.run_started                -> PlayerMech.respawn() at the origin
+##              run.run_started                -> end_guard(), then respawn() at the origin
 ##
 ## Once linked, the mech stops guarding itself: the RunLedger owns the window.
 
@@ -58,6 +58,10 @@ func _on_player_respawned() -> void:
 
 
 func _on_run_started(_level_number: int) -> void:
+	# RunLedger.start_run() zeroes its window without announcing
+	# invulnerability_ended, and a linked respawn() keeps whatever window is open,
+	# so a window left over from the last Run would outlive it.
+	_player.end_guard()
 	_player.respawn(RUN_START)
 
 
