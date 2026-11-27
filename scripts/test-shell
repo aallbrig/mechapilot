@@ -5,6 +5,13 @@
 # Usage: scripts/test-shell [out-dir [test-file...]]
 # With test files, only those run (the pre-push hook uses this for new test
 # files, writing outside build/test-results); `task test` always runs them all.
+#
+# TEST_SHELL_EXCLUDE="test_a test_b" leaves those tests out entirely: they are
+# not run and get no <testcase>, so nothing can count them as passed
+# (verify-acceptance fails a criterion whose test is missing). Only
+# `task ci:sandbox` sets it, for tests the Agent Loop sandbox cannot run. It is
+# refused under CI, every name must be a test that exists, and each exclusion
+# is printed.
 set -eu
 # shellcheck source=lib-tests
 . "$(dirname "$0")/lib-tests"
@@ -37,12 +44,36 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
 # Set by scripts/hook-timing for the hook it runs; tests start without it.
 unset HOOK_TIMING_CHILD
 
+exclude="${TEST_SHELL_EXCLUDE:-}"
+if [ -n "${exclude}" ]; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "test-shell: TEST_SHELL_EXCLUDE is refused in CI: every test must run there" >&2
+    exit 1
+  fi
+  case "${exclude}" in
+    *[!a-z0-9_\ ]*)
+      echo "test-shell: TEST_SHELL_EXCLUDE must be test names separated by spaces" >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+fi
+excluded=" "
+
 total=0
 failed=0
 for file in "$@"; do
   [ -f "${file}" ] || continue
   names="$(shell_test_names <"${file}")"
   for name in ${names}; do
+    case " ${exclude} " in
+      *" ${name} "*)
+        excluded="${excluded}${name} "
+        printf 'EXCLUDED  %s (TEST_SHELL_EXCLUDE: not run, not reported)\n' "${name}"
+        continue
+        ;;
+      *) ;;
+    esac
     total=$((total + 1))
     log="$(mktemp)"
     if sh -c ". \"\$1\"; \"\$2\"" sh "${file}" "${name}" >"${log}" 2>&1; then
@@ -61,6 +92,17 @@ for file in "$@"; do
     fi
     rm -f "${log}"
   done
+done
+
+# A misspelt exclusion must not look like a successful one.
+for name in ${exclude}; do
+  case "${excluded}" in
+    *" ${name} "*) ;;
+    *)
+      printf 'test-shell: TEST_SHELL_EXCLUDE names no such test: %s\n' "${name}" >&2
+      exit 1
+      ;;
+  esac
 done
 
 {

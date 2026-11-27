@@ -271,6 +271,9 @@ tasks:
 
   test:
     desc: Run the test suites (JUnit output in build/test-results)
+    # Set only by ci:sandbox (see scripts/test-shell); refused under CI.
+    env:
+      TEST_SHELL_EXCLUDE: "{{.TEST_SHELL_EXCLUDE}}"
     cmds:
       - rm -rf build/test-results
       - mkdir -p build/test-results
@@ -415,9 +418,16 @@ tasks:
       - task: test
 
   ci:sandbox:
-    desc: "Agent Loop session gate: task ci minus the Chrome steps that bind localhost (site-observe, Lighthouse); the ci check runs them"
+    desc: "Agent Loop session gate: task ci minus the localhost Chrome steps (site-observe, Lighthouse) and the Docker nginx test; the ci check runs them"
     cmds:
-      - task: ci:fast
+      - task: lint
+      # The sandbox denies unix sockets, so Docker is unreachable there and the
+      # live nginx test (#77) cannot run. It is left out here only: excluded
+      # tests are not reported, so they never count as passed, and the full
+      # `task ci` (the required ci check) runs it.
+      - task: test
+        vars:
+          TEST_SHELL_EXCLUDE: test_lan_nginx_routes_and_mime
       - task: site:static
       - task: site:links
       - task: secrets

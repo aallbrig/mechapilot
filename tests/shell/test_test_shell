@@ -78,3 +78,36 @@ test_hooks_load_toolchain_before_unsetting_git_environment() {
     [ -n "${lib}" ] && [ -n "${unset_line}" ] && [ "${lib}" -lt "${unset_line}" ] || return 1
   done
 }
+
+# TEST_SHELL_EXCLUDE (ci:sandbox only): an excluded test is not run and gets no
+# <testcase>, so it can never count as passed; CI refuses the variable, and a
+# name that matches no test is an error, not a silent no-op.
+test_test_shell_excluded_tests_are_unreported_and_refused_in_ci() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  mkdir -p "${d}/tests/shell"
+  # Names built at runtime so this runner doesn't discover them here.
+  keep="test_""keep"
+  drop="test_""drop"
+  printf '%s() {\n  true\n}\n%s() {\n  true\n}\n' "${keep}" "${drop}" >"${d}/tests/shell/test_probe"
+  out="$(cd "${d}" && env -u CI -u GITHUB_ACTIONS TEST_SHELL_EXCLUDE="${drop}" "${root}/scripts/test-shell" "${d}/out")" || return 1
+  printf '%s\n' "${out}" | grep -qx "EXCLUDED  ${drop} (TEST_SHELL_EXCLUDE: not run, not reported)" || return 1
+  grep -q 'tests="1" failures="0"' "${d}/out/shell.xml" || return 1
+  grep -q "name=\"${keep}\"" "${d}/out/shell.xml" || return 1
+  ! grep -q "name=\"${drop}\"" "${d}/out/shell.xml" || return 1
+  for var in CI GITHUB_ACTIONS; do
+    ! (cd "${d}" && env -u CI -u GITHUB_ACTIONS "${var}=true" TEST_SHELL_EXCLUDE="${drop}" "${root}/scripts/test-shell" "${d}/ci" >/dev/null 2>&1) || return 1
+  done
+  [ ! -e "${d}/ci/shell.xml" ] || return 1
+  ! (cd "${d}" && env -u CI -u GITHUB_ACTIONS TEST_SHELL_EXCLUDE="test_typo" "${root}/scripts/test-shell" "${d}/typo" >/dev/null 2>&1) || return 1
+  ! (cd "${d}" && env -u CI -u GITHUB_ACTIONS TEST_SHELL_EXCLUDE="${drop};x" "${root}/scripts/test-shell" "${d}/bad" >/dev/null 2>&1) || return 1
+  # Only ci:sandbox sets it, and only for the Docker nginx test.
+  sets="$(grep -c 'TEST_SHELL_EXCLUDE: test_' Taskfile.yml)" || return 1
+  [ "${sets}" -eq 1 ] || return 1
+  grep -qx '          TEST_SHELL_EXCLUDE: test_lan_nginx_routes_and_mime' Taskfile.yml || return 1
+  sandbox="$(yq -o json '.tasks["ci:sandbox"].cmds' Taskfile.yml)" || return 1
+  printf '%s\n' "${sandbox}" | jq -e 'any(.[]; .task == "test" and .vars.TEST_SHELL_EXCLUDE == "test_lan_nginx_routes_and_mime")' >/dev/null || return 1
+  ci="$(yq -o json '.tasks["ci:fast"].cmds' Taskfile.yml)" || return 1
+  printf '%s\n' "${ci}" | jq -e 'all(.[]; has("vars") | not)' >/dev/null || return 1
+  rm -rf "${d}"
+}
