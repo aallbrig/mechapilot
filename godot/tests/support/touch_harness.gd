@@ -10,6 +10,8 @@ extends RefCounted
 const TICK: float = 1.0 / 60.0
 const START: float = 10.0
 const SCREEN: Vector2 = Vector2(1000.0, 600.0)
+## A touch index no test uses, for device switches.
+const UNUSED_FINGER: int = 9
 
 var holder: Node = Node.new()
 var bus: EventBus = EventBus.new()
@@ -56,9 +58,53 @@ func dispose() -> void:
 
 
 ## Attach the controls to `on_bus` (this harness's bus unless given), on a touch
-## screen unless told otherwise.
+## screen unless told otherwise. On a touch screen the last-used device is touch,
+## as after the Boot screen's tap.
 func attach(touch_screen: bool = true, on_bus: EventBus = null) -> void:
 	controls.attach(bus if on_bus == null else on_bus, input, touch_screen)
+	if touch_screen:
+		use_touch()
+
+
+## The player touches the screen (PlayerInput notices; no touch reaches the controls).
+func use_touch() -> void:
+	input.handle_event(_touch(UNUSED_FINGER, Vector2.ZERO, false), now)
+
+
+## The player uses a real mouse (a move past the device slop).
+func use_mouse() -> void:
+	var move: InputEventMouseMotion = InputEventMouseMotion.new()
+	move.relative = Vector2(DeviceDetector.MOUSE_SLOP * 4.0, 0.0)
+	input.handle_event(move, now + DeviceDetector.TOUCH_MOUSE_GRACE)
+
+
+## The player presses a key.
+func use_keyboard() -> void:
+	var key: InputEventKey = InputEventKey.new()
+	key.physical_keycode = KEY_UP
+	key.pressed = true
+	input.handle_event(key, now)
+
+
+## The player presses a gamepad button.
+func use_gamepad() -> void:
+	var button: InputEventJoypadButton = InputEventJoypadButton.new()
+	button.button_index = JOY_BUTTON_A
+	button.pressed = true
+	input.handle_event(button, now)
+
+
+## A left mouse click (press, then release) at `at` from `device` (a real mouse
+## unless told otherwise), fed as the engine does: PlayerInput first.
+func click(at: Vector2, device: int = 0) -> void:
+	for pressed: bool in [true, false]:
+		var ev: InputEventMouseButton = InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_LEFT
+		ev.position = at
+		ev.pressed = pressed
+		ev.device = device
+		input.handle_event(ev, now + DeviceDetector.TOUCH_MOUSE_GRACE)
+		controls.handle_event(ev, now)
 
 
 ## Attach the controls and enter play (Skirmish).

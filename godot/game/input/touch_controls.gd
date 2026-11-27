@@ -1,23 +1,27 @@
 class_name TouchControls
 extends Control
-## The on-screen touch controls (#25): twin virtual sticks and a pause button,
-## drawn over the flight. The rules live in TouchSticks; this node routes the
-## screen events to them, feeds PlayerInput's touch seam (set_touch_sticks and
-## request_tap_shot), and draws:
+## The on-screen controls (#25): twin virtual touch sticks and the game's one
+## on-screen pause button (#84), drawn over the flight. The stick rules live in
+## TouchSticks; this node routes the screen events to them, feeds PlayerInput's
+## touch seam (set_touch_sticks and request_tap_shot), and draws:
 ##
 ## - the sticks only while a finger holds them (the aim stick once a touch is a
 ##   hold, never during a tap), at the Settings touch stick opacity, with a pop
 ##   when they open and a hot knob while the aim stick fires;
 ## - the pause button in the top-right corner, sized for a thumb. A touch that
 ##   starts on it (or within PAUSE_GUARD of it) is the button's and never a
-##   stick or a shot; lifting it on the button announces pause_requested.
+##   stick or a shot; lifting it on the button announces pause_requested. A
+##   real (not emulated) left click on it pauses at once, on the press, so the
+##   click never also fires a shot; it lights up under the cursor.
 ##
-## Everything shows only on a touch screen and only in play (Level Intro to Boss
-## Fight). Leaving play drops every touch, zeroes the sticks and clears any
-## pending tap, so no finger keeps steering and no tap fires after Pause or Game
-## Over. The node reads screen events in _unhandled_input, so a touch on any UI
-## control (a HUD button) never steers.
-## It never takes mouse input itself: menus get taps as emulated clicks.
+## Everything shows only in play (Level Intro to Boss Fight). The sticks work
+## only on a touch screen. The pause button shows while the last-used device is
+## touch (on a touch screen) or keyboard + mouse, and hides for keyboard or
+## gamepad, which pause with Esc, P or Start. Leaving play drops every touch,
+## zeroes the sticks and clears any pending tap, so no finger keeps steering and
+## no tap fires after Pause or Game Over. The node reads input in
+## _unhandled_input, so a touch or click on any UI control never reaches it.
+## Menus get taps as emulated clicks, which this node ignores.
 ## main.tscn anchors it to the full screen; the halves split at its centre.
 
 ## The pause button: its side (px), its distance from the screen edges, and the
@@ -29,6 +33,7 @@ const PAUSE_BAR_SIZE: Vector2 = Vector2(10.0, 32.0)
 const PAUSE_BAR_GAP: float = 10.0
 const PAUSE_FILL: Color = Color(0.05, 0.08, 0.16, 0.55)
 const PAUSE_PRESSED_FILL: Color = Color(0.25, 0.55, 1.0, 0.75)
+const PAUSE_HOVER_FILL: Color = Color(0.12, 0.25, 0.5, 0.7)
 const PAUSE_INK: Color = Color(0.92, 0.97, 1.0, 0.9)
 const PAUSE_PRESS_SCALE: float = 0.9
 ## Stick drawing: the base ring follows TouchSticks.STICK_RANGE.
@@ -51,6 +56,8 @@ var _bus: EventBus
 var _opacity: float = GameSettings.DEFAULT_TOUCH_STICK_OPACITY
 var _pause_finger: int = TouchSticks.NO_TOUCH
 var _pause_pressed: bool = false
+var _pause_hovered: bool = false
+var _device: InputDevice.Kind = InputDevice.Kind.KEYBOARD
 var _move_pop: float = 0.0
 var _aim_pop: float = 0.0
 var _move_was_shown: bool = false
@@ -65,11 +72,13 @@ func _init() -> void:
 
 ## Wire the controls to `bus` and `input`. `touch_screen`: the device has one
 ## (DisplayServer.is_touchscreen_available() in the game); without one the
-## controls stay hidden and ignore every event.
+## sticks stay off and ignore every touch. The pause button follows `input`'s
+## last-used device.
 func attach(bus: EventBus, input: PlayerInput, touch_screen: bool) -> void:
 	_bus = bus
 	_input = input
 	_touch_screen = touch_screen
+	_device = input.current_device()
 	(
 		Subscriptions
 		. require_ok(
@@ -77,6 +86,7 @@ func attach(bus: EventBus, input: PlayerInput, touch_screen: bool) -> void:
 			[
 				bus.flow.game_state_changed.connect(_on_game_state_changed),
 				bus.profile.settings_changed.connect(_on_settings_changed),
+				input.device_changed.connect(_on_device_changed),
 			]
 		)
 	)
@@ -89,6 +99,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	if not _is_active():
+		if is_pause_button_shown():
+			queue_redraw()
 		return
 	update(Time.get_ticks_usec() / PlayerInput.USEC_PER_SECOND)
 	var settle: float = exp(-POP_SETTLE * delta)
@@ -97,9 +109,14 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 
-## Feed one screen event observed at `now` seconds (the engine calls this
-## through _unhandled_input). Every other event is ignored.
+## Feed one event observed at `now` seconds (the engine calls this through
+## _unhandled_input): screen touches and drags for the sticks and the pause
+## button, real mouse clicks and moves for the pause button. Every other
+## event, and every emulated mouse event, is ignored.
 func handle_event(event: InputEvent, now: float) -> void:
+	if event is InputEventMouse:
+		_on_mouse(event as InputEventMouse)
+		return
 	if not _is_active():
 		return
 	if event is InputEventScreenTouch:
@@ -133,8 +150,14 @@ func pause_button_rect() -> Rect2:
 	return Rect2(Vector2(size.x - PAUSE_MARGIN - PAUSE_SIZE, PAUSE_MARGIN), side)
 
 
+## Shown in play while the last-used device is touch (on a touch screen) or
+## keyboard + mouse.
 func is_pause_button_shown() -> bool:
-	return _is_active()
+	if not _in_play or _input == null:
+		return false
+	if _device == InputDevice.Kind.KEYBOARD_MOUSE:
+		return true
+	return _device == InputDevice.Kind.TOUCH and _touch_screen
 
 
 func is_move_stick_shown() -> bool:
@@ -151,21 +174,20 @@ func stick_opacity() -> float:
 
 
 func _draw() -> void:
-	if not _is_active():
-		return
 	if is_move_stick_shown():
 		_draw_stick(_sticks.move_stick(), _move_pop, false)
 	if is_aim_stick_shown():
 		var firing: bool = _sticks.aim().length() > PlayerInput.TOUCH_AIM_THRESHOLD
 		_draw_stick(_sticks.aim_stick(), _aim_pop, firing)
-	_draw_pause_button()
+	if is_pause_button_shown():
+		_draw_pause_button()
 
 
 func _on_press(index: int, at: Vector2, now: float) -> void:
 	if _sticks.is_tracking(index) or index == _pause_finger:
 		return
 	# Any touch on the button is the button's, even while another finger holds it.
-	if _pause_hit_rect().has_point(at):
+	if is_pause_button_shown() and _pause_hit_rect().has_point(at):
 		if _pause_finger == TouchSticks.NO_TOUCH:
 			_pause_finger = index
 			_pause_pressed = true
@@ -183,6 +205,24 @@ func _on_release(index: int, at: Vector2, now: float, cancelled: bool) -> void:
 	_pause_pressed = false
 	if pressed:
 		_bus.flow.announce_pause_requested()
+
+
+## A real left click on the shown button pauses at once; moves light it up.
+func _on_mouse(event: InputEventMouse) -> void:
+	if event.device == InputEvent.DEVICE_ID_EMULATION or not is_pause_button_shown():
+		_pause_hovered = false
+		return
+	var at: Vector2 = _local(event.position)
+	_pause_hovered = pause_button_rect().has_point(at)
+	var click: InputEventMouseButton = event as InputEventMouseButton
+	if (
+		click != null
+		and click.pressed
+		and click.button_index == MOUSE_BUTTON_LEFT
+		and _pause_hovered
+	):
+		_bus.flow.announce_pause_requested()
+	queue_redraw()
 
 
 ## Hand the sticks and any taps to PlayerInput, and start the open pops.
@@ -208,7 +248,8 @@ func _is_active() -> bool:
 
 
 func _refresh_visibility() -> void:
-	visible = _is_active()
+	visible = _is_active() or is_pause_button_shown()
+	_pause_hovered = _pause_hovered and is_pause_button_shown()
 	if not _is_active():
 		_sticks.reset()
 		_pause_finger = TouchSticks.NO_TOUCH
@@ -247,7 +288,12 @@ func _draw_pause_button() -> void:
 	var center: Vector2 = rect.get_center()
 	var scale_now: float = PAUSE_PRESS_SCALE if _pause_pressed else 1.0
 	var drawn: Rect2 = Rect2(center - rect.size * 0.5 * scale_now, rect.size * scale_now)
-	draw_rect(drawn, PAUSE_PRESSED_FILL if _pause_pressed else PAUSE_FILL)
+	var fill: Color = PAUSE_FILL
+	if _pause_pressed:
+		fill = PAUSE_PRESSED_FILL
+	elif _pause_hovered:
+		fill = PAUSE_HOVER_FILL
+	draw_rect(drawn, fill)
 	draw_rect(drawn, PAUSE_INK, false, BASE_RING_WIDTH)
 	var bar: Vector2 = PAUSE_BAR_SIZE * scale_now
 	var gap: float = PAUSE_BAR_GAP * scale_now * 0.5
@@ -257,6 +303,11 @@ func _draw_pause_button() -> void:
 
 func _on_game_state_changed(_from: GameState.Phase, to: GameState.Phase) -> void:
 	_in_play = GameState.is_play(to)
+	_refresh_visibility()
+
+
+func _on_device_changed(device: InputDevice.Kind) -> void:
+	_device = device
 	_refresh_visibility()
 
 

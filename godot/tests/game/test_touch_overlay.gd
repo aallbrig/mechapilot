@@ -164,6 +164,52 @@ func test_pause_lift_outside_or_cancel_does_nothing() -> void:
 	var _no_shots: GdUnitAssert = assert_int(_h.shots.size()).is_equal(0)
 
 
+func test_pause_button_accepts_mouse_click() -> void:
+	_h.start(false)
+	_h.use_mouse()
+	var center: Vector2 = _h.controls.pause_button_rect().get_center()
+	var shown: bool = _h.controls.is_pause_button_shown() and _h.controls.visible
+	# A click beside the button, and a browser's emulated click on it, do nothing.
+	_h.click(center + Vector2(-TouchControls.PAUSE_SIZE, 0.0))
+	_h.click(center, InputEvent.DEVICE_ID_EMULATION)
+	var stray_pauses: int = _h.pauses
+	_h.click(center)
+	var _shown_for_mouse: GdUnitAssert = assert_bool(shown).is_true()
+	var _only_real_clicks_on_it: GdUnitAssert = assert_int(stray_pauses).is_equal(0)
+	var _clicked: GdUnitAssert = assert_int(_h.pauses).is_equal(1)
+	var _no_sticks: GdUnitAssert = assert_bool(_h.controls.is_move_stick_shown()).is_false()
+
+
+func test_pause_button_shows_only_for_touch_and_mouse() -> void:
+	_h.start()
+	var touch: bool = _h.controls.is_pause_button_shown()
+	_h.use_keyboard()
+	var keyboard: bool = _h.controls.is_pause_button_shown()
+	var keyboard_click: Vector2 = _h.controls.pause_button_rect().get_center()
+	_h.controls.handle_event(_left_click(keyboard_click), _h.now)
+	var keyboard_pauses: int = _h.pauses
+	_h.use_gamepad()
+	var gamepad: bool = _h.controls.is_pause_button_shown()
+	_h.use_mouse()
+	var mouse: bool = _h.controls.is_pause_button_shown()
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.PAUSED)
+	var paused: bool = _h.controls.is_pause_button_shown() or _h.controls.visible
+	var _for_touch: GdUnitAssert = assert_bool(touch).is_true()
+	var _not_for_keyboard: GdUnitAssert = assert_bool(keyboard).is_false()
+	var _hidden_is_inert: GdUnitAssert = assert_int(keyboard_pauses).is_equal(0)
+	var _not_for_gamepad: GdUnitAssert = assert_bool(gamepad).is_false()
+	var _for_mouse: GdUnitAssert = assert_bool(mouse).is_true()
+	var _only_in_play: GdUnitAssert = assert_bool(paused).is_false()
+
+
+func _left_click(at: Vector2) -> InputEventMouseButton:
+	var click: InputEventMouseButton = InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.position = at
+	click.pressed = true
+	return click
+
+
 func test_emulated_mouse_from_a_touch_never_fires() -> void:
 	InputBindings.install()
 	var click: InputEventMouseButton = InputEventMouseButton.new()

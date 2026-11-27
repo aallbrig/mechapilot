@@ -164,6 +164,43 @@ func test_pause_button_pauses_for_touch() -> void:
 	var _paused: GdUnitAssert = assert_int(_h.run.machine.state()).is_equal(GameState.Phase.PAUSED)
 
 
+## #84: the touch controls' pause button is the only on-screen one. The shown
+## HUD has no button at all, and nothing that takes the pointer over it.
+func test_hud_has_no_pause_button_over_the_touch_one() -> void:
+	var _viewport: SubViewport = _touch_viewport()
+	_h.reach_title()
+	_h.bus.flow.announce_play_requested()
+	_h.run.advance(_h.run.levels[0].intro_duration + RunHarness.STEP)
+	await await_idle_frame()
+	var hud: UiScreen = _h.screen(&"Hud")
+	var touch_button: Rect2 = _controls.pause_button_rect()
+	var buttons: Array[String] = []
+	var over_button: Array[String] = []
+	_collect_pointer_takers(hud, touch_button, buttons, over_button)
+	var _hud_shown: GdUnitAssert = assert_bool(hud.is_visible_in_tree()).is_true()
+	var _no_buttons: GdUnitAssert = assert_array(buttons).is_empty()
+	var _nothing_over_it: GdUnitAssert = assert_array(over_button).is_empty()
+
+
+## Names every BaseButton under `root` into `buttons`, and every shown control
+## that takes the pointer and overlaps `area` into `over`.
+func _collect_pointer_takers(
+	root: Node, area: Rect2, buttons: Array[String], over: Array[String]
+) -> void:
+	for child: Node in root.get_children():
+		if child is BaseButton:
+			buttons.append(str(child.name))
+		var control: Control = child as Control
+		if (
+			control != null
+			and control.is_visible_in_tree()
+			and control.mouse_filter != Control.MOUSE_FILTER_IGNORE
+			and control.get_global_rect().intersects(area)
+		):
+			over.append(str(control.name))
+		_collect_pointer_takers(child, area, buttons, over)
+
+
 func test_ui_root_passes_gameplay_touches_through() -> void:
 	var viewport: SubViewport = _touch_viewport()
 	_h.reach_title()
