@@ -1,0 +1,160 @@
+[gd_scene load_steps=14 format=3]
+
+[ext_resource type="Script" path="res://ui/ui_root.gd" id="1_root"]
+[ext_resource type="Theme" path="res://ui/theme/theme.tres" id="2_theme"]
+[ext_resource type="Script" path="res://ui/screens/boot_screen.gd" id="3_boot_screen"]
+[ext_resource type="Script" path="res://ui/screens/title_screen.gd" id="4_title_screen"]
+[ext_resource type="Script" path="res://ui/screens/hud.gd" id="5_hud"]
+[ext_resource type="Script" path="res://ui/screens/level_intro_card.gd" id="6_level_intro_card"]
+[ext_resource type="Script" path="res://ui/screens/boss_warning.gd" id="7_boss_warning"]
+[ext_resource type="Script" path="res://ui/screens/pause_screen.gd" id="8_pause_screen"]
+[ext_resource type="Script" path="res://ui/screens/level_clear_screen.gd" id="9_level_clear_screen"]
+[ext_resource type="Script" path="res://ui/screens/run_end_screen.gd" id="10_run_end_screen"]
+[ext_resource type="Script" path="res://ui/screens/scoreboard_screen.gd" id="11_scoreboard_screen"]
+[ext_resource type="Script" path="res://ui/screens/settings_screen.gd" id="12_settings_screen"]
+[ext_resource type="Script" path="res://ui/screens/credits_screen.gd" id="13_credits_screen"]
+
+[node name="UiRoot" type="Control"]
+process_mode = 3
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme = ExtResource("2_theme")
+script = ExtResource("1_root")
+
+[node name="Boot" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("3_boot_screen")
+
+[node name="Title" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("4_title_screen")
+
+[node name="Hud" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("5_hud")
+
+[node name="LevelIntro" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("6_level_intro_card")
+
+[node name="BossWarning" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("7_boss_warning")
+
+[node name="Pause" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("8_pause_screen")
+
+[node name="LevelClear" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("9_level_clear_screen")
+
+[node name="GameOver" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("10_run_end_screen")
+
+[node name="Victory" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("10_run_end_screen")
+victory = true
+
+[node name="Scoreboard" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("11_scoreboard_screen")
+
+[node name="Settings" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("12_settings_screen")
+
+[node name="Credits" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("13_credits_screen")

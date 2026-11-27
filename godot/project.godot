@@ -16,6 +16,19 @@ config/features=PackedStringArray("4.7", "GL Compatibility")
 
 Events="*res://autoload/events.gd"
 
+[display]
+
+; UI scaling (#24): a 640x640 base with the canvas_items stretch and the expand
+; aspect, so the shorter side of the window is always 640 UI pixels. A 360 px
+; wide phone gets a 0.5625 scale (the smallest UI font, 26, stays above 14 px);
+; 1080p gets 1.6875 and 4K 3.375, with text re-rasterized at every scale.
+window/size/viewport_width=640
+window/size/viewport_height=640
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
 [debug]
 
 gdscript/warnings/unassigned_variable=2

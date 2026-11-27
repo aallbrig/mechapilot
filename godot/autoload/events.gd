@@ -55,6 +55,8 @@ class FlowChannel:
 	## Reported by game/: the player used a different kind of input device, so
 	## prompts and glyphs switch to it.
 	signal input_device_changed(device: InputDevice.Kind)
+	## A screen asks for a UI sound (focus, confirm, tally tick, ...).
+	signal ui_cue_requested(cue: UiCue.Cue)
 
 	func announce_start_requested() -> void:
 		start_requested.emit()
@@ -85,6 +87,9 @@ class FlowChannel:
 
 	func announce_input_device_changed(device: InputDevice.Kind) -> void:
 		input_device_changed.emit(device)
+
+	func announce_ui_cue_requested(cue: UiCue.Cue) -> void:
+		ui_cue_requested.emit(cue)
 
 
 ## The Run, its Levels, the Boss Gauge and scoring.

@@ -1,36 +1,28 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://main.gd" id="1_main"]
-[ext_resource type="Script" path="res://ui/menu_screen.gd" id="2_menu"]
-[ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="3_stage"]
-[ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="4_mechfx"]
+[ext_resource type="PackedScene" path="res://ui/ui_root.tscn" id="2_ui"]
+[ext_resource type="Script" path="res://feedback/ui_sound_player.gd" id="3_sounds"]
+[ext_resource type="Script" path="res://game/attract/attract_dogfight.gd" id="4_attract"]
+[ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="5_stage"]
+[ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="6_mechfx"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_main")
 
 [node name="FlightStage" type="Node3D" parent="."]
-script = ExtResource("3_stage")
+script = ExtResource("5_stage")
 
 [node name="MechFeedback" type="Node3D" parent="."]
-script = ExtResource("4_mechfx")
+script = ExtResource("6_mechfx")
 
-[node name="MenuScreen" type="Control" parent="."]
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-script = ExtResource("2_menu")
+[node name="Attract" type="Node3D" parent="."]
+script = ExtResource("4_attract")
 
-[node name="Title" type="Label" parent="MenuScreen"]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-theme_override_font_sizes/font_size = 48
-text = "Mecha Fighter"
-horizontal_alignment = 1
-vertical_alignment = 1
+[node name="Ui" type="CanvasLayer" parent="."]
+layer = 10
+
+[node name="UiRoot" parent="Ui" instance=ExtResource("2_ui")]
+
+[node name="UiSounds" type="Node" parent="."]
+script = ExtResource("3_sounds")

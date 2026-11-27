@@ -5,18 +5,17 @@
 # shell; the helpers remove their temp dirs when it exits.
 
 # A throwaway project with the real strict project.godot, main scene and every
-# code layer main.gd may name (so the real project compiles there); sets d.
+# code layer main.gd and main.tscn may name, with their scenes, themes and fonts
+# (so the real project compiles there), plus the Level files; sets d.
 strict_project() {
   d="$(mktemp -d)"
   trap 'rm -rf "${d}"' EXIT
   cp godot/project.godot godot/main.gd godot/main.tscn "${d}/"
-  for dir in autoload types core game ui feedback; do
+  for dir in autoload types core game ui feedback levels; do
     if [ -d "godot/${dir}" ]; then
       cp -R "godot/${dir}" "${d}/${dir}"
     fi
   done
-  mkdir -p "${d}/levels"
-  cp godot/levels/*.json "${d}/levels/"
 }
 
 # compile_rejects <file>: the check fails, and names that file as the reason.

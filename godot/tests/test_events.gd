@@ -88,10 +88,10 @@ func test_main_boots_into_menu_through_events_bus() -> void:
 	var scene: PackedScene = load("res://main.tscn") as PackedScene
 	var main: Node = scene.instantiate()
 	add_child(main)
-	var menu: MenuScreen = main.get_node("MenuScreen") as MenuScreen
-	var shown: bool = menu.visible
+	var ui: UiRoot = main.get_node("Ui/UiRoot") as UiRoot
+	var shown: Array[StringName] = ui.visible_screens()
 	main.free()
-	var _menu_shown: GdUnitAssert = assert_bool(shown).is_true()
+	var _boot_shown: GdUnitAssert = assert_array(shown).is_equal([&"Boot"])
 
 
 static func _declares(channel: Script, announcer: String) -> bool:

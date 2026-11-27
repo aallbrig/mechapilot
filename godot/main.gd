@@ -3,6 +3,8 @@ extends Node
 ## builds the core/ rules on the Events bus, restores the persisted stores,
 ## hands the player mech's mounts and motion to its feedback, boots the Game
 ## State machine and ticks the rules on the fixed physics step.
+## The screens (ui/), the UI sounds (feedback/) and the Title's attract mode
+## (game/attract) are composed in main.tscn and hear only the Events bus.
 ## The boot marker lets the web smoke test see the bus round trip in the browser.
 
 const BOOT_OK_MARKER: String = "mechapilot: boot ok"
@@ -16,7 +18,7 @@ var _settings: Settings
 var _intel: IntelCodex
 var _tutorial: TutorialProgress
 
-@onready var _menu_screen: MenuScreen = $MenuScreen
+@onready var _ui: UiRoot = $Ui/UiRoot
 @onready var _stage: FlightStage = $FlightStage
 @onready var _mech_feedback: MechFeedback = $MechFeedback
 
@@ -44,10 +46,10 @@ func _ready() -> void:
 	_tutorial.restore()
 	_wire_mech_feedback()
 	_machine.boot()
-	if _menu_screen.visible:
+	if _ui.visible_screens() == [&"Boot"]:
 		print(BOOT_OK_MARKER)
 	else:
-		push_error("mechapilot: the Title screen did not receive game_state_changed")
+		push_error("mechapilot: the Boot screen did not receive game_state_changed")
 
 
 func _physics_process(delta: float) -> void:
