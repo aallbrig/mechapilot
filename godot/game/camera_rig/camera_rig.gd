@@ -2,7 +2,9 @@ class_name CameraRig
 extends Node3D
 ## The side-on camera for the 2.5D view: it looks down -Z at the XY play plane
 ## from DISTANCE away and follows the mech lazily (LazyFollow). Portrait screens
-## pull back so at least MIN_HALF_WIDTH units stay visible either side.
+## pull back so at least MIN_HALF_WIDTH units stay visible either side. A safe
+## frame, SAFE_FRAME_SHARE of the visible half extents worked out from the live
+## FOV, distance and aspect, is a hard limit the mech never crosses.
 ## It also carries the camera's share of the juice: trauma shake, kicks and FOV
 ## punches, which feedback and the stage trigger through its methods.
 
@@ -12,6 +14,8 @@ const DISTANCE: float = 34.0
 const MIN_HALF_WIDTH: float = 14.0
 ## Share of the visible half extents where the mech moves without the camera.
 const DEAD_ZONE_SHARE: float = 0.2
+## Share of the visible half extents the mech may never leave (the safe frame).
+const SAFE_FRAME_SHARE: float = 0.7
 const NEAR: float = 0.3
 const FAR: float = 200.0
 ## Shake: trauma decays per second; the offset and roll scale with trauma squared.
@@ -68,8 +72,20 @@ static func distance_for_aspect(aspect: float) -> float:
 
 ## The dead zone's half extents (world units) at `distance` and `aspect`.
 static func dead_zone_for(distance: float, aspect: float) -> Vector2:
-	var half_h: float = tan(deg_to_rad(FOV * 0.5)) * distance
-	return Vector2(half_h * aspect, half_h) * DEAD_ZONE_SHARE
+	return visible_half_extents(distance, aspect, FOV) * DEAD_ZONE_SHARE
+
+
+## The safe frame's half extents (world units) on the play plane, for a camera
+## `distance` away with a vertical FOV of `fov` degrees at `aspect`.
+static func safe_frame_for(distance: float, aspect: float, fov: float) -> Vector2:
+	return visible_half_extents(distance, aspect, fov) * SAFE_FRAME_SHARE
+
+
+## Half the visible width and height (world units) on the play plane. Camera3D
+## keeps its height, so `fov` is vertical.
+static func visible_half_extents(distance: float, aspect: float, fov: float) -> Vector2:
+	var half_h: float = tan(deg_to_rad(fov * 0.5)) * distance
+	return Vector2(half_h * aspect, half_h)
 
 
 func camera() -> Camera3D:
@@ -81,20 +97,30 @@ func set_view_aspect(aspect: float) -> void:
 	_distance = distance_for_aspect(aspect)
 
 
-## Frame `point` at once, with no follow motion (spawn and respawn).
+## Frame `point` at once, with no follow motion (spawn and respawn). Leftover
+## shake, kicks and FOV punches are dropped too, so the new life starts centred
+## and still.
 func snap_to(point: Vector3) -> void:
 	_follow.snap(point)
+	_trauma = 0.0
+	_kick = Vector3.ZERO
+	_punch = 0.0
 	_place()
 
 
 func advance(delta: float, target_position: Vector3, target_velocity: Vector3) -> void:
 	_clock += delta
-	var _focus: Vector3 = _follow.step(
-		target_position, target_velocity, dead_zone_for(_distance, _aspect), delta
-	)
 	_trauma = maxf(0.0, _trauma - TRAUMA_DECAY * delta)
 	_kick = _kick.lerp(Vector3.ZERO, 1.0 - exp(-KICK_RETURN * delta))
 	_punch = lerpf(_punch, 0.0, 1.0 - exp(-PUNCH_RETURN * delta))
+	# The safe frame uses this frame's FOV, so an FOV punch narrows it too.
+	var _focus: Vector3 = _follow.step(
+		target_position,
+		target_velocity,
+		dead_zone_for(_distance, _aspect),
+		delta,
+		safe_frame_for(_distance, _aspect, FOV - _punch)
+	)
 	_place()
 
 
