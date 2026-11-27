@@ -4,7 +4,21 @@
 # activated mise shell, so they would otherwise pick up unpinned or missing tools.
 # Without mise on PATH this is a no-op (the tools must then already be on PATH).
 # Hooks source this before unsetting GIT_*, so a mise [env] can't bring them back.
-if command -v mise >/dev/null 2>&1; then
+#
+# In the Agent Loop session (AGENT_LOOP_SESSION=1, set only by the
+# Supervisor's launcher, #64) the hooks are the pinned copies in
+# <state>/runtime/.githooks and source the pinned copy of this file, and
+# mise is never run: the launcher already ran `mise env` for the main checkout,
+# outside the sandbox, and in the session's clone mise refuses the untrusted
+# .mise.toml, so every commit would fail. Instead this is a tripwire. The
+# session's git hooks run inside its sandbox, where the state dir is read-only.
+# If the mark below can be written, a hook ran outside the sandbox, and the
+# Supervisor's preflight refuses to start until a human has looked.
+if [ "${AGENT_LOOP_SESSION:-}" = 1 ]; then
+  if [ -n "${AGENT_LOOP_STATE_DIR:-}" ] && [ -d "${AGENT_LOOP_STATE_DIR}" ]; then
+    (date -u +%Y-%m-%dT%H:%M:%SZ >>"${AGENT_LOOP_STATE_DIR}/hook-outside-sandbox") 2>/dev/null || true
+  fi
+elif command -v mise >/dev/null 2>&1; then
   toolchain_env="$(mise env --shell bash)" || {
     printf 'toolchain: mise env failed; run task setup\n' >&2
     exit 1

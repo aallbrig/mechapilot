@@ -1,0 +1,67 @@
+#!/bin/sh
+# No production job runs on its own (#64, docs/adr/0001-owner-dispatches-production-deploys.md).
+# Every workflow with a job in the production environment must be triggered by
+# workflow_dispatch and nothing else: no push (branch or tag), pull request,
+# schedule, workflow_run or workflow_call. Only the owner can dispatch, because
+# the Agent Loop's token has no Actions and no Workflows permission, so that is
+# the human gate for Production. A job whose environment is an expression
+# (${{ ... }}) counts as production, because it may evaluate to it.
+#
+# A workflow that runs on anything else must not be able to press the button
+# itself: GITHUB_TOKEN with actions: write can dispatch workflows, and those
+# dispatches do start runs. So it declares its permissions explicitly (the
+# repository default may be write-all), at the top level or on every job, and
+# never grants actions: write or write-all.
+#
+# Usage: scripts/checks/production-dispatch-only [workflows-dir]
+#   default: .github/workflows. The Supervisor's preflight runs it on
+#   origin/main's workflows, which are the ones GitHub runs.
+set -eu
+
+dir="${1:-.github/workflows}"
+[ -d "${dir}" ] || {
+  printf 'production-dispatch-only: no %s\n' "${dir}" >&2
+  exit 1
+}
+
+failed=0
+checked=0
+for f in "${dir}"/*.yml "${dir}"/*.yaml; do
+  [ -f "${f}" ] || continue
+  if [ -L "${f}" ]; then
+    printf 'production-dispatch-only: %s is a symlink\n' "${f}"
+    failed=1
+    continue
+  fi
+  checked=$((checked + 1))
+  json="$(yq -o=json '.' "${f}")" || {
+    printf 'production-dispatch-only: %s is not valid YAML\n' "${f}"
+    failed=1
+    continue
+  }
+  verdict="$(printf '%s\n' "${json}" | jq -r '
+    [(.jobs // {}) | to_entries[] | .value.environment // empty
+      | if type == "object" then .name else . end | tostring
+      | select(test("^production$"; "i") or test("\\$\\{\\{"))] as $prod
+    | (.on // .true // null) as $on
+    | ($on | if type == "string" then [.] elif type == "array" then . elif type == "object" then keys else [] end) as $triggers
+    | (if ($prod | length) == 0 then "ok"
+      elif $triggers == ["workflow_dispatch"] then "ok"
+      else "uses the production environment but triggers \($triggers | join(", ")) (only workflow_dispatch is allowed)" end) as $prod_verdict
+    | def grants_dispatch: . == "write-all" or (type == "object" and (.actions == "write"));
+    ((.jobs // {}) | to_entries | map(.value)) as $jobs
+    | (if $prod_verdict != "ok" then $prod_verdict
+       elif $triggers == ["workflow_dispatch"] then "ok"
+       elif (has("permissions") | not) and ([$jobs[] | select(has("permissions") | not)] | length) > 0 then
+         "no explicit permissions (the repository default could let GITHUB_TOKEN dispatch Deploy)"
+       elif ([(.permissions // empty), ($jobs[] | .permissions // empty)] | any(grants_dispatch)) then
+         "actions: write or write-all (GITHUB_TOKEN could dispatch Deploy)"
+       else "ok" end)')"
+  if [ "${verdict}" != ok ]; then
+    printf 'production-dispatch-only: %s: %s\n' "${f}" "${verdict}"
+    failed=1
+  fi
+done
+
+if [ "${failed}" -ne 0 ]; then exit 1; fi
+printf 'production-dispatch-only: ok (%s workflows)\n' "${checked}"

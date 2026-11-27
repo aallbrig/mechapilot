@@ -22,11 +22,6 @@ expect() {
   }
 }
 
-# events <metrics-file>: the event names on one line.
-events() {
-  jq -r '.event' "$1" | tr '\n' ' '
-}
-
 # snap <fixture> <jq-filter>: a temp copy of a fixture snapshot with the filter applied.
 snap() {
   out="$(mktemp)"
@@ -59,17 +54,27 @@ work() {
 # stubs <dir>: fake claude, gh, tmux and sandbox tools in <dir>/bin that record
 # every call in <dir>/calls, plus a 0600 token file at <dir>/token.
 #   claude agents --json  prints <dir>/agents.json (or [])
-#   gh api --include ...  answers 200 with <dir>/issues.json and an ETag, or
-#                         304 when sent If-None-Match
-#   gh api repos/.../issues/<n> --jq ...  prints <dir>/issue-state (or completed)
+#   gh api --include <issues list>  answers 200 with <dir>/issues.json (or, for
+#                         the needs-triage label, <dir>/triage.json or []) and
+#                         an ETag, or 304 when sent If-None-Match; every answer
+#                         carries x-ratelimit-* headers
+#   gh api --include rate_limit  the budget: <dir>/rate-remaining (default
+#                         4000) of 5000, resetting at 1795703600
+#   gh api --include repos/.../issues/<n>  the issue, closed as <dir>/issue-state
+#                         (completed, not_planned or open; default completed)
+#   gh pr list --state merged ...  prints <dir>/prs.json (or [])
 #   gh api (preflight)    the repo reads; branch protection and secrets fail
-#                         under GH_TOKEN unless <dir>/token-is-admin exists; a
-#                         v* tag ruleset (absent with <dir>/no-ruleset); a
-#                         production reviewer
-#   tmux split-window/new-session  print %9, mark the pane alive and, if
-#                         agents list from <dir>/agents-after-start.json (or a
-#                         default idle session, so no start waits for one); fail while <dir>/tmux-broken exists
-#   tmux display-message  prints 0 while <dir>/pane-alive exists
+#                         under GH_TOKEN unless <dir>/token-is-admin exists;
+#                         production admits only main (variants: prod-*)
+#   tmux split-window/new-window/new-session  print %9, mark the pane alive and
+#                         list agents from <dir>/agents-after-start.json (or a
+#                         default idle session, so no start waits for one); fail
+#                         while <dir>/tmux-broken exists. new-session also
+#                         records its GIT_CONFIG*/AGENT_LOOP_* environment in
+#                         <dir>/new-session-env
+#   tmux display-message  while <dir>/pane-alive exists: the pane's pid
+#                         (<dir>/pane-pid, default 99999999) for #{pane_pid},
+#                         else 0 (not dead)
 #   tmux send-keys -l /exit and kill-pane  end the pane
 stubs() {
   bin="$1/bin"
@@ -84,28 +89,47 @@ EOF
   cat >"${bin}/gh" <<EOF
 #!/bin/sh
 printf 'gh %s\n' "\$*" >>"$1/calls"
+remaining=4000
+if [ -s "$1/rate-remaining" ]; then remaining="\$(cat "$1/rate-remaining")"; fi
+rate() {
+  printf 'X-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: %s\r\nX-Ratelimit-Reset: 1795703600\r\nX-Ratelimit-Used: %s\r\nX-Ratelimit-Resource: core\r\n' "\${remaining}" "\$((5000 - remaining))"
+}
 case "\$*" in
-  *If-None-Match*) printf 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n\r\n'; exit 1 ;;
-  "api --include "*) printf 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\n\r\n'; cat "$1/issues.json" ;;
+  *If-None-Match*) printf 'HTTP/2.0 304 Not Modified\r\nEtag: W/"abc"\r\n'; rate; printf '\r\n'; exit 1 ;;
+  "api --include rate_limit") printf 'HTTP/2.0 200 OK\r\n'; rate; printf '\r\n{"resources":{}}\n' ;;
+  "api --include repos/{owner}/{repo}/issues?"*needs-triage*)
+    printf 'HTTP/2.0 200 OK\r\nEtag: W/"t"\r\n'; rate; printf '\r\n'
+    if [ -f "$1/triage.json" ]; then cat "$1/triage.json"; else printf '[]\n'; fi ;;
+  "api --include repos/{owner}/{repo}/issues?"*) printf 'HTTP/2.0 200 OK\r\nEtag: W/"abc"\r\n'; rate; printf '\r\n'; cat "$1/issues.json" ;;
+  "api --include repos/{owner}/{repo}/issues/"*)
+    word=completed
+    if [ -f "$1/issue-state" ]; then word="\$(cat "$1/issue-state")"; fi
+    printf 'HTTP/2.0 200 OK\r\n'; rate; printf '\r\n'
+    case "\${word}" in
+      open) printf '{"state":"open","state_reason":null,"issue_dependencies_summary":{"blocked_by":0}}\n' ;;
+      *) printf '{"state":"closed","state_reason":"%s","issue_dependencies_summary":{"blocked_by":0}}\n' "\${word}" ;;
+    esac ;;
+  "pr list --state merged"*) if [ -f "$1/prs.json" ]; then cat "$1/prs.json"; else printf '[]\n'; fi ;;
   "api repos/{owner}/{repo}") printf '{"full_name":"o/r"}\n' ;;
   "api repos/{owner}/{repo}/branches/main/protection" | "api repos/{owner}/{repo}/actions/secrets")
     if [ -n "\${GH_TOKEN:-}" ] && [ ! -e "$1/token-is-admin" ]; then exit 1; fi
     printf '{}\n' ;;
-  "api repos/{owner}/{repo}/rulesets?targets=tag")
-    if [ -e "$1/no-ruleset" ]; then printf '[]\n'; else printf '[{"id":1,"target":"tag","enforcement":"active"}]\n'; fi ;;
-  "api repos/{owner}/{repo}/rulesets/1")
-    exclude='[]'; bypass='[]'
-    if [ -e "$1/ruleset-excludes" ]; then exclude='["refs/tags/v9*"]'; fi
-    if [ -e "$1/ruleset-role-bypass" ]; then bypass='[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]'; fi
-    rules='[{"type":"creation"},{"type":"update"},{"type":"deletion"}]'
-    if [ -e "$1/ruleset-no-update" ]; then rules='[{"type":"creation"},{"type":"deletion"}]'; fi
-    printf '{"enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":%s}},"rules":%s,"bypass_actors":%s}\n' "\${exclude}" "\${rules}" "\${bypass}" ;;
   "api repos/{owner}/{repo}/environments/production")
-    admins=false; self=true
+    admins=false; protected=false; custom=true
     if [ -e "$1/prod-admin-bypass" ]; then admins=true; fi
-    if [ -e "$1/prod-self-review" ]; then self=false; fi
-    printf '{"can_admins_bypass":%s,"protection_rules":[{"type":"required_reviewers","prevent_self_review":%s}]}\n' "\${admins}" "\${self}" ;;
-  "api repos/"*) if [ -f "$1/issue-state" ]; then cat "$1/issue-state"; else printf 'completed\n'; fi ;;
+    if [ -e "$1/prod-protected-branches" ]; then protected=true; custom=false; fi
+    if [ -e "$1/prod-any-branch" ]; then
+      printf '{"can_admins_bypass":%s,"protection_rules":[],"deployment_branch_policy":null}\n' "\${admins}"
+    else
+      printf '{"can_admins_bypass":%s,"protection_rules":[{"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":%s,"custom_branch_policies":%s}}\n' "\${admins}" "\${protected}" "\${custom}"
+    fi ;;
+  "api repos/{owner}/{repo}/environments/production/deployment-branch-policies?per_page=100")
+    policies='[{"name":"main","type":"branch"}]'
+    if [ -e "$1/prod-tag-policy" ]; then policies='[{"name":"v*","type":"tag"}]'; fi
+    if [ -e "$1/prod-extra-tag-policy" ]; then policies='[{"name":"main","type":"branch"},{"name":"v*","type":"tag"}]'; fi
+    if [ -e "$1/prod-other-branch" ]; then policies='[{"name":"release/*","type":"branch"}]'; fi
+    if [ -e "$1/prod-tag-named-main" ]; then policies='[{"name":"main","type":"tag"}]'; fi
+    printf '{"total_count":%s,"branch_policies":%s}\n' "\$(printf '%s' "\${policies}" | jq length)" "\${policies}" ;;
   "issue list"*) printf '[]\n' ;;
   *) ;;
 esac
@@ -116,6 +140,7 @@ printf 'tmux %s\n' "\$*" >>"$1/calls"
 case "\$1" in
   split-window | new-session | new-window)
     [ ! -e "$1/tmux-broken" ] || exit 1
+    if [ "\$1" = new-session ]; then env | grep -E '^(GIT_CONFIG|AGENT_LOOP_)' >"$1/new-session-env" || true; fi
     : >"$1/pane-alive"
     if [ -f "$1/agents-after-start.json" ]; then
       cp "$1/agents-after-start.json" "$1/agents.json"
@@ -123,7 +148,12 @@ case "\$1" in
       printf '[{"pid":99999999,"status":"idle","name":"mechafighter.com dev loop","startedAt":1795700000000}]\n' >"$1/agents.json"
     fi
     printf '%%9\n' ;;
-  display-message) if [ -f "$1/pane-alive" ]; then printf '0\n'; else exit 1; fi ;;
+  display-message)
+    [ -f "$1/pane-alive" ] || exit 1
+    case "\$*" in
+      *pane_pid*) if [ -s "$1/pane-pid" ]; then cat "$1/pane-pid"; else printf '99999999\n'; fi ;;
+      *) printf '0\n' ;;
+    esac ;;
   send-keys) case "\$*" in *"-l /exit"*) rm -f "$1/pane-alive" "$1/agents.json" ;; *) ;; esac ;;
   kill-pane) rm -f "$1/pane-alive" "$1/agents.json" ;;
   has-session) exit 1 ;;
@@ -185,7 +215,8 @@ supervisor() {
   if [ ! -e "${d}/state/runtime-pin" ]; then git rev-parse HEAD >"${d}/state/runtime-pin"; fi
   PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
     AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RETRY_SECONDS=0 \
-    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=0 TMUX_PANE='%1' \
+    AGENT_LOOP_NOW=1795700000 AGENT_LOOP_TICK_SECONDS=0 TMUX_PANE="${TEST_TMUX_PANE-%1}" \
+    AGENT_LOOP_WORKFLOWS_REF="${AGENT_LOOP_WORKFLOWS_REF:-HEAD}" AGENT_LOOP_START_POLL_SECONDS=0 \
     scripts/agent-loop-supervisor "$@"
 }
 
@@ -193,14 +224,14 @@ test_supervisor_detects_unclaimed_work() {
   w="$(work "${fixtures}/snapshot-no-session.json")" || return 1
   # 102 is blocked, 103 is another machine's, 104 needs info, 105 is assigned
   # and 106's blockers are unknown: only 101 is free.
-  [ "${w}" = '{"mine":[],"unclaimed":[101],"prod_down":false}' ] || return 1
+  [ "${w}" = '{"mine":[],"unclaimed":[101],"prod_down":false,"triage":[]}' ] || return 1
   expect start decision "${fixtures}/snapshot-no-session.json" || return 1
   # Without 101 there is nothing to start.
   s="$(snap snapshot-no-session.json 'del(.issues[] | select(.number == 101))')" || return 1
   expect wait decision "${s}" || return 1
   # A prod-incident is assigned to the owner and still counts while unblocked.
   s="$(snap snapshot-no-session.json '.issues = [{number: 7, labels: ["ready-for-agent", "prod-incident"], assignees: ["owner"], blocked_by: 0}]')" || return 1
-  expect '{"mine":[],"unclaimed":[7],"prod_down":false}' work "${s}" || return 1
+  expect '{"mine":[],"unclaimed":[7],"prod_down":false,"triage":[]}' work "${s}" || return 1
   # Production down with no incident filed yet is work too.
   s="$(snap snapshot-no-session.json '.issues = [] | .prod = {expected: true, ok: false, incident_open: false}')" || return 1
   expect start decision "${s}" || return 1
@@ -215,11 +246,11 @@ test_supervisor_ignores_other_machine_work() {
     {number: 107, labels: ["ready-for-agent", "machine:m-000001"], assignees: [], blocked_by: 0},
     {number: 108, labels: ["ready-for-agent", "prod-incident", "machine:m-ffffff"], assignees: ["owner"], blocked_by: 0}]'
   s="$(snap snapshot-no-session.json "${only_others}")" || return 1
-  expect '{"mine":[],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect '{"mine":[],"unclaimed":[],"prod_down":false,"triage":[]}' work "${s}" || return 1
   expect wait decision "${s}" || return 1
   # The same issues, claimed by this machine instead, are work.
   s="$(snap snapshot-no-session.json "${only_others} | .issues[0].labels = [\"ready-for-agent\", \"machine:m-a1b2c3\"]")" || return 1
-  expect '{"mine":[103],"unclaimed":[],"prod_down":false}' work "${s}" || return 1
+  expect '{"mine":[103],"unclaimed":[],"prod_down":false,"triage":[]}' work "${s}" || return 1
   expect start decision "${s}"
 }
 
@@ -345,7 +376,9 @@ test_supervisor_honours_stop_file() {
   out="$(AGENT_LOOP_MAX_TICKS=3 supervisor "${d}" run)" || return 1
   printf '%s\n' "${out}" | grep -q 'stop file set and no session running; exiting' || return 1
   ! grep -q '^tmux ' "${d}/calls" || return 1
-  expect 'supervisor_start supervisor_exit ' events "${d}/state/metrics.jsonl" || return 1
+  # Besides the API budget readings, it records only its start and exit.
+  expect 'supervisor_start supervisor_exit ' sh -c "jq -r 'select(.event != \"rate_limit\") | .event' '${d}/state/metrics.jsonl' | tr '\n' ' '" || return 1
+  expect 3 grep -c '"event":"rate_limit"' "${d}/state/metrics.jsonl" || return 1
   [ ! -e "${d}/state/supervisor.pid" ]
 }
 
@@ -434,7 +467,7 @@ test_preflight_requires_the_human_steps() {
   stubs "${d}"
   # Not yet confirmed: the unprobed permissions need a human's word.
   out="$(supervisor "${d}" preflight)" && return 1
-  printf '%s\n' "${out}" | grep -q '^FAIL  you confirmed the token has none of: Workflows, Environments, Variables, Secrets, Deployments, Administration' || return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  you confirmed the token has none of: Actions, Workflows, Environments, Variables, Secrets, Deployments, Administration' || return 1
   ! printf 'yes\n' | supervisor "${d}" confirm-token >/dev/null 2>&1 || return 1
   printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
   ! grep -q fake-token "${d}/state/token-confirmed" || return 1
@@ -451,20 +484,6 @@ test_preflight_requires_the_human_steps() {
   printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read branch protection (no Administration permission)' || return 1
   printf '%s\n' "${out}" | grep -qx 'FAIL  the token cannot read Actions secrets (no Secrets permission)' || return 1
   rm -f "${d}/token-is-admin"
-  # No tag ruleset, or one with an exclusion or a role bypass, fails.
-  for variant in no-ruleset ruleset-excludes ruleset-role-bypass ruleset-no-update; do
-    : >"${d}/${variant}"
-    out="$(supervisor "${d}" preflight)" && return 1
-    printf '%s\n' "${out}" | grep -qx 'FAIL  an active tag ruleset restricts creating, updating and deleting v\* tags' || return 1
-    rm -f "${d}/${variant}"
-  done
-  # Production that admins can bypass, or that allows self-review, fails.
-  for variant in prod-admin-bypass prod-self-review; do
-    : >"${d}/${variant}"
-    out="$(supervisor "${d}" preflight)" && return 1
-    printf '%s\n' "${out}" | grep -qx 'FAIL  production requires a reviewer, admins cannot bypass, no self-review' || return 1
-    rm -f "${d}/${variant}"
-  done
   # A new token needs a new confirmation.
   printf 'other-token\n' >"${d}/token"
   out="$(supervisor "${d}" preflight)" && return 1
@@ -577,27 +596,6 @@ test_gh_adapter_uses_conditional_requests() {
   printf '#!/bin/sh\nprintf "HTTP/2.0 500 Internal Server Error\\r\\n\\r\\n"\n' >"${d}/bin/gh"
   rm -f "${d}/cache/ready-for-agent.etag"
   ! PATH="${d}/bin:${PATH}" scripts/agent-loop-gh issues ready-for-agent "${d}/cache" 2>/dev/null
-}
-
-test_loop_report_summarizes_metrics() {
-  out="$(scripts/agent-loop-report "${fixtures}/metrics.jsonl")" || return 1
-  expected='delivered: 3
-delivered per day (UTC):
-  2026-11-26  2
-  2026-11-27  1
-median time to merge: 1h 00m
-stalls: 1
-restarts: 1
-nudges: 3 (1 succeeded, 33%)'
-  [ "${out}" = "${expected}" ] || {
-    printf 'got:\n%s\n' "${out}"
-    return 1
-  }
-  # An even count takes the mean of the middle two; no metrics is not an error.
-  f="$(mktemp)"
-  printf '{"at":1795651200,"event":"delivered","machine":"m-a1b2c3","issue":1,"seconds":600}\n{"at":1795651300,"event":"delivered","machine":"m-a1b2c3","issue":2,"seconds":1800}\n' >"${f}"
-  scripts/agent-loop-report "${f}" | grep -qx 'median time to merge: 20m' || return 1
-  scripts/agent-loop-report /nonexistent/metrics.jsonl | grep -q 'no metrics yet'
 }
 
 # prod_smoke_stubs <dir> <http-code> <cert-ok:0|1>
@@ -1026,4 +1024,639 @@ test_supervisor_kills_only_the_recorded_session_process() {
     sleep 1
   done
   ! kill -0 "${victim}" 2>/dev/null
+}
+
+# ---- #64: hardening follow-ups, production preflight, API budget, report, triage ----
+
+# one_ready_issue <dir>: a single unclaimed, unblocked ready-for-agent issue.
+one_ready_issue() {
+  jq -n '[{number: 101, labels: [{name: "ready-for-agent"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"$1/issues.json"
+}
+
+# hooks_repo <dir>: <dir> is a git repository whose own config points
+# core.hooksPath at hooks that leave <dir>/marker-<hook> when they run, and
+# whose origin is itself (as in a human checkout after task setup).
+hooks_repo() {
+  mkdir -p "$1/.githooks" "$1/state"
+  for hook in post-checkout reference-transaction post-merge pre-commit; do
+    printf '#!/bin/sh\n: >>"%s/marker-%s"\n' "$1" "${hook}" >"$1/.githooks/${hook}"
+    chmod +x "$1/.githooks/${hook}"
+  done
+  printf 'state/\nbin/\n*.json\ncalls\ntoken\ndecoy/\n' >"$1/.gitignore"
+  git -C "$1" init -q -b main || return 1
+  git -C "$1" config user.email t@example.invalid
+  git -C "$1" config user.name t
+  git -C "$1" add .githooks .gitignore
+  git -C "$1" -c core.hooksPath=/dev/null commit -q -m hooks || return 1
+  git -C "$1" config core.hooksPath .githooks
+  git -C "$1" remote add origin "$1"
+  git -C "$1" -c core.hooksPath=/dev/null fetch -q origin || return 1
+  rm -f "$1"/marker-*
+}
+
+# no_markers <dir>: no hook left a marker.
+no_markers() {
+  for marker in "$1"/marker-*; do
+    if [ -e "${marker}" ]; then
+      printf 'a hook ran outside the sandbox: %s\n' "${marker}"
+      return 1
+    fi
+  done
+}
+
+# sleeper: the pid of a detached `sleep 300` (reaped as soon as it is killed).
+sleeper() {
+  sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'
+}
+
+test_supervisor_ignores_inherited_git_environment() {
+  # A human or an alias starts the Supervisor under `git -c core.hooksPath=...`
+  # (GIT_CONFIG_PARAMETERS, read after GIT_CONFIG_COUNT) with GIT_DIR and
+  # GIT_WORK_TREE pointing at another repository.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  hooks_repo "${d}" || return 1
+  # Pinned to this repository's HEAD now, before GIT_DIR names the decoy.
+  git rev-parse HEAD >"${d}/state/runtime-pin"
+  mkdir -p "${d}/decoy"
+  git -C "${d}/decoy" init -q -b main || return 1
+  git -C "${d}/decoy" config user.email t@example.invalid
+  git -C "${d}/decoy" config user.name t
+  git -C "${d}/decoy" -c core.hooksPath=/dev/null commit -q --allow-empty -m decoy || return 1
+  decoy_before="$(git -C "${d}/decoy" for-each-ref --format='%(refname) %(objectname)')"
+  one_ready_issue "${d}"
+  rc=0
+  GIT_CONFIG_PARAMETERS="'core.hookspath'='${d}/.githooks'" GIT_DIR="${d}/decoy/.git" GIT_WORK_TREE="${d}/decoy" \
+    GIT_INDEX_FILE="${d}/decoy/.git/index" supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q '^tmux split-window' "${d}/calls" || return 1
+  no_markers "${d}" || return 1
+  # The clone is of the real origin, at its main, and the decoy is untouched.
+  origin_head="$(git -C "${d}" rev-parse HEAD)"
+  expect "${origin_head}" git -C "${d}/worktree" rev-parse HEAD || return 1
+  expect "${decoy_before}" git -C "${d}/decoy" for-each-ref --format='%(refname) %(objectname)' || return 1
+  # The launcher drops the same variables for the session.
+  grep -q '^unset GIT_CONFIG_PARAMETERS GIT_CONFIG GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE ' "${d}/state/launch"
+}
+
+test_supervisor_new_tmux_server_gets_no_hooks_off_config() {
+  # Outside tmux, with no agent-loop server yet, do_start creates one. Every
+  # pane later opened in that server inherits its environment, so it must not
+  # carry the Supervisor's hooks-off git config or its metrics settings.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  one_ready_issue "${d}"
+  TEST_TMUX_PANE='' supervisor "${d}" once >/dev/null || return 1
+  grep -q '^tmux new-session -d -P -F #{pane_id} -s agent-loop ' "${d}/calls" || return 1
+  [ -f "${d}/new-session-env" ] || return 1
+  ! grep -E '^(GIT_CONFIG_|AGENT_LOOP_METRICS_FILE=|AGENT_LOOP_GH_SOURCE=|AGENT_LOOP_MACHINE=)' "${d}/new-session-env" || return 1
+  # The pane runs `exec <launcher>`, so the pane's pid is the session's.
+  grep -q "^tmux new-session .* exec '${d}/state/launch'$" "${d}/calls"
+}
+
+test_supervisor_records_the_session_pid_when_it_appears() {
+  # The session's process is listed but never goes idle (not logged in, say).
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  one_ready_issue "${d}"
+  victim="$(sleeper)"
+  printf '%s\n' "${victim}" >"${d}/pane-pid"
+  printf '[{"pid":%s,"status":"busy","name":"mechafighter.com dev loop","startedAt":1795700000000}]\n' "${victim}" \
+    >"${d}/agents-after-start.json"
+  rc=0
+  AGENT_LOOP_START_POLLS=2 supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  recorded="$(cut -f 1 "${d}/state/session-pid" 2>/dev/null || true)"
+  started="$(ps -o lstart= -p "${victim}")"
+  kill "${victim}" 2>/dev/null || true
+  [ "${rc}" -eq 0 ] || return 1
+  [ "${recorded}" = "${victim}" ] || {
+    printf 'recorded [%s], want [%s]\n' "${recorded}" "${victim}"
+    return 1
+  }
+  grep -qF "${started}" "${d}/state/session-pid" || return 1
+  # It never went idle, so no prompt was typed.
+  ! grep -q 'send-keys -t %9 -l Run the Agent Loop' "${d}/calls" || return 1
+  # A later tick records a pid that was not listed during the start.
+  rm -f "${d}/state/session-pid"
+  victim2="$(sleeper)"
+  printf '%s\n' "${victim2}" >"${d}/pane-pid"
+  printf '[{"pid":%s,"status":"busy","name":"mechafighter.com dev loop","startedAt":1795700000000}]\n' "${victim2}" >"${d}/agents.json"
+  printf '{"session_id":"s","at":1795700000,"phase":"post"}\n' >"${d}/state/heartbeat"
+  rc=0
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  recorded="$(cut -f 1 "${d}/state/session-pid" 2>/dev/null || true)"
+  kill "${victim2}" 2>/dev/null || true
+  [ "${rc}" -eq 0 ] && [ "${recorded}" = "${victim2}" ]
+}
+
+test_supervisor_matches_the_session_by_pane_pid_only() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  one_ready_issue "${d}"
+  human="$(sleeper)"
+  ours="$(sleeper)"
+  printf '%s\n' "${ours}" >"${d}/pane-pid"
+  # A human's idle session carries the loop's name; ours is busy and renamed.
+  printf '[{"pid":%s,"status":"idle","name":"mechafighter.com dev loop","startedAt":1795700000000},{"pid":%s,"status":"busy","name":"x","startedAt":1795700000000}]\n' \
+    "${human}" "${ours}" >"${d}/agents-after-start.json"
+  rc=0
+  AGENT_LOOP_START_POLLS=2 supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  recorded="$(cut -f 1 "${d}/state/session-pid" 2>/dev/null || true)"
+  status="$(supervisor "${d}" snapshot 2>/dev/null | jq -r '.session.status')"
+  # record_session itself refuses any pid but the pane's.
+  rm -f "${d}/state/session-pid"
+  printf '%s\n' "${human}" >"${d}/pane-pid.human"
+  # With no pane at all, nothing is killed by name either.
+  rm -f "${d}/pane-alive" "${d}/state/pane" "${d}/state/last-start"
+  cp "${d}/agents-after-start.json" "${d}/agents.json"
+  supervisor "${d}" once >/dev/null 2>&1 || rc=$?
+  human_alive=0
+  kill -0 "${human}" 2>/dev/null || human_alive=1
+  kill "${human}" "${ours}" 2>/dev/null || true
+  [ "${rc}" -eq 0 ] || return 1
+  [ "${recorded}" = "${ours}" ] || return 1
+  [ "${status}" = busy ] || return 1
+  # The human's idle session got no prompt.
+  ! grep -q 'send-keys -t %9 -l Run the Agent Loop' "${d}/calls" || return 1
+  [ "${human_alive}" -eq 0 ] || return 1
+  ! grep -n 'kill -INT' scripts/agent-loop-supervisor
+}
+
+# fake_runtime <dir>: the hooks and toolchain script as the runtime export
+# lays them out, plus a checkout whose own scripts/lib-toolchain is hostile.
+fake_runtime() {
+  mkdir -p "$1/rt/.githooks" "$1/rt/scripts" "$1/bin"
+  cp .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit "$1/rt/.githooks/"
+  cp scripts/lib-toolchain "$1/rt/scripts/"
+  mkdir -p "$1/checkout/scripts"
+  printf ': >"%s/marker-checkout-toolchain"\n' "$1" >"$1/checkout/scripts/lib-toolchain"
+  git -C "$1/checkout" init -q || return 1
+  # mise fails, as it does in the untrusted clone.
+  printf '#!/bin/sh\n: >"%s/marker-mise"\nexit 1\n' "$1" >"$1/bin/mise"
+  printf '#!/bin/sh\nprintf "task %%s\\n" "$*" >>"%s/task-calls"\n' "$1" >"$1/bin/task"
+  chmod +x "$1/bin/mise" "$1/bin/task"
+}
+
+test_pinned_hooks_use_the_pinned_toolchain() {
+  # Every hook sources the toolchain script beside it, never the checkout's.
+  dollar='$'
+  pinned_source=". \"${dollar}(dirname \"${dollar}0\")/../scripts/lib-toolchain\""
+  for hook in .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit; do
+    grep -qxF "${pinned_source}" "${hook}" || {
+      printf '%s does not source the pinned toolchain\n' "${hook}"
+      return 1
+    }
+    ! grep -q '^\. scripts/lib-toolchain' "${hook}" || return 1
+  done
+  # The runtime export carries that script, read-only.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  one_ready_issue "${d}"
+  supervisor "${d}" once >/dev/null || return 1
+  [ -f "${d}/state/runtime/scripts/lib-toolchain" ] && [ ! -w "${d}/state/runtime/scripts/lib-toolchain" ] || return 1
+  grep -qx 'AGENT_LOOP_SESSION=1' "${d}/state/launch" || return 1
+  # In the session (a read-only state dir, as inside the sandbox) the pinned
+  # pre-commit runs neither the checkout's toolchain script nor mise.
+  e="$(mktemp -d)"
+  fake_runtime "${e}" || return 1
+  mkdir -p "${e}/state"
+  chmod a-w "${e}/state"
+  rc=0
+  (cd "${e}/checkout" && PATH="${e}/bin:${PATH}" AGENT_LOOP_SESSION=1 AGENT_LOOP_STATE_DIR="${e}/state" \
+    sh "${e}/rt/.githooks/pre-commit") >/dev/null 2>&1 || rc=$?
+  chmod u+w "${e}/state"
+  [ "${rc}" -eq 0 ] || return 1
+  [ ! -e "${e}/marker-checkout-toolchain" ] && [ ! -e "${e}/marker-mise" ] || return 1
+  [ ! -e "${e}/state/hook-outside-sandbox" ] || return 1
+  # A human's hook still loads the pinned toolchain with mise (and fails when mise does).
+  ! (cd "${e}/checkout" && PATH="${e}/bin:${PATH}" sh "${e}/rt/.githooks/pre-commit") >/dev/null 2>&1 || return 1
+  [ -e "${e}/marker-mise" ] || return 1
+  # A merge commit in the session runs task ci:sandbox (the session can't bind
+  # localhost); everyone else's runs task ci.
+  (cd "${e}/checkout" && PATH="${e}/bin:${PATH}" AGENT_LOOP_SESSION=1 AGENT_LOOP_STATE_DIR="${e}/nowhere" \
+    sh "${e}/rt/.githooks/pre-merge-commit") >/dev/null 2>&1 || return 1
+  expect 'task ci:sandbox' cat "${e}/task-calls" || return 1
+  printf '#!/bin/sh\nexit 0\n' >"${e}/bin/mise"
+  : >"${e}/task-calls"
+  (cd "${e}/checkout" && PATH="${e}/bin:${PATH}" sh "${e}/rt/.githooks/pre-merge-commit") >/dev/null 2>&1 || return 1
+  expect 'task ci' cat "${e}/task-calls"
+}
+
+test_preflight_fails_after_a_hook_ran_outside_the_sandbox() {
+  # A session hook that can write the state dir ran outside the sandbox: it
+  # leaves the mark, and preflight refuses until a human removes it.
+  e="$(mktemp -d)"
+  fake_runtime "${e}" || return 1
+  mkdir -p "${e}/state"
+  (cd "${e}/checkout" && PATH="${e}/bin:${PATH}" AGENT_LOOP_SESSION=1 AGENT_LOOP_STATE_DIR="${e}/state" \
+    sh "${e}/rt/.githooks/pre-commit") >/dev/null 2>&1 || return 1
+  [ -s "${e}/state/hook-outside-sandbox" ] || return 1
+  d="$(mktemp -d)"
+  stubs "${d}"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  supervisor "${d}" preflight >/dev/null || return 1
+  cp "${e}/state/hook-outside-sandbox" "${d}/state/hook-outside-sandbox"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  no git hook ran outside the sandbox (<state>/hook-outside-sandbox absent)' || return 1
+  supervisor "${d}" status | grep -q '^WARNING:     a git hook ran outside the sandbox'
+}
+
+test_preflight_production_admits_only_main() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  printf 'I confirm\n' | supervisor "${d}" confirm-token >/dev/null || return 1
+  # Accepted: a custom policy with exactly main, no admin bypass, and no
+  # required reviewers at all (the owner dispatches Deploy, docs/adr/0001).
+  out="$(supervisor "${d}" preflight)" || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  label='production deploys only from the main branch (custom policy: exactly main, no tags), admins cannot bypass'
+  printf '%s\n' "${out}" | grep -qxF "PASS  ${label}" || return 1
+  # There is no tag ruleset to check any more.
+  ! grep -q 'rulesets' "${d}/calls" || return 1
+  ! printf '%s\n' "${out}" | grep -qi 'ruleset\|reviewer' || return 1
+  # Rejected: admins can bypass, protected branches instead of a custom policy,
+  # any branch, a v* tag policy, main plus a tag, another branch, a tag named main.
+  for variant in prod-admin-bypass prod-protected-branches prod-any-branch prod-tag-policy \
+    prod-extra-tag-policy prod-other-branch prod-tag-named-main; do
+    : >"${d}/${variant}"
+    out="$(supervisor "${d}" preflight)" && {
+      printf 'accepted %s\n' "${variant}"
+      return 1
+    }
+    printf '%s\n' "${out}" | grep -qxF "FAIL  ${label}" || return 1
+    rm -f "${d}/${variant}"
+  done
+}
+
+# workflow <dir> <name> <yaml>: write one workflow file.
+workflow() {
+  mkdir -p "$1"
+  printf '%s\n' "$3" >"$1/$2"
+}
+
+test_production_jobs_run_only_on_dispatch() {
+  check=scripts/checks/production-dispatch-only
+  "${check}" >/dev/null || return 1
+  d="$(mktemp -d)"
+  prod_job='jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production'
+  # Accepted: a dispatch-only deploy (string or map form), and a push-triggered
+  # workflow with explicit permissions that cannot dispatch.
+  workflow "${d}/ok1" deploy.yml "on: workflow_dispatch
+${prod_job}" || return 1
+  workflow "${d}/ok1" release.yml 'on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  r:
+    runs-on: ubuntu-latest' || return 1
+  workflow "${d}/ok1" deploy2.yml 'on:
+  workflow_dispatch:
+    inputs: {}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://mechafighter.com/' || return 1
+  "${check}" "${d}/ok1" >/dev/null || return 1
+  # Rejected: production on a tag push, a branch push, a schedule, a
+  # workflow_call or alongside dispatch; an expression environment on push.
+  n=0
+  for on in "on:
+  push:
+    tags: ['v*']" 'on: [push]' "on:
+  schedule:
+    - cron: '0 0 * * *'" 'on: workflow_call' 'on: [workflow_dispatch, push]'; do
+    n=$((n + 1))
+    workflow "${d}/bad${n}" deploy.yml "${on}
+${prod_job}" || return 1
+    out="$("${check}" "${d}/bad${n}")" && {
+      printf 'accepted: %s\n' "${on}"
+      return 1
+    }
+    printf '%s\n' "${out}" | grep -q 'uses the production environment but triggers' || return 1
+  done
+  dollar='$'
+  workflow "${d}/expr" deploy.yml "on: [push]
+permissions:
+  contents: read
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    environment: ${dollar}{{ inputs.env }}" || return 1
+  ! "${check}" "${d}/expr" >/dev/null || return 1
+  # Rejected: a push-triggered workflow whose token could dispatch Deploy.
+  workflow "${d}/noperm" r.yml 'on: [push]
+jobs:
+  r:
+    runs-on: ubuntu-latest' || return 1
+  "${check}" "${d}/noperm" | grep -q 'no explicit permissions' || return 1
+  ! "${check}" "${d}/noperm" >/dev/null || return 1
+  workflow "${d}/actions" r.yml 'on: [push]
+permissions:
+  actions: write
+jobs:
+  r:
+    runs-on: ubuntu-latest' || return 1
+  ! "${check}" "${d}/actions" >/dev/null || return 1
+  workflow "${d}/writeall" r.yml 'on: [push]
+permissions:
+  contents: read
+jobs:
+  r:
+    runs-on: ubuntu-latest
+    permissions: write-all' || return 1
+  ! "${check}" "${d}/writeall" >/dev/null || return 1
+  # A symlinked workflow is refused.
+  mkdir -p "${d}/link"
+  ln -s "${d}/ok1/deploy.yml" "${d}/link/deploy.yml"
+  ! "${check}" "${d}/link" >/dev/null || return 1
+  # Preflight runs it on origin/main's workflows, and fails closed when it can't read them.
+  e="$(mktemp -d)"
+  stubs "${e}"
+  printf 'I confirm\n' | supervisor "${e}" confirm-token >/dev/null || return 1
+  out="$(AGENT_LOOP_WORKFLOWS_REF=refs/heads/does-not-exist supervisor "${e}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -qx 'FAIL  every workflow using production on origin/main runs only on workflow_dispatch' || return 1
+  grep -qx '      - scripts/checks/production-dispatch-only' Taskfile.yml
+}
+
+test_token_confirmation_requires_no_actions_and_no_workflows() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  out="$(printf 'I confirm\n' | supervisor "${d}" confirm-token)" || return 1
+  printf '%s\n' "${out}" | grep -q 'NONE of these permissions: Actions, Workflows, ' || return 1
+  printf '%s\n' "${out}" | grep -q 'NO Actions permission, not even read: Actions write can dispatch the' || return 1
+  printf '%s\n' "${out}" | grep -q 'NO Workflows permission' || return 1
+  supervisor "${d}" preflight >/dev/null || return 1
+  # A confirmation recorded under the older checklist (no Actions) no longer counts.
+  cut -d ' ' -f 1 "${d}/state/token-confirmed" >"${d}/old"
+  mv "${d}/old" "${d}/state/token-confirmed"
+  out="$(supervisor "${d}" preflight)" && return 1
+  printf '%s\n' "${out}" | grep -q '^FAIL  you confirmed the token has none of: Actions, Workflows'
+}
+
+test_gh_adapter_records_rate_limit_headers() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  one_ready_issue "${d}"
+  f="${d}/metrics.jsonl"
+  run() {
+    PATH="${d}/bin:${PATH}" AGENT_LOOP_METRICS_FILE="${f}" AGENT_LOOP_MACHINE=m-a1b2c3 AGENT_LOOP_GH_SOURCE=session \
+      scripts/agent-loop-gh "$@"
+  }
+  expect 0 run blockers 5 || return 1
+  expect '{"remaining":4000,"limit":5000,"reset":1795703600,"used":1000}' run rate-limit || return 1
+  run issues ready-for-agent "${d}/cache" >/dev/null || return 1
+  run issues ready-for-agent "${d}/cache" >/dev/null || return 1
+  expect 'blockers rate-limit issues issues ' sh -c "jq -r '.command' '${f}' | tr '\n' ' '" || return 1
+  expect '[4000,5000,1795703600,1000,"session","core"]' sh -c "jq -c '[.remaining, .limit, .reset, .used, .source, .resource]' '${f}' | head -n 1" || return 1
+  # Every line matches the metrics schema.
+  split -l 1 "${f}" "${d}/event-"
+  for e in "${d}"/event-*; do mv "${e}" "${e}.json"; done
+  check-jsonschema --schemafile schemas/agent-loop-metrics-event.schema.json "${d}"/event-*.json >/dev/null || return 1
+  # Without a machine alias, or with a sink it cannot write, nothing is
+  # recorded and the call still works.
+  : >"${f}"
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_METRICS_FILE="${f}" scripts/agent-loop-gh blockers 5 >/dev/null || return 1
+  [ ! -s "${f}" ] || return 1
+  PATH="${d}/bin:${PATH}" AGENT_LOOP_METRICS_FILE=/nonexistent/dir/m.jsonl AGENT_LOOP_MACHINE=m-a1b2c3 \
+    scripts/agent-loop-gh blockers 5 >/dev/null 2>&1 || return 1
+  # A rate_limit answer without the headers is an error, not a guess.
+  printf '#!/bin/sh\nprintf "HTTP/2.0 200 OK\\r\\n\\r\\n{}\\n"\n' >"${d}/bin/gh"
+  ! PATH="${d}/bin:${PATH}" scripts/agent-loop-gh rate-limit >/dev/null 2>&1
+}
+
+test_supervisor_holds_new_work_when_the_budget_is_low() {
+  low='.rate_limit = {remaining: 999, limit: 5000, reset: (.now + 600)}'
+  s="$(snap snapshot-no-session.json "${low}")" || return 1
+  expect budget-hold decision "${s}" || return 1
+  # Exactly 20% is not below 20%.
+  s="$(snap snapshot-no-session.json '.rate_limit = {remaining: 1000, limit: 5000, reset: (.now + 600)}')" || return 1
+  expect start decision "${s}" || return 1
+  # After the reset the old reading no longer holds.
+  s="$(snap snapshot-no-session.json '.rate_limit = {remaining: 10, limit: 5000, reset: .now}')" || return 1
+  expect start decision "${s}" || return 1
+  # An idle session gets no new pass; a stalled one is still nudged; no work still shuts off.
+  s="$(snap snapshot-busy-session.json "${low} | .session.status = \"idle\" | .last_activity_at = .now - 600")" || return 1
+  expect budget-hold decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json "${low} | .last_activity_at = .now - 901")" || return 1
+  expect nudge decision "${s}" || return 1
+  s="$(snap snapshot-busy-session.json "${low} | .issues = [] | .session.status = \"idle\"")" || return 1
+  expect stop-session decision "${s}" || return 1
+  # The Supervisor reads the budget every tick, logs the hold, records one
+  # budget_hold per hold, and starts nothing.
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  one_ready_issue "${d}"
+  printf '900\n' >"${d}/rate-remaining"
+  out="$(supervisor "${d}" once)" || return 1
+  printf '%s\n' "${out}" | grep -q 'budget-hold: API budget low: 900/5000 remaining (below 20%), resets in 3600s' || return 1
+  supervisor "${d}" once >/dev/null || return 1
+  ! grep -q '^tmux split-window' "${d}/calls" || return 1
+  expect 2 grep -c '^gh api --include rate_limit$' "${d}/calls" || return 1
+  expect 1 grep -c '"event":"budget_hold"' "${d}/state/metrics.jsonl" || return 1
+  expect '[900,5000,"supervisor","rate-limit"]' sh -c "jq -c 'select(.event == \"rate_limit\" and .command == \"rate-limit\") | [.remaining, .limit, .source, .command]' '${d}/state/metrics.jsonl' | head -n 1" || return 1
+  check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${d}/state/snapshot.json" >/dev/null || return 1
+  expect '{"remaining":900,"limit":5000,"reset":1795703600}' jq -c '.rate_limit' "${d}/state/snapshot.json" || return 1
+  # Once the budget recovers, the next tick starts the session.
+  printf '4000\n' >"${d}/rate-remaining"
+  supervisor "${d}" once >/dev/null || return 1
+  grep -q '^tmux split-window' "${d}/calls"
+}
+
+# report_gh <dir> [fail]: a gh that answers `gh run list` with the runs
+# fixture (or fails) and counts its calls.
+report_gh() {
+  mkdir -p "$1/bin"
+  if [ "${2:-}" = fail ]; then
+    printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >>"%s/gh-calls"\nexit 1\n' "$1" >"$1/bin/gh"
+  else
+    here="$(pwd -P)"
+    printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >>"%s/gh-calls"\ncat "%s/%s/runs.json"\n' "$1" "${here}" "${fixtures}" >"$1/bin/gh"
+  fi
+  chmod +x "$1/bin/gh"
+}
+
+test_loop_report_summarizes_metrics() {
+  d="$(mktemp -d)"
+  report_gh "${d}"
+  out="$(PATH="${d}/bin:${PATH}" scripts/agent-loop-report "${fixtures}/metrics.jsonl")" || return 1
+  expected='delivered: 3
+delivered per day (UTC):
+  2026-11-26  2
+  2026-11-27  1
+median time to merge: 1h 00m
+stalls: 1
+restarts: 1
+nudges: 3 (1 succeeded, 33%)
+most nudges in one episode: 2 (cap 6)
+
+cycle time per issue (claim -> merge):
+  ISSUE  PR     CLAIMED            MERGED             CYCLE    REVIEW ROUNDS
+  #101   #201   2026-11-26 00:03Z  2026-11-26 01:55Z  1h 51m   2
+  #102   #202   2026-11-26 01:55Z  2026-11-26 03:58Z  2h 03m   4
+  #103   -      2026-11-27 00:40Z  -                  20m      -
+review rounds per PR: median 3, max 4 (2 PRs)
+
+CI (ci workflow, last 5 runs from one gh run list):
+  completed: 4, cancelled: 1 (25%)
+  CI minutes: 20 (agent-loop branches: 7)
+
+API budget (core REST):
+  readings: 3, lowest 800/5000 at 2026-11-26 01:03Z
+  used per rate-limit window: median 2175, max 4200 (2 windows)
+  budget holds: 1
+
+checkout scans (lsof before a start): 2, median 4s, max 6s'
+  [ "${out}" = "${expected}" ] || {
+    printf 'got:\n%s\n' "${out}"
+    return 1
+  }
+  # One gh run list per report, never one call per run.
+  expect 1 grep -c '^gh run list --workflow ci.yml --limit 200 ' "${d}/gh-calls" || return 1
+  # --json conforms to the report schema.
+  PATH="${d}/bin:${PATH}" scripts/agent-loop-report --json "${fixtures}/metrics.jsonl" >"${d}/report.json" || return 1
+  check-jsonschema --schemafile schemas/agent-loop-report.schema.json "${d}/report.json" >/dev/null || return 1
+  expect '[6700,7400,1200]' jq -c '[.issues[].cycle_seconds]' "${d}/report.json" || return 1
+  expect '{"runs":5,"completed":4,"cancelled":1,"cancelled_rate":0.25,"minutes":20,"loop_minutes":7}' jq -c '.ci' "${d}/report.json" || return 1
+  # When gh fails, or with --no-ci (no call at all), CI is unavailable, not an error.
+  e="$(mktemp -d)"
+  report_gh "${e}" fail
+  PATH="${e}/bin:${PATH}" scripts/agent-loop-report "${fixtures}/metrics.jsonl" | grep -qx '  unavailable (gh run list failed or --no-ci)' || return 1
+  : >"${e}/gh-calls"
+  PATH="${e}/bin:${PATH}" scripts/agent-loop-report --no-ci --json "${fixtures}/metrics.jsonl" >"${e}/r.json" || return 1
+  [ ! -s "${e}/gh-calls" ] || return 1
+  check-jsonschema --schemafile schemas/agent-loop-report.schema.json "${e}/r.json" >/dev/null || return 1
+  expect null jq -c '.ci' "${e}/r.json" || return 1
+  # An even count takes the mean of the middle two; malformed lines are skipped;
+  # no metrics is not an error.
+  f="$(mktemp)"
+  printf '{"at":1795651200,"event":"delivered","machine":"m-a1b2c3","issue":1,"seconds":600}\nnot json\n{"at":1795651300,"event":"delivered","machine":"m-a1b2c3","issue":2,"seconds":1800}\n' >"${f}"
+  scripts/agent-loop-report --no-ci "${f}" | grep -qx 'median time to merge: 20m' || return 1
+  scripts/agent-loop-report /nonexistent/metrics.jsonl | grep -q 'no metrics yet' || return 1
+  PATH="${e}/bin:${PATH}" scripts/agent-loop-report --no-ci --json /nonexistent/metrics.jsonl >"${e}/empty.json" || return 1
+  check-jsonschema --schemafile schemas/agent-loop-report.schema.json "${e}/empty.json" >/dev/null || return 1
+  # Only a regular file is read: not a link, not a FIFO.
+  ln -s "${f}" "${e}/link.jsonl"
+  ! scripts/agent-loop-report --no-ci "${e}/link.jsonl" >/dev/null 2>&1 || return 1
+  mkfifo "${e}/fifo.jsonl"
+  ! scripts/agent-loop-report --no-ci "${e}/fifo.jsonl" >/dev/null 2>&1
+}
+
+test_supervisor_records_cycle_time_and_review_rounds() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  printf '101 1795696400\n' >"${d}/state/claimed"
+  a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  c=cccccccccccccccccccccccccccccccccccccccc
+  # Rounds: a (two reviewers) and b. c's verdict is not on the last line, the
+  # short SHA is malformed, and plain comments don't count.
+  jq -n --arg a "${a}" --arg b "${b}" --arg c "${c}" '[{number: 201, mergedAt: "2026-11-26T22:00:00Z", comments: [
+      {body: "review\n\nreview-verdict: block sha=\($a) reviewer=correctness"},
+      {body: "review\nreview-verdict: pass sha=\($a) reviewer=gate-bypass\n\n"},
+      {body: "review-verdict: pass sha=\($b) reviewer=correctness"},
+      {body: "review-verdict: pass sha=\($c) reviewer=correctness\nmore text"},
+      {body: "review-verdict: pass sha=abc123 reviewer=correctness"},
+      {body: "looks good"}]}]' >"${d}/prs.json"
+  supervisor "${d}" snapshot >/dev/null || return 1
+  merged="$(jq -n '"2026-11-26T22:00:00Z" | fromdateiso8601')"
+  expect "[101,3600,201,${merged},2]" jq -c 'select(.event == "delivered") | [.issue, .seconds, .pr, .merged_at, .review_rounds]' "${d}/state/metrics.jsonl" || return 1
+  grep -qx 'gh pr list --state merged --head agent-loop/m-a1b2c3/101 --limit 1 --json number,mergedAt,comments' "${d}/calls" || return 1
+  # A newly claimed issue is recorded once, when first seen.
+  jq -n '[{number: 102, labels: [{name: "ready-for-agent"}, {name: "machine:m-a1b2c3"}], assignees: [{login: "owner"}], issue_dependencies_summary: {blocked_by: 0}}]' >"${d}/issues.json"
+  rm -f "${d}/state/gh-fetched-at" "${d}/state/gh/"*.etag
+  supervisor "${d}" snapshot >/dev/null || return 1
+  rm -f "${d}/state/gh-fetched-at" "${d}/state/gh/"*.etag
+  supervisor "${d}" snapshot >/dev/null || return 1
+  expect 1 grep -c '"event":"claimed","machine":"m-a1b2c3","issue":102' "${d}/state/metrics.jsonl" || return 1
+  # The branch must be this loop's: anything else is refused.
+  for bad in main agent-loop/laptop/1 'agent-loop/m-a1b2c3/1;x' agent-loop/m-a1b2c3/0; do
+    ! PATH="${d}/bin:${PATH}" scripts/agent-loop-gh merged-pr "${bad}" >/dev/null 2>&1 || return 1
+  done
+  split -l 1 "${d}/state/metrics.jsonl" "${d}/event-"
+  for e in "${d}"/event-*; do mv "${e}" "${e}.json"; done
+  check-jsonschema --schemafile schemas/agent-loop-metrics-event.schema.json "${d}"/event-*.json >/dev/null
+}
+
+test_supervisor_measures_nudges_and_checkout_scans() {
+  d="$(mktemp -d)"
+  stubs "${d}"
+  mkdir -p "${d}/worktree" "${d}/state"
+  printf 'm-a1b2c3\n' >"${d}/state/machine"
+  one_ready_issue "${d}"
+  supervisor "${d}" once >/dev/null || return 1
+  expect 1 grep -c '"event":"checkout_scan"' "${d}/state/metrics.jsonl" || return 1
+  # Two nudges in one episode carry counts 1 and 2.
+  printf '[{"pid":99999999,"status":"idle","name":"mechafighter.com dev loop","startedAt":1795690000000}]\n' >"${d}/agents.json"
+  for at in 1795699000 1795699400; do
+    printf '{"session_id":"s","at":%s,"phase":"post"}\n' "$((at - 400))" >"${d}/state/heartbeat"
+    rm -f "${d}/state/nudges" "${d}/state/last-start"
+    AGENT_LOOP_NOW="${at}" PATH="${d}/bin:${PATH}" AGENT_LOOP_STATE_DIR="${d}/state" AGENT_LOOP_WORKTREE="${d}/worktree" \
+      AGENT_LOOP_TOKEN_FILE="${d}/token" AGENT_LOOP_RETRY_SECONDS=0 AGENT_LOOP_START_POLL_SECONDS=0 TMUX_PANE='%1' \
+      scripts/agent-loop-supervisor once >/dev/null || return 1
+  done
+  expect '1 2 ' sh -c "jq -r 'select(.event == \"nudge\") | .count' '${d}/state/metrics.jsonl' | tr '\n' ' '"
+}
+
+test_agent_loop_skill_triages_needs_triage_issues() {
+  skill=.claude/skills/agent-loop/SKILL.md
+  scripts/checks/agent-loop-skill >/dev/null || return 1
+  scripts/checks/agent-loop-skill-commands >/dev/null || return 1
+  # The triage commands are in the skill, so the allowlist check covers them.
+  for cmd in 'gh issue list --state open --label needs-triage --json number,title,labels' \
+    'gh issue edit <n> --add-label ready-for-agent --remove-label needs-triage' \
+    'gh issue edit <n> --add-label ready-for-human --remove-label needs-triage' \
+    'gh issue close <n> --reason "not planned" --comment "<text>"' \
+    'gh issue list --state all --search "<keywords>" --json number,title,state,labels' \
+    'git log origin/main --oneline -i --grep "<keyword>"'; do
+    grep -qF "\`${cmd}\`" "${skill}" || {
+      printf 'missing triage command: %s\n' "${cmd}"
+      return 1
+    }
+  done
+  d="$(mktemp -d)"
+  # Without the triage pass, or without its cap, the skill is rejected.
+  awk '/^## 5\. Triage/ { skip = 1; next } /^## 6\. Stop/ { skip = 0 } !skip' "${skill}" >"${d}/no-triage.md"
+  ! scripts/checks/agent-loop-skill "${d}/no-triage.md" >/dev/null || return 1
+  grep -vF 'at most 3 issues per pass' "${skill}" >"${d}/no-cap.md"
+  out="$(scripts/checks/agent-loop-skill "${d}/no-cap.md")" && return 1
+  printf '%s\n' "${out}" | grep -qF 'missing: at most 3 issues per pass' || return 1
+  # A triage command the rules deny fails the allowlist check.
+  sed "s/\`gh issue list --state all --search/\`gh api search --state all --search/" "${skill}" >"${d}/denied.md"
+  ! scripts/checks/agent-loop-skill-commands "${d}/denied.md" >/dev/null || return 1
+  # The Supervisor counts triageable needs-triage issues as work.
+  base='.issues = [] | .triage = [{number: 120, labels: ["needs-triage"], assignees: [], blocked_by: null}]'
+  s="$(snap snapshot-no-session.json "${base}")" || return 1
+  expect '{"mine":[],"unclaimed":[],"prod_down":false,"triage":[120]}' work "${s}" || return 1
+  expect start decision "${s}" || return 1
+  for labels in '["needs-triage", "ready-for-human"]' '["needs-triage", "needs-info"]' '["needs-triage", "ready-for-agent"]' \
+    '["needs-triage", "machine:m-ffffff"]'; do
+    s="$(snap snapshot-no-session.json "${base} | .triage[0].labels = ${labels}")" || return 1
+    expect wait decision "${s}" || return 1
+  done
+  s="$(snap snapshot-no-session.json "${base} | .stop_requested = true")" || return 1
+  expect exit decision "${s}" || return 1
+  # The real loop fetches the needs-triage list into the snapshot.
+  e="$(mktemp -d)"
+  stubs "${e}"
+  jq -n '[{number: 120, labels: [{name: "needs-triage"}], assignees: [], issue_dependencies_summary: {blocked_by: 0}}]' >"${e}/triage.json"
+  supervisor "${e}" snapshot >"${e}/snap.json" || return 1
+  expect '[120]' jq -c '[.triage[].number]' "${e}/snap.json" || return 1
+  check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${e}/snap.json" >/dev/null
 }

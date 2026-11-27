@@ -1,0 +1,7 @@
+[
+  { "databaseId": 1, "status": "completed", "conclusion": "success", "startedAt": "2026-11-26T10:00:00Z", "updatedAt": "2026-11-26T10:06:00Z", "headBranch": "agent-loop/m-a1b2c3/101" },
+  { "databaseId": 2, "status": "completed", "conclusion": "cancelled", "startedAt": "2026-11-26T10:01:00Z", "updatedAt": "2026-11-26T10:02:00Z", "headBranch": "agent-loop/m-a1b2c3/101" },
+  { "databaseId": 3, "status": "completed", "conclusion": "success", "startedAt": "2026-11-26T11:00:00Z", "updatedAt": "2026-11-26T11:09:00Z", "headBranch": "main" },
+  { "databaseId": 4, "status": "completed", "conclusion": "failure", "startedAt": "2026-11-26T12:00:00Z", "updatedAt": "2026-11-26T12:04:00Z", "headBranch": "feat/64-x" },
+  { "databaseId": 5, "status": "in_progress", "conclusion": "", "startedAt": "2026-11-26T13:00:00Z", "updatedAt": "2026-11-26T13:01:00Z", "headBranch": "main" }
+]

@@ -3,10 +3,30 @@
   "machine": "m-a1b2c3",
   "stop_requested": false,
   "issues": [
-    { "number": 101, "labels": ["ready-for-agent", "machine:m-a1b2c3"], "assignees": ["owner"], "blocked_by": 0 }
+    {
+      "number": 101,
+      "labels": [
+        "ready-for-agent",
+        "machine:m-a1b2c3"
+      ],
+      "assignees": [
+        "owner"
+      ],
+      "blocked_by": 0
+    }
   ],
-  "prod": { "expected": true, "ok": true, "incident_open": false },
-  "session": { "status": "busy", "waiting_for": null, "started_at": 1795696000 },
+  "triage": [],
+  "prod": {
+    "expected": true,
+    "ok": true,
+    "incident_open": false
+  },
+  "rate_limit": null,
+  "session": {
+    "status": "busy",
+    "waiting_for": null,
+    "started_at": 1795696000
+  },
   "tool_running": false,
   "last_activity_at": 1795699700,
   "context_pct": 20,
@@ -24,6 +44,7 @@
     "max_episode_nudges": 6,
     "restart_pct": 45,
     "force_restart_pct": 60,
-    "start_cooldown_seconds": 600
+    "start_cooldown_seconds": 600,
+    "budget_min_pct": 20
   }
 }

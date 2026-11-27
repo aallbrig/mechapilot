@@ -1,11 +1,22 @@
 #!/bin/sh
 set -eu
 # Run checks with the pinned toolchain, not whatever is on the login PATH.
+# The toolchain script is the one beside this hook, not the working tree's: in
+# the Agent Loop session both are the human-pinned, read-only copies (#64).
 # shellcheck source=../scripts/lib-toolchain
-. scripts/lib-toolchain
+. "$(dirname "$0")/../scripts/lib-toolchain"
 # Git exports these to hooks; checks find the repository from the working
 # directory instead, so tests that build throwaway repos never touch this one.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
-printf 'pre-merge-commit: task ci\n'
-task ci
+# The Agent Loop session can't run task ci's two Chrome steps: its sandbox
+# closes localhost (docs/agent-loop.md). There the hook runs task ci:sandbox,
+# the gate the session proves its work with. The full task ci still runs in
+# the required ci check before anything merges.
+if [ "${AGENT_LOOP_SESSION:-}" = 1 ]; then
+  printf 'pre-merge-commit: task ci:sandbox (Agent Loop session)\n'
+  task ci:sandbox
+else
+  printf 'pre-merge-commit: task ci\n'
+  task ci
+fi

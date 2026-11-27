@@ -1,11 +1,18 @@
 {"at":1795651200,"event":"supervisor_start","machine":"m-a1b2c3"}
-{"at":1795651260,"event":"session_start","machine":"m-a1b2c3","reason":"mine=[] unclaimed=[101] prod_down=false"}
-{"at":1795654800,"event":"nudge","machine":"m-a1b2c3","reason":"idle with work"}
-{"at":1795658400,"event":"delivered","machine":"m-a1b2c3","issue":101,"seconds":3600}
-{"at":1795660000,"event":"nudge","machine":"m-a1b2c3","reason":"busy, no heartbeat for 960s"}
-{"at":1795660400,"event":"nudge","machine":"m-a1b2c3","reason":"busy, no heartbeat for 1360s"}
+{"at":1795651200,"event":"rate_limit","machine":"m-a1b2c3","source":"supervisor","command":"rate-limit","resource":"core","remaining":4900,"limit":5000,"reset":1795654800,"used":100}
+{"at":1795651230,"event":"checkout_scan","machine":"m-a1b2c3","seconds":2}
+{"at":1795651260,"event":"session_start","machine":"m-a1b2c3","reason":"mine=[] unclaimed=[101] prod_down=false triage=[]"}
+{"at":1795651300,"event":"rate_limit","machine":"m-a1b2c3","source":"session","command":"blockers","resource":"core","remaining":4850,"limit":5000,"reset":1795654800,"used":150}
+{"at":1795651400,"event":"claimed","machine":"m-a1b2c3","issue":101}
+{"at":1795654800,"event":"nudge","machine":"m-a1b2c3","reason":"idle with work","count":1}
+{"at":1795655000,"event":"rate_limit","machine":"m-a1b2c3","source":"supervisor","command":"rate-limit","resource":"core","remaining":800,"limit":5000,"reset":1795658400,"used":4200}
+{"at":1795655060,"event":"budget_hold","machine":"m-a1b2c3","reason":"API budget low: 800/5000 remaining (below 20%), resets in 3400s"}
+{"at":1795658400,"event":"delivered","machine":"m-a1b2c3","issue":101,"seconds":3600,"pr":201,"merged_at":1795658100,"review_rounds":2}
+{"at":1795660000,"event":"nudge","machine":"m-a1b2c3","reason":"busy, no heartbeat for 960s","count":1}
+{"at":1795660400,"event":"nudge","machine":"m-a1b2c3","reason":"busy, no heartbeat for 1360s","count":2}
 {"at":1795660800,"event":"stall","machine":"m-a1b2c3","reason":"busy, no heartbeat for 1760s"}
+{"at":1795660900,"event":"checkout_scan","machine":"m-a1b2c3","seconds":6}
 {"at":1795662000,"event":"restart","machine":"m-a1b2c3","pct":46,"reason":"context 46%"}
-{"at":1795665600,"event":"delivered","machine":"m-a1b2c3","issue":102,"seconds":7500}
+{"at":1795665600,"event":"delivered","machine":"m-a1b2c3","issue":102,"seconds":7500,"pr":202,"merged_at":1795665500,"review_rounds":4}
 {"at":1795741200,"event":"delivered","machine":"m-a1b2c3","issue":103,"seconds":1200}
 {"at":1795741300,"event":"shutoff","machine":"m-a1b2c3","reason":"no work"}

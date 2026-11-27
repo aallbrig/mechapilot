@@ -2,25 +2,48 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/aallbrig/mechapilot/schemas/agent-loop-metrics-event.schema.json",
   "title": "Agent Loop metrics event",
-  "description": "Authored here (#20). One line of .agent-loop/metrics.jsonl, written by scripts/agent-loop-supervisor and summarized by scripts/agent-loop-report. Times are Unix epoch seconds.",
+  "description": "Authored here (#20, #64). One line of .agent-loop/metrics.jsonl, written by scripts/agent-loop-supervisor and scripts/agent-loop-gh, and summarized by scripts/agent-loop-report. Times are Unix epoch seconds.",
   "type": "object",
   "additionalProperties": false,
   "required": ["at", "event", "machine"],
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 }
+  },
   "properties": {
     "at": { "type": "integer", "minimum": 0 },
     "event": {
-      "description": "supervisor_start/supervisor_exit: the Supervisor process; session_start: a session was launched; nudge; stall: nudges failed, an agent-loop-stall issue was filed and the session restarted; restart: the context restart (pct set); shutoff: no work, the session was ended; delivered: an issue this machine claimed closed as completed (issue and seconds set); unclaimed: an issue this machine claimed lost its machine label.",
-      "enum": ["supervisor_start", "supervisor_exit", "session_start", "nudge", "stall", "restart", "shutoff", "delivered", "unclaimed"]
+      "description": "supervisor_start/supervisor_exit: the Supervisor process; session_start: a session was launched; nudge (count: nudges in this episode so far); stall: nudges failed, an agent-loop-stall issue was filed and the session restarted; restart: the context restart (pct set); shutoff: no work, the session was ended; claimed: this machine's label first seen on an issue; delivered: an issue this machine claimed closed as completed (issue and seconds set, plus pr, merged_at and review_rounds when its merged PR was found); unclaimed: an issue this machine claimed lost its machine label; rate_limit: the x-ratelimit-* headers of one REST call; budget_hold: the Supervisor began holding new work because the REST budget was low; checkout_scan: how long the lsof scan of the session checkout took before a start.",
+      "enum": ["supervisor_start", "supervisor_exit", "session_start", "nudge", "stall", "restart", "shutoff", "claimed", "delivered", "unclaimed", "rate_limit", "budget_hold", "checkout_scan"]
     },
     "machine": { "type": "string", "pattern": "^m-[0-9a-f]{6}$" },
     "reason": { "type": "string" },
     "pct": { "type": "number", "minimum": 0, "maximum": 100 },
     "issue": { "type": "integer", "minimum": 1 },
-    "seconds": { "description": "delivered: from first seeing the claim to the close.", "type": "integer", "minimum": 0 }
+    "seconds": { "description": "delivered: from first seeing the claim to the close; checkout_scan: the scan's duration.", "type": "integer", "minimum": 0 },
+    "count": { "description": "nudge: nudges in the current episode, this one included.", "type": "integer", "minimum": 1 },
+    "pr": { "description": "delivered: the merged PR from agent-loop/<machine>/<issue>.", "type": "integer", "minimum": 1 },
+    "merged_at": { "description": "delivered: when that PR merged.", "type": "integer", "minimum": 0 },
+    "review_rounds": { "description": "delivered: distinct PR head SHAs that received a review-verdict.", "$ref": "#/$defs/count" },
+    "source": { "description": "rate_limit: who made the call.", "enum": ["supervisor", "session"] },
+    "command": { "description": "rate_limit: the scripts/agent-loop-gh command.", "enum": ["issues", "blockers", "issue-state", "rate-limit"] },
+    "resource": { "description": "rate_limit: x-ratelimit-resource (core for REST).", "type": "string", "pattern": "^[a-z_]+$" },
+    "remaining": { "$ref": "#/$defs/count" },
+    "limit": { "$ref": "#/$defs/count" },
+    "reset": { "description": "rate_limit: when the window resets.", "$ref": "#/$defs/count" },
+    "used": { "$ref": "#/$defs/count" }
   },
   "allOf": [
-    { "if": { "properties": { "event": { "const": "delivered" } } }, "then": { "required": ["issue", "seconds"] } },
+    { "if": { "properties": { "event": { "const": "delivered" } } }, "then": { "required": ["issue", "seconds"], "dependentRequired": { "pr": ["merged_at", "review_rounds"] } } },
+    { "if": { "properties": { "event": { "const": "claimed" } } }, "then": { "required": ["issue"] } },
     { "if": { "properties": { "event": { "const": "unclaimed" } } }, "then": { "required": ["issue"] } },
-    { "if": { "properties": { "event": { "const": "restart" } } }, "then": { "required": ["pct"] } }
+    { "if": { "properties": { "event": { "const": "restart" } } }, "then": { "required": ["pct"] } },
+    { "if": { "properties": { "event": { "const": "nudge" } } }, "then": { "required": ["count"] } },
+    { "if": { "properties": { "event": { "const": "checkout_scan" } } }, "then": { "required": ["seconds"] } },
+    { "if": { "properties": { "event": { "const": "budget_hold" } } }, "then": { "required": ["reason"] } },
+    {
+      "if": { "properties": { "event": { "const": "rate_limit" } } },
+      "then": { "required": ["source", "command", "resource", "remaining", "limit", "reset", "used"] },
+      "else": { "not": { "anyOf": [{ "required": ["remaining"] }, { "required": ["limit"] }, { "required": ["reset"] }, { "required": ["source"] }] } }
+    }
   ]
 }

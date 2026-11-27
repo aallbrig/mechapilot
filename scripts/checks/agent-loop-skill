@@ -23,7 +23,8 @@ expected='## 1. Production
 ## 2. Resume
 ## 3. Claim
 ## 4. Deliver
-## 5. Stop
+## 5. Triage
+## 6. Stop
 ## Human-only'
 actual="$(grep -E '^## ' "${skill}")"
 if [ "${actual}" != "${expected}" ]; then
@@ -67,6 +68,18 @@ ready-for-human
 Agent Loop: no work remains.
 creating `v*` tags or releases
 applying infrastructure
+--label needs-triage
+at most 3 issues per pass
+It runs only when pass 3 found nothing to claim
+or no candidate remains (go to pass 5, Triage)
+Close it only when it is a clear duplicate, or the work is already on main.
+The comment always says why.
+Hand it to a human only when it truly needs one
+--add-label ready-for-agent --remove-label needs-triage
+--add-label ready-for-human --remove-label needs-triage
+every list item ends with exactly one check reference
+`gh issue view 1 --json body`
+`cat GLOSSARY.md`
 secrets
 changing the loop's token, sandbox or allowlist
 EOF

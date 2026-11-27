@@ -5,7 +5,7 @@
   "description": "Authored here (#20). Everything scripts/agent-loop-lib's agent_loop_decide reads: the Supervisor builds one per tick, and tests feed fixtures. Times are Unix epoch seconds.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["now", "machine", "stop_requested", "issues", "prod", "session", "tool_running", "last_activity_at", "context_pct", "nudges", "escalations", "episode_nudges", "last_start_at", "config"],
+  "required": ["now", "machine", "stop_requested", "issues", "triage", "prod", "rate_limit", "session", "tool_running", "last_activity_at", "context_pct", "nudges", "escalations", "episode_nudges", "last_start_at", "config"],
   "$defs": {
     "epoch": { "type": "integer", "minimum": 0 },
     "seconds": { "type": "integer", "minimum": 1 },
@@ -29,6 +29,26 @@
           "blocked_by": { "description": "Open blockers; null when GitHub did not say (counts as blocked).", "type": ["integer", "null"], "minimum": 0 }
         }
       }
+    },
+    "triage": {
+      "description": "Open issues labelled needs-triage, in the same shape as issues (#64).",
+      "$ref": "#/properties/issues"
+    },
+    "rate_limit": {
+      "description": "The newest core REST budget reading (gh api rate_limit, once per tick), or null before the first one (#64).",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remaining", "limit", "reset"],
+          "properties": {
+            "remaining": { "type": "integer", "minimum": 0 },
+            "limit": { "type": "integer", "minimum": 0 },
+            "reset": { "$ref": "#/$defs/epoch" }
+          }
+        }
+      ]
     },
     "prod": {
       "type": "object",
@@ -65,7 +85,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stall_seconds", "tool_timeout_seconds", "nudge_gap_seconds", "nudge_window_seconds", "max_nudges", "max_escalations", "max_episode_nudges", "restart_pct", "force_restart_pct", "start_cooldown_seconds"],
+      "required": ["stall_seconds", "tool_timeout_seconds", "nudge_gap_seconds", "nudge_window_seconds", "max_nudges", "max_escalations", "max_episode_nudges", "restart_pct", "force_restart_pct", "start_cooldown_seconds", "budget_min_pct"],
       "properties": {
         "stall_seconds": { "$ref": "#/$defs/seconds" },
         "tool_timeout_seconds": { "$ref": "#/$defs/seconds" },
@@ -76,7 +96,8 @@
         "max_episode_nudges": { "type": "integer", "minimum": 1 },
         "restart_pct": { "$ref": "#/$defs/percent" },
         "force_restart_pct": { "$ref": "#/$defs/percent" },
-        "start_cooldown_seconds": { "$ref": "#/$defs/seconds" }
+        "start_cooldown_seconds": { "$ref": "#/$defs/seconds" },
+        "budget_min_pct": { "description": "Below this share of the REST limit, no new work starts until the reset.", "$ref": "#/$defs/percent" }
       }
     }
   }

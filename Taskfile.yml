@@ -86,8 +86,9 @@ tasks:
       - check-jsonschema --builtin-schema vendor.dependabot .github/dependabot.yml
       - check-jsonschema --schemafile schemas/taskfile.schema.json Taskfile.yml
       - check-jsonschema --schemafile schemas/claude-code-settings.schema.json .claude/settings.json .claude/agent-loop-settings.json
-      # Authored here: the Agent Loop Supervisor's state snapshot and metrics events
+      # Authored here: the Agent Loop Supervisor's state snapshot, metrics events and report
       - check-jsonschema --check-metaschema schemas/agent-loop-snapshot.schema.json schemas/agent-loop-metrics-event.schema.json
+      - check-jsonschema --check-metaschema schemas/agent-loop-report.schema.json
       - check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json tests/fixtures/agent-loop/snapshot-*.json
       - |
         tmp="$(mktemp -d)"
@@ -151,6 +152,7 @@ tasks:
       - scripts/checks/agent-loop-skill
       - scripts/checks/agent-loop-skill-commands
       - scripts/checks/threat-models
+      - scripts/checks/production-dispatch-only
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
@@ -357,7 +359,7 @@ tasks:
       - scripts/agent-loop-supervisor status
 
   loop:report:
-    desc: Summarize the Agent Loop's metrics (delivered per day, median time to merge, stalls, restarts, nudges)
+    desc: "Summarize the Agent Loop's metrics: cycle time, review rounds, CI minutes, cancelled runs, API budget (task loop:report -- [--json] [--no-ci])"
     cmds:
       - scripts/agent-loop-report {{.CLI_ARGS}}
 
