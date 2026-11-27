@@ -5,6 +5,7 @@
   "name": "Sunset Strike",
   "objective": "Fill the Boss Gauge, then swat the Hornet.",
   "sky": {
+    "theme": "sunset",
     "top": "#c2410c",
     "bottom": "#fcd34d",
     "effects": [

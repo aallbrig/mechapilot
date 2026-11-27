@@ -5,6 +5,7 @@
   "name": "Stratosphere",
   "objective": "Fill the Boss Gauge, then out-duel the Crimson Lancer.",
   "sky": {
+    "theme": "stratosphere",
     "top": "#2e1065",
     "bottom": "#7c3aed",
     "effects": [
