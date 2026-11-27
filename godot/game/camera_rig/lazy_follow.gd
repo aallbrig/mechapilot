@@ -6,7 +6,9 @@ extends RefCounted
 ## critically damped spring, so the camera lags behind sudden moves. Once the
 ## mech's velocity is steady (or slow), the goal eases back onto it, and the
 ## spring is fed the steady velocity so the mech settles on centre instead of
-## trailing behind it.
+## trailing behind it. A safe frame is the one hard limit: the focus is pushed
+## along with no lag whenever the mech would leave it, so the mech is always on
+## screen however hard it boosts, reverses or gets shoved.
 
 ## Critically damped follow rate (1/s). Lower is lazier.
 const FOLLOW: float = 2.3
@@ -20,7 +22,7 @@ const CALM_ACCEL: float = 20.0 * Pace.GAME_SPEED
 const CALM_SPEED: float = 3.0
 ## How fast the velocity estimate and the steadiness follow the mech (1/s).
 const VELOCITY_SMOOTHING: float = 5.0
-const STEADY_RATE: float = 4.0
+const STEADY_RATE: float = 5.0
 ## Rate factor: RECENTER seconds covers about 95% of the way (e^-3).
 const RECENTER_SETTLE: float = 3.0
 
@@ -45,10 +47,18 @@ func focus() -> Vector3:
 
 
 ## Advance by `delta` toward a mech at `target` moving at `velocity`, with a dead
-## zone of `dead_zone` half extents (world units). Returns the new focus point.
-func step(target: Vector3, velocity: Vector3, dead_zone: Vector2, delta: float) -> Vector3:
+## zone of `dead_zone` half extents (world units). The mech never ends further
+## from the focus than `safe_frame` (half extents, world units) on either axis.
+## Returns the new focus point.
+func step(
+	target: Vector3,
+	velocity: Vector3,
+	dead_zone: Vector2,
+	delta: float,
+	safe_frame: Vector2 = Vector2.INF
+) -> Vector3:
 	if delta <= 0.0:
-		return _focus
+		return _hold_in_frame(target, safe_frame)
 	# How steady the mech is: 1 at a constant (or slow) velocity, 0 while it
 	# accelerates hard.
 	var smoothed: Vector3 = _smooth_velocity.lerp(velocity, 1.0 - exp(-VELOCITY_SMOOTHING * delta))
@@ -81,7 +91,23 @@ func step(target: Vector3, velocity: Vector3, dead_zone: Vector2, delta: float) 
 		_focus_velocity.y, _focus.y, _goal.y, target.y, velocity.y, _smooth_velocity.y
 	)
 	_focus += _focus_velocity * delta
+	# Once the mech is steady, the focus settles on the goal at the same rate,
+	# so the whole camera (not only its goal) recentres within RECENTER seconds.
+	_focus = _focus.lerp(_goal, settle)
 	_focus.z = 0.0
+	return _hold_in_frame(target, safe_frame)
+
+
+## The hard limit, applied after the spring: on each axis where the mech is past
+## the safe frame, the focus moves to put it on the frame's edge, so it never
+## crosses it. The spring's own velocity is left alone: it keeps building
+## toward the goal while the clamp holds, so when the clamp lets go the camera
+## is already outpacing the mech and pulls away cleanly. (Overwriting it with
+## the mech's velocity made the damping drop the camera back below the mech's
+## pace, and the mech slid back onto the edge.)
+func _hold_in_frame(target: Vector3, safe_frame: Vector2) -> Vector3:
+	_focus.x = clampf(_focus.x, target.x - safe_frame.x, target.x + safe_frame.x)
+	_focus.y = clampf(_focus.y, target.y - safe_frame.y, target.y + safe_frame.y)
 	return _focus
 
 
