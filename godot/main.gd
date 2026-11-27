@@ -1,7 +1,8 @@
 extends Node
 ## The composition root: the only script that knows the concrete classes. It
 ## builds the core/ rules on the Events bus, restores the persisted stores,
-## boots the Game State machine and ticks the rules on the fixed physics step.
+## hands the player mech's mounts and motion to its feedback, boots the Game
+## State machine and ticks the rules on the fixed physics step.
 ## The boot marker lets the web smoke test see the bus round trip in the browser.
 
 const BOOT_OK_MARKER: String = "mechapilot: boot ok"
@@ -16,6 +17,8 @@ var _intel: IntelCodex
 var _tutorial: TutorialProgress
 
 @onready var _menu_screen: MenuScreen = $MenuScreen
+@onready var _stage: FlightStage = $FlightStage
+@onready var _mech_feedback: MechFeedback = $MechFeedback
 
 
 func _ready() -> void:
@@ -39,6 +42,7 @@ func _ready() -> void:
 	_scoreboard.restore()
 	_intel.restore()
 	_tutorial.restore()
+	_wire_mech_feedback()
 	_machine.boot()
 	if _menu_screen.visible:
 		print(BOOT_OK_MARKER)
@@ -50,3 +54,23 @@ func _physics_process(delta: float) -> void:
 	_ledger.tick(delta)
 	_progression.tick(delta)
 	_director.tick(delta)
+
+
+func _wire_mech_feedback() -> void:
+	var player: PlayerMech = _stage.player()
+	var model: MechModel = player.model()
+	_mech_feedback.attach(
+		model.main_nozzles,
+		MechModel.WING_FLAME_SIZE,
+		model.foot_nozzles,
+		MechModel.FOOT_FLAME_SIZE,
+		model.eyes
+	)
+	_check(player.motion_sampled.connect(_mech_feedback.on_motion) as Error)
+	_check(player.destroyed.connect(_mech_feedback.on_destroyed.unbind(1)) as Error)
+	_check(player.respawned.connect(_mech_feedback.on_respawned.unbind(1)) as Error)
+
+
+func _check(err: Error) -> void:
+	if err != OK:
+		push_error("mechapilot: could not wire a signal: %s" % error_string(err))
