@@ -167,6 +167,8 @@ tasks:
       - check-jsonschema --schemafile schemas/web-manifest.schema.json site/static/site.webmanifest
       - check-jsonschema --check-metaschema schemas/level.schema.json
       - check-jsonschema --schemafile schemas/level.schema.json godot/levels/*.json
+      # Vendored: https://raw.githubusercontent.com/compose-spec/compose-spec/6b3a2a93e77c30ded1aa8264307e74d1208a6eae/schema/compose-spec.json
+      - check-jsonschema --schemafile schemas/compose-spec.schema.json compose.yaml
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -188,6 +190,7 @@ tasks:
       - scripts/checks/no-symlinks
       - scripts/checks/agent-loop-skill
       - scripts/checks/agent-loop-skill-commands
+      - scripts/checks/nginx-config
       - scripts/checks/threat-models
       - scripts/checks/workflow-permissions
       - scripts/checks/production-dispatch-only
@@ -268,6 +271,9 @@ tasks:
 
   test:
     desc: Run the test suites (JUnit output in build/test-results)
+    # Set only by ci:sandbox (see scripts/test-shell); refused under CI.
+    env:
+      TEST_SHELL_EXCLUDE: "{{.TEST_SHELL_EXCLUDE}}"
     cmds:
       - rm -rf build/test-results
       - mkdir -p build/test-results
@@ -329,6 +335,7 @@ tasks:
       - task: site:build
       - scripts/site-no-overrides
       - npx --no-install html-validate --max-warnings 0 "build/site/**/*.html"
+      - npx --no-install html-validate --max-warnings 0 docker/lan/index.html docker/lan/game-placeholder.html
 
   site:validate:
     desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
@@ -373,6 +380,30 @@ tasks:
     cmds:
       - hugo server --source site
 
+  # ---- LAN preview (#77): nginx in Docker Compose (compose.yaml) over HTTPS ----
+  # /current/ (legacy site), /new/ (Marketing Site) and /new/game/ (Godot web
+  # export or a placeholder). MECHAFIGHTER_LAN_PORT picks the port (default 8471).
+
+  lan:build:
+    desc: Assemble the LAN preview tree in build/lan/www (legacy site, Marketing Site at /new/, game at /new/game/)
+    cmds:
+      - scripts/dev/lan build
+
+  lan:up:
+    desc: Build the LAN preview, make or reuse its self-signed cert, start nginx and print the HTTPS LAN URLs (needs Docker)
+    cmds:
+      - scripts/dev/lan up
+
+  lan:down:
+    desc: Stop the LAN preview (needs Docker)
+    cmds:
+      - scripts/dev/lan down
+
+  lan:url:
+    desc: Print the LAN preview's HTTPS URLs
+    cmds:
+      - scripts/dev/lan url
+
   website:eval:
     desc: "Measure one page and score it (usage: task website:eval -- <site-dir | url>); remote URLs are for humans and the website-evaluation skill, never CI"
     cmds:
@@ -387,9 +418,18 @@ tasks:
       - task: test
 
   ci:sandbox:
-    desc: "Agent Loop session gate: task ci minus the Chrome steps that bind localhost (site-observe, Lighthouse); the ci check runs them"
+    desc: "Agent Loop session gate: task ci minus the localhost Chrome steps (site-observe, Lighthouse) and the Docker nginx test; the ci check runs them"
     cmds:
-      - task: ci:fast
+      # ci:fast (lint, godot:check, test), but test runs with one exclusion.
+      - task: lint
+      - task: godot:check
+      # The sandbox denies unix sockets, so Docker is unreachable there and the
+      # live nginx test (#77) cannot run. It is left out here only: excluded
+      # tests are not reported, so they never count as passed, and the full
+      # `task ci` (the required ci check) runs it.
+      - task: test
+        vars:
+          TEST_SHELL_EXCLUDE: test_lan_nginx_routes_and_mime
       - task: site:static
       - task: site:links
       - task: secrets

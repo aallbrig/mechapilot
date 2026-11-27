@@ -1,0 +1,143 @@
+#!/bin/sh
+# The LAN preview's self-signed TLS certificate (#77).
+#
+# Usage: scripts/dev/lan-cert [dir]   make or reuse <dir>/cert.pem and <dir>/key.pem
+#        scripts/dev/lan-cert ip      print the machine's current LAN IPv4 address
+#
+# The certificate names DNS:localhost, IP:127.0.0.1 and the current LAN IP. A
+# valid one is never overwritten: it is reused while it names the current LAN
+# IP, its key matches and it has more than LAN_CERT_MIN_DAYS (30) days left.
+# Otherwise a new P-256 key and certificate are written to a temp directory
+# beside them, checked, and renamed into place. The default dir is
+# build/lan-tls/ (gitignored, like every *.pem).
+#
+# MECHAFIGHTER_LAN_IP overrides the detected address (tests use it, and so can a
+# machine whose default route is a VPN).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
+valid_days=397 # the longest lifetime Apple platforms accept for a TLS server cert
+min_days="${LAN_CERT_MIN_DAYS:-30}"
+
+die() {
+  printf 'lan-cert: %s\n' "$*" >&2
+  exit 1
+}
+
+# Prints "yes" when $1 is a dotted-quad IPv4 address, else "no".
+is_ipv4() {
+  printf '%s\n' "$1" | awk -F . '
+    NF != 4 { print "no"; exit }
+    { for (i = 1; i <= 4; i++) if ($i !~ /^[0-9][0-9]?[0-9]?$/ || $i + 0 > 255) { print "no"; exit } }
+    { print "yes" }'
+}
+
+# Sets ip to the LAN address (or dies).
+detect_ip() {
+  ip=""
+  if [ -n "${MECHAFIGHTER_LAN_IP:-}" ]; then
+    ip="${MECHAFIGHTER_LAN_IP}"
+  else
+    case "$(uname -s)" in
+      Darwin)
+        iface="$(route -n get default 2>/dev/null | awk '$1 == "interface:" { print $2; exit }')" || iface=""
+        for i in ${iface} en0 en1; do
+          ip="$(ipconfig getifaddr "${i}" 2>/dev/null)" || ip=""
+          [ -z "${ip}" ] || break
+        done
+        ;;
+      Linux)
+        # `ip route get` only consults the routing table; no packet is sent.
+        ip="$(ip -4 route get 192.0.2.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1)" || ip=""
+        ;;
+      *) ;;
+    esac
+    [ -n "${ip}" ] || die "could not find this machine's LAN IP; set MECHAFIGHTER_LAN_IP"
+  fi
+  valid="$(is_ipv4 "${ip}")"
+  [ "${valid}" = yes ] || die "not an IPv4 address: ${ip}"
+}
+
+# Sets usable=yes when <dir>/cert.pem and key.pem are a pair for ${ip} with
+# more than $2 days left.
+check_pair() {
+  usable=no
+  days="$2"
+  cert="$1/cert.pem"
+  key="$1/key.pem"
+  [ -f "${cert}" ] && [ -f "${key}" ] || return 0
+  [ ! -L "${cert}" ] && [ ! -L "${key}" ] || return 0
+  openssl x509 -in "${cert}" -noout -checkend "$((days * 86400))" >/dev/null 2>&1 || return 0
+  text="$(openssl x509 -in "${cert}" -noout -text 2>/dev/null)" || return 0
+  sans="$(printf '%s\n' "${text}" | awk '/X509v3 Subject Alternative Name/ { getline; gsub(/[[:space:]]/, ""); print; exit }')"
+  for want in DNS:localhost IPAddress:127.0.0.1 "IPAddress:${ip}"; do
+    case ",${sans}," in
+      *",${want},"*) ;;
+      *) return 0 ;;
+    esac
+  done
+  cert_pub="$(openssl x509 -in "${cert}" -noout -pubkey 2>/dev/null)" || return 0
+  key_pub="$(openssl pkey -in "${key}" -pubout 2>/dev/null)" || return 0
+  [ -n "${cert_pub}" ] && [ "${cert_pub}" = "${key_pub}" ] || return 0
+  usable=yes
+}
+
+make_cert() {
+  dir="$1"
+  [ ! -L "${dir}" ] || die "refusing a symlinked cert directory: ${dir}"
+  mkdir -p "${dir}"
+  for f in cert.pem key.pem; do
+    [ ! -L "${dir}/${f}" ] || die "refusing a symlink: ${dir}/${f}"
+  done
+  check_pair "${dir}" "${min_days}"
+  if [ "${usable}" = yes ]; then
+    printf 'lan-cert: reusing the valid certificate in %s (localhost, 127.0.0.1, %s)\n' "${dir}" "${ip}"
+    return 0
+  fi
+  umask 077
+  stage="$(mktemp -d "${dir}/.stage.XXXXXX")"
+  trap 'rm -rf "${stage}"' EXIT
+  if ! openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${stage}/key.pem" 2>"${stage}/err"; then
+    cat "${stage}/err" >&2
+    die "openssl genpkey failed"
+  fi
+  if ! openssl req -x509 -new -key "${stage}/key.pem" -out "${stage}/cert.pem" -days "${valid_days}" \
+    -subj "/CN=Mecha Fighter LAN preview" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:${ip}" \
+    -addext "basicConstraints=critical,CA:FALSE" \
+    -addext "keyUsage=critical,digitalSignature" \
+    -addext "extendedKeyUsage=serverAuth" 2>"${stage}/err"; then
+    cat "${stage}/err" >&2
+    die "openssl req failed"
+  fi
+  chmod 600 "${stage}/key.pem"
+  chmod 644 "${stage}/cert.pem"
+  check_pair "${stage}" 0
+  [ "${usable}" = yes ] || die "the new certificate failed its own check"
+  # The key moves first, so the pair is only briefly mismatched, never half-written.
+  mv -f "${stage}/key.pem" "${dir}/key.pem"
+  mv -f "${stage}/cert.pem" "${dir}/cert.pem"
+  rm -rf "${stage}"
+  trap - EXIT
+  printf 'lan-cert: wrote a new certificate to %s (localhost, 127.0.0.1, %s; %s days)\n' "${dir}" "${ip}" "${valid_days}"
+}
+
+case "${min_days}" in
+  "" | *[!0-9]*) die "LAN_CERT_MIN_DAYS must be a whole number of days" ;;
+  *) ;;
+esac
+command -v openssl >/dev/null 2>&1 || die "openssl is not on PATH"
+
+case "${1:-}" in
+  ip)
+    detect_ip
+    printf '%s\n' "${ip}"
+    ;;
+  -*) die "usage: lan-cert [dir] | lan-cert ip" ;;
+  *)
+    detect_ip
+    make_cert "${1:-${repo_root}/build/lan-tls}"
+    ;;
+esac

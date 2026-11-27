@@ -210,10 +210,12 @@ prove_task() {
     return 0
   fi
   rc=0
+  # stdin is /dev/null: a prover that reads stdin would otherwise eat the
+  # criteria the loop below reads, and they would never be judged.
   (
     unset ACCEPTANCE_RECORD ACCEPTANCE_BINDING ACCEPTANCE_BINDING_EXPECT
     task "$1"
-  ) >"${work}/out" 2>&1 || rc=$?
+  ) </dev/null >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
   record task "$1"
 }
@@ -236,7 +238,7 @@ prove_check() {
   (
     unset ACCEPTANCE_RECORD ACCEPTANCE_BINDING ACCEPTANCE_BINDING_EXPECT
     "${script}"
-  ) >"${work}/out" 2>&1 || rc=$?
+  ) </dev/null >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
   record check "$1"
 }

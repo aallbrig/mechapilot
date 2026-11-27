@@ -38,6 +38,10 @@ _Avoid_: preview
 The public mechafighter.com and game.mechafighter.com, updated only by a Deploy.
 _Avoid_: live, prod site
 
+**LAN Preview**:
+The legacy site, the Marketing Site and the game, served over HTTPS from a developer's machine to devices on the same local network (`task lan:up`), so they can be tried on a phone. Nothing is deployed, so it is not an environment.
+_Avoid_: bare "preview" (ambiguous with the QA Environment), local QA
+
 ## Workflow
 
 **Agent Loop**:

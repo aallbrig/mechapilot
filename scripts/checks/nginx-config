@@ -1,0 +1,61 @@
+#!/bin/sh
+# The LAN preview's nginx config (docker/lan/nginx.conf, #77) is valid in the
+# pinned image, run exactly as compose.yaml runs it (unprivileged, read-only
+# root, no capabilities, the same mounts), and compose.yaml itself resolves.
+#
+# Fails on: an image not pinned by version and sha256 digest, `docker compose
+# config` errors, or `nginx -t` reporting anything but success (warnings too).
+#
+# Docker is required in CI (CI or GITHUB_ACTIONS set): there, no Docker is a
+# failure. Elsewhere, no usable Docker prints SKIPPED and exits 0 so `task lint`
+# works without it; that run proves nothing, and the ci check is the evidence.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
+lan="${repo_root}/scripts/dev/lan"
+
+fail() {
+  printf 'nginx-config: %s\n' "$*" >&2
+  exit 1
+}
+
+image="$(yq -r '.services.lan.image' "${repo_root}/compose.yaml")"
+pinned="$(printf '%s\n' "${image}" | grep -Ec '^nginx:[0-9]+\.[0-9]+\.[0-9]+-alpine@sha256:[0-9a-f]{64}$')" || pinned=0
+[ "${pinned}" -eq 1 ] || fail "compose.yaml must pin nginx:<x.y.z>-alpine@sha256:<digest>, found: ${image}"
+
+rc=0
+reason="$("${lan}" doctor 2>&1 >/dev/null)" || rc=$?
+if [ "${rc}" -ne 0 ]; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "docker is required in CI: ${reason}"
+  fi
+  printf 'nginx-config: SKIPPED, not verified here: %s (the ci check runs it)\n' "${reason#lan: }"
+  exit 0
+fi
+
+work="$(mktemp -d)"
+project="mf-lan-check-$$"
+cleanup() {
+  COMPOSE_PROJECT_NAME="${project}" MECHAFIGHTER_LAN_OUT="${work}/root" MECHAFIGHTER_LAN_TLS="${work}/tls" \
+    "${lan}" compose down --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "${work}"
+}
+trap cleanup EXIT
+mkdir -p "${work}/root/www"
+MECHAFIGHTER_LAN_IP=192.0.2.1 "${repo_root}/scripts/dev/lan-cert" "${work}/tls" >/dev/null
+
+export COMPOSE_PROJECT_NAME="${project}" MECHAFIGHTER_LAN_OUT="${work}/root" MECHAFIGHTER_LAN_TLS="${work}/tls"
+MECHAFIGHTER_LAN_IP=192.0.2.1 "${lan}" compose config --quiet </dev/null || fail "compose.yaml does not resolve"
+
+rc=0
+"${lan}" compose --progress quiet run --rm --no-deps --entrypoint nginx lan -t -c /etc/nginx/lan/nginx.conf </dev/null >"${work}/nginx" 2>&1 || rc=$?
+cat "${work}/nginx"
+[ "${rc}" -eq 0 ] || fail "nginx -t failed (exit ${rc})"
+grep -q 'syntax is ok' "${work}/nginx" || fail "nginx -t did not report the syntax as ok"
+grep -q 'test is successful' "${work}/nginx" || fail "nginx -t did not report success"
+if grep -q '\[\(warn\|emerg\|alert\|crit\|error\)\]' "${work}/nginx"; then
+  fail "nginx -t reported problems"
+fi
+printf 'nginx-config: docker/lan/nginx.conf is valid in %s\n' "${image%@*}"

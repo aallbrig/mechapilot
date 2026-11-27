@@ -26,14 +26,17 @@ windows:
       panes:
         - editor: scripts/dev/godot-editor
   - serve:
-      layout: even-horizontal
+      layout: tiled
       panes:
         - game: scripts/dev/serve game
         - site: scripts/dev/serve site
+        # The HTTPS LAN preview (task lan:up); waits, saying why, while Docker is absent.
+        - lan: scripts/dev/serve lan
   - ci:
       layout: even-vertical
       panes:
-        - runs: gh run watch
+        # One-shot listings: nothing here polls the GitHub API.
+        - runs: gh run list --limit 10
         - prs: gh pr status
   - loops:
       layout: tiled
