@@ -62,6 +62,7 @@ prefix_for() {
     hooks-and-toolchain) printf 'HT' ;;
     infra) printf 'IN' ;;
     site) printf 'SI' ;;
+    release) printf 'RD' ;;
     *) printf '' ;;
   esac
 }

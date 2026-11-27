@@ -1,0 +1,117 @@
+#!/bin/sh
+# Package one release's assets (#31).
+#
+# Usage: scripts/release/package <dist> <version> <commit> <ci-run-id> <site-dir> <game-dir|-> [skip-reason]
+#
+# Writes into <dist> (which must not exist):
+#   marketing-site.tar.gz  the Marketing Site build (<site-dir>)
+#   game-web.tar.gz        the Godot web export (<game-dir>), with its .wasm
+#                          and .pck pre-gzipped (scripts/release/pregzip);
+#                          absent when <game-dir> is "-", and the manifest
+#                          then records the bundle as skipped with the reason
+#   manifest.json          version, commit, the ci run, and every file of
+#                          every bundle with its sha256 (and Content-Type /
+#                          Content-Encoding for pre-gzipped files);
+#                          schemas/release-manifest.schema.json
+#   SHA256SUMS             sha256 of every other asset, `sha256sum -c` format
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-release
+. "${here}/lib-release"
+
+usage='usage: package <dist> <version> <commit> <ci-run-id> <site-dir> <game-dir|-> [skip-reason]'
+dist="${1:?${usage}}"
+version="${2:?${usage}}"
+commit="${3:?${usage}}"
+ci_run_id="${4:?${usage}}"
+site_dir="${5:?${usage}}"
+game_dir="${6:?${usage}}"
+skip_reason="${7:-no game web export in this build}"
+
+fail() {
+  printf 'package: %s\n' "$*" >&2
+  exit 1
+}
+
+check_tag "${version}"
+[ "${release_tag}" = yes ] || fail "${version} is not a vX.Y.Z version"
+require_sha "${commit}" "commit"
+case "${ci_run_id}" in
+  "" | *[!0-9]*) fail "ci run id must be a number" ;;
+  *) ;;
+esac
+[ ! -e "${dist}" ] || fail "${dist} already exists"
+[ -f "${site_dir}/index.html" ] || fail "no Marketing Site build in ${site_dir}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+mkdir -p "${dist}"
+
+# bundle <name> <source-dir> [meta]: copy, tar and describe one bundle.
+bundle() {
+  name="$1"
+  src="$2"
+  meta="${3:-/dev/null}"
+  stage="${work}/${name}"
+  mkdir -p "${stage}"
+  odd="$(find "${src}" ! -type f ! -type d -print | head -n 1)"
+  [ -z "${odd}" ] || fail "${name}: not a regular file or directory: ${odd}"
+  cp -R "${src}/." "${stage}/"
+  if [ "${name}" = game ]; then
+    "${here}/pregzip" "${stage}" "${work}/game.meta"
+    meta="${work}/game.meta"
+  fi
+  asset="$(bundle_asset "${name}")"
+  (cd "${stage}" && find . -type f -print | sed 's|^\./||' | sort) >"${work}/${name}.list"
+  : >"${work}/${name}.files.tsv"
+  while IFS= read -r rel; do
+    case "${rel}" in
+      # Tabs break the manifest; glob characters would turn the deploy's
+      # `aws s3 sync --exclude <path>` into a pattern matching other files.
+      *"	"* | *[][*?\\]* | version.json) fail "${name}: unsupported file name: ${rel}" ;;
+      *) ;;
+    esac
+    sum="$(sha256_of "${stage}/${rel}")"
+    bytes="$(wc -c <"${stage}/${rel}" | tr -d ' ')"
+    printf '%s\t%s\t%s\n' "${rel}" "${sum}" "${bytes}" >>"${work}/${name}.files.tsv"
+  done <"${work}/${name}.list"
+  tar -cf - -C "${stage}" . | gzip -n -9 >"${dist}/${asset}"
+  asset_sum="$(sha256_of "${dist}/${asset}")"
+  jq -n -R --arg asset "${asset}" --arg sha "${asset_sum}" --rawfile meta "${meta}" '
+    ($meta | split("\n") | map(select(length > 0) | split("\t")
+      | {key: .[0], value: {content_type: .[1], content_encoding: .[2]}}) | from_entries) as $enc
+    | {asset: $asset, sha256: $sha,
+       files: [inputs | split("\t") | {path: .[0], sha256: .[1], bytes: (.[2] | tonumber)} | . + ($enc[.path] // {})]}' \
+    <"${work}/${name}.files.tsv" >"${work}/${name}.json"
+}
+
+bundle marketing "${site_dir}"
+skipped='[]'
+if [ "${game_dir}" = - ]; then
+  skipped="$(jq -n --arg reason "${skip_reason}" '[{bundle: "game", reason: $reason}]')"
+  printf '{}' >"${work}/game.json"
+else
+  [ -f "${game_dir}/index.html" ] || fail "no game web export in ${game_dir}"
+  bundle game "${game_dir}"
+fi
+
+jq -n --arg version "${version}" --arg commit "${commit}" --argjson run "${ci_run_id}" \
+  --slurpfile marketing "${work}/marketing.json" --slurpfile game "${work}/game.json" \
+  --argjson skipped "${skipped}" '
+  {schema_version: 1, version: $version, commit: $commit,
+   ci: {workflow: ".github/workflows/ci.yml", run_id: $run, event: "push", branch: "main", conclusion: "success"},
+   bundles: ({marketing: $marketing[0]} + (if $game[0] == {} then {} else {game: $game[0]} end)),
+   skipped: $skipped}' >"${dist}/manifest.json"
+
+(
+  cd "${dist}"
+  for f in manifest.json marketing-site.tar.gz game-web.tar.gz; do
+    [ -f "${f}" ] || continue
+    sum="$(sha256_of "${f}")"
+    printf '%s  %s\n' "${sum}" "${f}"
+  done
+) >"${work}/SHA256SUMS"
+mv -f "${work}/SHA256SUMS" "${dist}/SHA256SUMS"
+printf 'package: %s (%s) in %s\n' "${version}" "${commit}" "${dist}" >&2

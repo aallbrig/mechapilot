@@ -6,22 +6,20 @@
 # include_claim_keys = ["repo", "ref", "environment"] with immutable subjects,
 # which makes the sub claim
 #   repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:<ref>:environment:<env>
-# A token in any other format (default subject, other key order, branch ref,
-# missing environment, missing tag) matches nothing.
-#
-# Why this order: ref names cannot contain ":", so the only free text a
-# workflow controls is the environment name, and it comes last, after a fixed
-# ":environment:". The pattern ends in the literal environment name, and a
-# StringNotLike condition rejects any subject with a second ":environment:",
-# so an environment named like "x:environment:production" cannot be smuggled
-# through the v* wildcard.
+# The role trusts exactly one subject, compared with StringEquals (no
+# wildcards): the main branch, in the production environment (#31). Deploys
+# are dispatched from main (deploy.yml); a tag, another branch, a pull request
+# or another environment matches nothing, and a token in any other format
+# (default subject, other key order, missing environment) matches nothing, so
+# the trust fails closed. With no wildcard there is nothing for an
+# environment name like "x:environment:production" to splice into.
 
 locals {
   subject = join(":", [
     "repo",
     "${var.github_owner}@${var.github_owner_id}/${var.github_repository}@${var.github_repository_id}",
     "ref",
-    "refs/tags/${var.tag_pattern}",
+    "refs/heads/main",
     "environment",
     var.github_environment,
   ])
@@ -30,14 +28,15 @@ locals {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "GitHubActionsReleaseTagInProductionEnvironment"
+        Sid       = "GitHubActionsMainInProductionEnvironment"
         Effect    = "Allow"
         Action    = "sts:AssumeRoleWithWebIdentity"
         Principal = { Federated = var.oidc_provider_arn }
         Condition = {
-          StringEquals  = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
-          StringLike    = { "token.actions.githubusercontent.com:sub" = local.subject }
-          StringNotLike = { "token.actions.githubusercontent.com:sub" = "*:environment:*:environment:*" }
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+            "token.actions.githubusercontent.com:sub" = local.subject
+          }
         }
       },
     ]

@@ -53,14 +53,3 @@ variable "github_environment" {
     error_message = "github_environment must be a plain name (no wildcards or separators)."
   }
 }
-
-variable "tag_pattern" {
-  description = "Tag name pattern (IAM StringLike) the run's ref must match under refs/tags/."
-  type        = string
-  default     = "v*"
-
-  validation {
-    condition     = can(regex("^v[0-9A-Za-z.*?-]*$", var.tag_pattern)) && !strcontains(var.tag_pattern, ":")
-    error_message = "tag_pattern must start with v and contain no separators."
-  }
-}

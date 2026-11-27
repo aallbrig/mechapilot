@@ -1,7 +1,7 @@
 # GitHub Actions deploy role, trusted through the account's existing (shared)
 # GitHub OIDC provider, which is referenced here and never managed. Only a job
-# of this repository that runs in the production environment AND on a v* tag
-# may assume it (one sub pattern, see modules/github-deploy-trust), and it may
+# of this repository that runs on main AND in the production environment may
+# assume it (one exact subject, see modules/github-deploy-trust), and it may
 # only sync the two site buckets and invalidate the two distributions.
 
 data "aws_iam_openid_connect_provider" "github" {

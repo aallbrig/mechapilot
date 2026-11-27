@@ -1,0 +1,955 @@
+#!/bin/sh
+# Tests for the automatic release and the one-button deploy (#31):
+# scripts/release/*. Nothing here touches GitHub or AWS: gh, aws, curl and
+# openssl are stubs on PATH. The aws stub keeps each bucket as a directory and
+# the curl stub serves Production from those directories, so a deploy, its
+# post-checks and its rollback run end to end.
+
+# shellcheck source=../../scripts/release/lib-release
+. scripts/release/lib-release
+
+sha_a=0123456789abcdef0123456789abcdef01234567
+
+# ---- stubs ----
+
+write_stubs() {
+  mkdir -p "$1/bin"
+  # GitHub's release API, generated from ${STUB_DIR}/rel/<tag>/: assets/ holds
+  # the asset files as they are now (so tampering with them is what a
+  # `gh release upload --clobber` would publish), meta.json who published and
+  # uploaded them, whether the release is immutable, and its asset id base.
+  cat >"$1/bin/gh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"${STUB_DIR}/gh.log"
+release_json() {
+  m="${STUB_DIR}/rel/$1/meta.json"
+  [ -f "${m}" ] || return 1
+  (cd "${STUB_DIR}/rel/$1/assets" && ls -A) | jq -R -s --arg t "$1" --slurpfile m "${m}" '
+    split("\n") | map(select(length > 0)) | to_entries
+    | {tag_name: $t, draft: false, prerelease: false, immutable: $m[0].immutable,
+       author: {login: $m[0].author}, published_at: $m[0].published,
+       assets: map({id: ($m[0].base + .key), name: .value, state: "uploaded", uploader: {login: $m[0].uploader}})}'
+}
+case "$*" in
+  "api --paginate --slurp repos/octo/game/releases?per_page=100")
+    for m in "${STUB_DIR}"/rel/*/meta.json; do
+      [ -f "${m}" ] || continue
+      t="${m%/meta.json}"
+      release_json "${t##*/}"
+    done | jq -s '[.]'
+    ;;
+  "api repos/octo/game/releases/tags/"*) release_json "${2##*/}" ;;
+  "api -H Accept: application/octet-stream repos/octo/game/releases/assets/"*)
+    id="${4##*/}"
+    for m in "${STUB_DIR}"/rel/*/meta.json; do
+      base="$(jq -r .base "${m}")"
+      n=$((id - base))
+      if [ "${n}" -ge 0 ] && [ "${n}" -lt 1000 ]; then
+        d="${m%/meta.json}/assets"
+        name="$( (cd "${d}" && ls -A) | sed -n "$((n + 1))p")"
+        [ -n "${name}" ] || exit 1
+        cat "${d}/${name}"
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
+  "pr list"*) cat "${STUB_DIR}/prs.json" ;;
+  "api repos/octo/game/pulls/"*)
+    n="${2##*/}"
+    [ -f "${STUB_DIR}/labels-${n}" ] || exit 1
+    cat "${STUB_DIR}/labels-${n}"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  cat >"$1/bin/aws" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"${STUB_DIR}/aws.log"
+case "$1 $2" in
+  "s3 cp")
+    src="$3" dst="$4"
+    shift 4
+    type="" enc=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --content-type) type="$2"; shift 2 ;;
+        --content-encoding) enc="$2"; shift 2 ;;
+        --cache-control) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    b="${dst#s3://}" bucket="${b%%/*}" key="${b#*/}"
+    mkdir -p "$(dirname "${STUB_S3}/${bucket}/${key}")" "$(dirname "${STUB_S3}/${bucket}.meta/${key}")"
+    cp "${src}" "${STUB_S3}/${bucket}/${key}"
+    printf '%s\t%s\n' "${type}" "${enc}" >"${STUB_S3}/${bucket}.meta/${key}"
+    ;;
+  "s3 sync")
+    src="$3" dst="$4"
+    shift 4
+    del=0 ex=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --delete) del=1; shift ;;
+        --exclude) ex="${ex}$2
+"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    b="${dst#s3://}" bucket="${b%%/*}"
+    root="${STUB_S3}/${bucket}"
+    mkdir -p "${root}"
+    if [ "${del}" -eq 1 ]; then
+      (cd "${root}" && find . -type f | sed 's|^\./||') | while IFS= read -r k; do
+        printf '%s' "${ex}" | grep -qxF "${k}" && continue
+        [ -f "${src}/${k}" ] || rm -f "${root}/${k}" "${root}.meta/${k}"
+      done
+    fi
+    (cd "${src}" && find . -type f | sed 's|^\./||') | while IFS= read -r k; do
+      printf '%s' "${ex}" | grep -qxF "${k}" && continue
+      mkdir -p "$(dirname "${root}/${k}")"
+      cp "${src}/${k}" "${root}/${k}"
+      rm -f "${root}.meta/${k}"
+    done
+    ;;
+  "cloudfront create-invalidation") printf 'I1\n' ;;
+  "cloudfront wait") ;;
+  *) exit 1 ;;
+esac
+EOF
+  # Serves https://<host>/<path> from the bucket directory STUB_SITES maps it
+  # to; index.html answers 500 while version.json names the version in
+  # ${STUB_DIR}/broken (a release that breaks Production).
+  cat >"$1/bin/curl" <<'EOF'
+#!/bin/sh
+out="" wout="" dump="" fail=0 url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    --write-out) wout="$2"; shift 2 ;;
+    --dump-header) dump="$2"; shift 2 ;;
+    --max-time | -H) shift 2 ;;
+    --fail) fail=1; shift ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+root="" rel=""
+for m in ${STUB_SITES}; do
+  case "${url}" in
+    "${m%%=*}"*) root="${m#*=}" rel="${url#"${m%%=*}"}" ;;
+    *) ;;
+  esac
+done
+[ -n "${root}" ] || exit 6
+[ -n "${rel}" ] || rel=index.html
+code=404
+[ -f "${root}/${rel}" ] && code=200
+if [ "${rel}" = index.html ] && [ -f "${STUB_DIR}/broken" ] && [ -f "${root}/version.json" ] &&
+  grep -qF "\"$(cat "${STUB_DIR}/broken")\"" "${root}/version.json"; then
+  code=500
+fi
+if [ -n "${dump}" ]; then
+  {
+    printf 'HTTP/2 %s\r\n' "${code}"
+    if [ -f "${root}.meta/${rel}" ]; then
+      printf 'Content-Type: %s\r\n' "$(cut -f 1 "${root}.meta/${rel}")"
+      e="$(cut -f 2 "${root}.meta/${rel}")"
+      [ -z "${e}" ] || printf 'Content-Encoding: %s\r\n' "${e}"
+    fi
+  } >"${dump}"
+fi
+if [ "${code}" = 200 ] && [ -n "${out}" ] && [ "${out}" != /dev/null ]; then cp "${root}/${rel}" "${out}"; fi
+[ -z "${wout}" ] || printf '%s' "${code}"
+if [ "${fail}" -eq 1 ] && [ "${code}" != 200 ]; then exit 22; fi
+exit 0
+EOF
+  printf '#!/bin/sh\nexit 0\n' >"$1/bin/openssl"
+  chmod +x "$1/bin/gh" "$1/bin/aws" "$1/bin/curl" "$1/bin/openssl"
+}
+
+# release_meta <world> <tag> [uploader] [immutable] [author]: who published
+# the release and uploaded its assets.
+release_meta() {
+  if [ -f "$1/rel/$2/meta.json" ]; then
+    base="$(jq -r .base "$1/rel/$2/meta.json")"
+  else
+    n="$(find "$1/rel" -name meta.json | wc -l | tr -d ' ')"
+    base=$(((n + 1) * 1000))
+  fi
+  jq -n --arg u "${3:-github-actions[bot]}" --argjson i "${4:-false}" --arg a "${5:-github-actions[bot]}" \
+    --argjson base "${base}" --arg p "2026-11-26T0$((base / 1000)):00:00Z" \
+    '{author: $a, uploader: $u, immutable: $i, base: $base, published: $p}' >"$1/rel/$2/meta.json.tmp"
+  mv "$1/rel/$2/meta.json.tmp" "$1/rel/$2/meta.json"
+}
+
+# make_release <world> <tag> [nogame]: package a release of the repo's
+# commit at <tag> exactly as release.yml would, and publish it to the gh stub.
+make_release() {
+  w="$1"
+  t="$2"
+  c="$(git -C "${w}/repo" rev-parse "refs/tags/${t}^{commit}")"
+  src="${w}/src-${t}"
+  mkdir -p "${src}/site/css" "${src}/game"
+  printf '<p>%s</p>\n' "${t}" >"${src}/site/index.html"
+  printf 'body{}\n' >"${src}/site/css/${t}.css"
+  printf '<p>game %s</p>\n' "${t}" >"${src}/game/index.html"
+  printf '\000asm-%s' "${t}" >"${src}/game/index.wasm"
+  printf 'GDPC-%s' "${t}" >"${src}/game/index.pck"
+  game="${src}/game"
+  if [ "${3:-}" = nogame ]; then game=-; fi
+  mkdir -p "${w}/rel/${t}"
+  scripts/release/package "${w}/rel/${t}/assets" "${t}" "${c}" 99 "${src}/site" "${game}" 2>/dev/null || return 1
+  release_meta "${w}" "${t}"
+}
+
+# new_release <world> <tag> [nogame]: commit, tag and release.
+new_release() {
+  git -C "$1/repo" commit -q --allow-empty -m "change for $2"
+  git -C "$1/repo" tag "$2"
+  make_release "$1" "$2" "${3:-}"
+}
+
+# world: a scratch repository with v0.1.0 and v0.1.1 released, stubs, and an
+# empty Production. Prints its directory.
+world() {
+  w="$(mktemp -d)"
+  write_stubs "${w}"
+  git init -q -b main "${w}/repo"
+  git -C "${w}/repo" config user.email t@example.invalid
+  git -C "${w}/repo" config user.name t
+  mkdir -p "${w}/rel"
+  for t in v0.1.0 v0.1.1; do
+    new_release "${w}" "${t}" || return 1
+  done
+  mkdir -p "${w}/s3/mbucket" "${w}/s3/gbucket"
+  printf '%s' "${w}"
+}
+
+# run_deploy <world> <subcommand> [VAR=value...]: run the deploy in the world.
+run_deploy() {
+  w="$1"
+  sub="$2"
+  shift 2
+  here="$(pwd)"
+  (
+    cd "${w}/repo" || exit 1
+    env PATH="${w}/bin:${PATH}" STUB_DIR="${w}" STUB_S3="${w}/s3" \
+      STUB_SITES="https://mechafighter.com/=${w}/s3/mbucket https://game.mechafighter.com/=${w}/s3/gbucket" \
+      GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_STEP_SUMMARY="${w}/summary.md" \
+      GITHUB_REPOSITORY=octo/game \
+      PROD_DEPLOY_ROLE_ARN="arn:aws:iam::000000000000:role/test" \
+      PROD_MARKETING_BUCKET=mbucket PROD_MARKETING_DISTRIBUTION_ID=EMARKETING1 \
+      PROD_GAME_BUCKET=gbucket PROD_GAME_DISTRIBUTION_ID=EGAMEDIST1 \
+      "$@" "${here}/scripts/release/deploy" "${sub}" "${w}/work"
+  )
+}
+
+# deploy_ok <world> [VAR=value...]: preflight then apply.
+deploy_ok() {
+  w="$1"
+  shift
+  run_deploy "${w}" preflight "$@" 2>>"${w}/log" && run_deploy "${w}" apply "$@" 2>>"${w}/log"
+}
+
+served_version() {
+  jq -r .version "$1/s3/$2/version.json" 2>/dev/null
+}
+
+# ---- version ----
+
+test_release_next_version() {
+  [ "$(printf '' | scripts/release/next-version patch)" = v0.1.0 ] || return 1
+  [ "$(printf '' | scripts/release/next-version major)" = v0.1.0 ] || return 1
+  tags='v0.1.0
+v0.1.9
+v0.1.10
+v0.2.0-rc
+v01.3.0
+v0.9
+vX
+v0.3.0.1
+release-1
+v0.1.11/x
+v1234567890.0.0
+ v0.5.0
+v0.4.0x'
+  [ "$(printf '%s\n' "${tags}" | scripts/release/next-version patch)" = v0.1.11 ] || return 1
+  [ "$(printf '%s\n' "${tags}" | scripts/release/next-version minor)" = v0.2.0 ] || return 1
+  [ "$(printf '%s\n' "${tags}" | scripts/release/next-version major)" = v1.0.0 ] || return 1
+  [ "$(printf 'v2.9.9\nv10.0.0\nv9.99.99\n' | scripts/release/next-version patch)" = v10.0.1 ] || return 1
+  ! printf 'v1.2.3\n' | scripts/release/next-version huge 2>/dev/null || return 1
+  ! printf 'v1.2.999999999\n' | scripts/release/next-version patch 2>/dev/null
+}
+
+# The plan bumps patch unless a PR in the change set is labelled.
+test_release_plan_bumps_by_label() {
+  w="$(mktemp -d)"
+  write_stubs "${w}"
+  git init -q -b main "${w}/repo"
+  git -C "${w}/repo" config user.email t@example.invalid
+  git -C "${w}/repo" config user.name t
+  git -C "${w}/repo" commit -q --allow-empty -m "First (#1) (#2)"
+  git -C "${w}/repo" tag v0.1.4
+  git -C "${w}/repo" commit -q --allow-empty -m "Add radar (#3) (#4)" -m "Closes #5"
+  here="$(pwd)"
+  plan() {
+    c="$(git -C "${w}/repo" rev-parse HEAD)"
+    (cd "${w}/repo" && PATH="${w}/bin:${PATH}" STUB_DIR="${w}" GITHUB_REPOSITORY=octo/game \
+      "${here}/scripts/release/plan" "${c}" "${w}/notes.md")
+  }
+  printf 'docs\n' >"${w}/labels-4"
+  out="$(plan)" || return 1
+  printf '%s\n' "${out}" | grep -qx 'version=v0.1.5' || return 1
+  grep -qx -- '- Add radar (#4), issues #3, #5' "${w}/notes.md" || return 1
+  printf 'release:minor\n' >"${w}/labels-4"
+  plan | grep -qx 'version=v0.2.0' || return 1
+  printf 'release:major\nrelease:minor\n' >"${w}/labels-4"
+  plan | grep -qx 'version=v1.0.0' || return 1
+  printf 'not-release:major\n' >"${w}/labels-4"
+  plan | grep -qx 'version=v0.1.5' || return 1
+  rm -f "${w}/labels-4"
+  plan | grep -qx 'version=v0.1.5' || return 1
+  grep -q 'could not be read' "${w}/notes.md" || return 1
+  rm -rf "${w}"
+}
+
+# ---- release guard ----
+
+test_release_requires_green_main_commit() {
+  w="$(mktemp -d)"
+  git init -q -b main "${w}/repo"
+  git -C "${w}/repo" config user.email t@example.invalid
+  git -C "${w}/repo" config user.name t
+  git -C "${w}/repo" commit -q --allow-empty -m one
+  one="$(git -C "${w}/repo" rev-parse HEAD)"
+  git -C "${w}/repo" commit -q --allow-empty -m two
+  two="$(git -C "${w}/repo" rev-parse HEAD)"
+  git -C "${w}/repo" update-ref refs/remotes/origin/main "${two}"
+  git -C "${w}/repo" checkout -q -b feature
+  git -C "${w}/repo" commit -q --allow-empty -m side
+  side="$(git -C "${w}/repo" rev-parse HEAD)"
+  here="$(pwd)"
+  guard() {
+    (cd "${w}/repo" && env RELEASE_EVENT=workflow_run CI_WORKFLOW_PATH=.github/workflows/ci.yml \
+      CI_CONCLUSION=success CI_EVENT=push CI_HEAD_BRANCH=main CI_HEAD_REPOSITORY=octo/game \
+      GITHUB_REPOSITORY=octo/game CI_HEAD_SHA="${two}" CI_RUN_ID=7 "$@" "${here}/scripts/release/guard" 2>/dev/null)
+  }
+  [ "$(guard)" = release=yes ] || return 1
+  # Each condition on its own must refuse.
+  for bad in CI_CONCLUSION=failure CI_CONCLUSION=cancelled CI_CONCLUSION= CI_EVENT=pull_request \
+    CI_EVENT=workflow_dispatch CI_HEAD_BRANCH=feature CI_HEAD_REPOSITORY=fork/game \
+    CI_WORKFLOW_PATH=.github/workflows/other.yml RELEASE_EVENT=push RELEASE_EVENT=workflow_dispatch \
+    CI_HEAD_SHA="${side}" CI_HEAD_SHA="${sha_a}" CI_HEAD_SHA=main CI_RUN_ID=abc; do
+    if guard "${bad}" >/dev/null; then
+      printf 'released with %s\n' "${bad}"
+      return 1
+    fi
+  done
+  # Already released, or older than the newest release: nothing to do.
+  git -C "${w}/repo" tag v0.1.0 "${two}"
+  [ "$(guard)" = release=no ] || return 1
+  [ "$(guard CI_HEAD_SHA="${one}")" = release=no ] || return 1
+  # Non-release tags don't count as releases.
+  git -C "${w}/repo" tag -d v0.1.0 >/dev/null
+  git -C "${w}/repo" tag v0.1.0-rc "${two}"
+  [ "$(guard)" = release=yes ] || return 1
+  rm -rf "${w}"
+}
+
+# ---- packaging and pre-gzip ----
+
+test_pregzip_sets_content_encoding() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/web/sub"
+  printf '\000asm' >"${d}/orig.wasm"
+  printf 'GDPC pack data' >"${d}/orig.pck"
+  cp "${d}/orig.wasm" "${d}/web/index.wasm"
+  cp "${d}/orig.pck" "${d}/web/sub/extra.pck"
+  printf '<p>x</p>' >"${d}/web/index.html"
+  scripts/release/pregzip "${d}/web" "${d}/meta" 2>/dev/null || return 1
+  [ "$(cat "${d}/meta")" = "$(printf 'index.wasm\tapplication/wasm\tgzip\nsub/extra.pck\tapplication/octet-stream\tgzip')" ] || return 1
+  gzip -t "${d}/web/index.wasm" && gzip -t "${d}/web/sub/extra.pck" || return 1
+  gzip -dc "${d}/web/index.wasm" | cmp -s - "${d}/orig.wasm" || return 1
+  gzip -dc "${d}/web/sub/extra.pck" | cmp -s - "${d}/orig.pck" || return 1
+  [ "$(cat "${d}/web/index.html")" = '<p>x</p>' ] || return 1
+  # A second pass would double-encode: refused. So are symlinks.
+  ! scripts/release/pregzip "${d}/web" "${d}/meta2" 2>/dev/null || return 1
+  mkdir "${d}/link"
+  ln -s /etc/hosts "${d}/link/index.wasm"
+  ! scripts/release/pregzip "${d}/link" "${d}/meta3" 2>/dev/null || return 1
+
+  # End to end: the deploy uploads exactly those files with that metadata,
+  # and the post-deploy check reads it back from Production.
+  w="$(world)" || return 1
+  deploy_ok "${w}" DEPLOY_FIRST=true || return 1
+  [ "$(cat "${w}/s3/gbucket.meta/index.wasm")" = "$(printf 'application/wasm\tgzip')" ] || return 1
+  [ "$(cat "${w}/s3/gbucket.meta/index.pck")" = "$(printf 'application/octet-stream\tgzip')" ] || return 1
+  gzip -dc "${w}/s3/gbucket/index.wasm" | grep -q 'asm-v0.1.1' || return 1
+  grep -q "$(printf 'post\tasset-game-index.wasm\tpass')" "${w}/work/assertions.tsv" || return 1
+  rm -rf "${d}" "${w}"
+}
+
+# ---- deploy ----
+
+test_deploy_resolves_version_input() {
+  d="$(mktemp -d)"
+  rel() { printf '{"tag_name":"%s","draft":%s,"prerelease":%s,"author":{"login":"%s"}}' "$1" "$2" "$3" "${4:-github-actions[bot]}"; }
+  {
+    printf '['
+    rel v0.1.9 false false
+    printf ','
+    rel v0.1.10 false false
+    printf ','
+    rel v0.2.0-rc false false
+    printf ','
+    rel v0.3.0 true false
+    printf ','
+    rel v0.2.5 false true
+    printf ','
+    rel v01.9.0 false false
+    printf ','
+    rel v0.9.0 false false octo
+    printf ','
+    rel v0.1.0 false false
+    printf ']\n'
+  } >"${d}/r.json"
+  r() { env "$@" scripts/release/deploy resolve "${d}/r.json" 2>/dev/null; }
+  # A release someone published by hand (v0.9.0) is never latest or previous.
+  [ "$(r DEPLOY_VERSION=latest)" = v0.1.10 ] || return 1
+  [ "$(r DEPLOY_VERSION=previous)" = v0.1.9 ] || return 1
+  [ "$(r DEPLOY_VERSION=latest DEPLOY_EXACT_VERSION=v0.1.0)" = v0.1.0 ] || return 1
+  [ "$(r DEPLOY_VERSION=previous DEPLOY_EXACT_VERSION=v0.1.10)" = v0.1.10 ] || return 1
+  for bad in v0.4.0 v0.3.0 v0.2.5 v0.2.0-rc v01.9.0 v0.9.0 0.1.0 "v0.1.0 " "v0.1.0;x" latest; do
+    if r DEPLOY_VERSION=latest DEPLOY_EXACT_VERSION="${bad}" >/dev/null; then
+      printf 'resolved %s\n' "${bad}"
+      return 1
+    fi
+  done
+  ! r DEPLOY_VERSION=newest >/dev/null || return 1
+  printf '[%s]\n' "$(rel v0.1.0 false false)" >"${d}/one.json"
+  ! env DEPLOY_VERSION=previous scripts/release/deploy resolve "${d}/one.json" >/dev/null 2>&1 || return 1
+  printf '[]\n' >"${d}/none.json"
+  ! env DEPLOY_VERSION=latest scripts/release/deploy resolve "${d}/none.json" >/dev/null 2>&1 || return 1
+  # Pre-flight reads every page of releases, so an exact version older than
+  # the newest 100 still resolves.
+  w="$(world)" || return 1
+  run_deploy "${w}" preflight DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 2>>"${w}/log" || return 1
+  grep -q -- '--paginate --slurp repos/octo/game/releases' "${w}/gh.log" || return 1
+  rm -rf "${d}" "${w}"
+}
+
+# preflight_refused <world> [VAR=value...]: preflight must fail, record the
+# refusal, never call aws, and leave apply unable to run.
+preflight_refused() {
+  w="$1"
+  shift
+  rm -rf "${w}/work" "${w}/aws.log"
+  if run_deploy "${w}" preflight "$@" 2>>"${w}/log"; then
+    printf 'preflight passed\n'
+    return 1
+  fi
+  [ "$(cut -f 1 "${w}/work/outcome")" = refused ] || return 1
+  ! run_deploy "${w}" apply "$@" 2>>"${w}/log" || return 1
+  [ ! -e "${w}/aws.log" ]
+}
+
+test_deploy_verifies_release_checksums() {
+  w="$(world)" || return 1
+  run_deploy "${w}" preflight DEPLOY_FIRST=true 2>>"${w}/log" || return 1
+  a="${w}/rel/v0.1.1/assets"
+  cp -R "${a}" "${w}/pristine"
+  restore() {
+    rm -rf "${a}"
+    cp -R "${w}/pristine" "${a}"
+    release_meta "${w}" v0.1.1
+  }
+  resum() {
+    for f in manifest.json marketing-site.tar.gz game-web.tar.gz; do
+      [ -f "${a}/${f}" ] || continue
+      s="$(sha256_of "${a}/${f}")"
+      printf '%s  %s\n' "${s}" "${f}"
+    done >"${w}/sums"
+    mv "${w}/sums" "${a}/SHA256SUMS"
+  }
+
+  # 1. A bundle changed after the release: SHA256SUMS catches it.
+  printf 'x' >>"${a}/marketing-site.tar.gz"
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  # 2. SHA256SUMS rewritten to match: the manifest's bundle sha256 catches it.
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 3. An extra asset, or a missing one.
+  printf 'x' >"${a}/extra.js"
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  rm -f "${a}/game-web.tar.gz"
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 4. A manifest for another commit, with consistent checksums.
+  jq --arg c "${sha_a}" '.commit = $c' "${a}/manifest.json" >"${w}/m" && mv "${w}/m" "${a}/manifest.json"
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 5. A manifest that does not record a green ci run.
+  jq '.ci.conclusion = "failure"' "${a}/manifest.json" >"${w}/m" && mv "${w}/m" "${a}/manifest.json"
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 6. A file inside a bundle that the manifest does not list (re-tarred,
+  #    with every checksum made consistent except the file list).
+  mkdir "${w}/x"
+  tar -xzf "${a}/marketing-site.tar.gz" -C "${w}/x"
+  printf 'evil' >"${w}/x/evil.js"
+  tar -cf - -C "${w}/x" . | gzip -n >"${a}/marketing-site.tar.gz"
+  s="$(sha256_of "${a}/marketing-site.tar.gz")"
+  jq --arg s "${s}" '.bundles.marketing.sha256 = $s' "${a}/manifest.json" >"${w}/m" && mv "${w}/m" "${a}/manifest.json"
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 7. A symlink smuggled into a bundle.
+  rm -rf "${w}/x"
+  mkdir "${w}/x"
+  tar -xzf "${a}/game-web.tar.gz" -C "${w}/x"
+  ln -s /etc/passwd "${w}/x/passwd"
+  tar -cf - -C "${w}/x" . | gzip -n >"${a}/game-web.tar.gz"
+  s="$(sha256_of "${a}/game-web.tar.gz")"
+  jq --arg s "${s}" '.bundles.game.sha256 = $s' "${a}/manifest.json" >"${w}/m" && mv "${w}/m" "${a}/manifest.json"
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  restore
+  # 8. A release someone published by hand, not the release workflow.
+  release_meta "${w}" v0.1.1 github-actions[bot] false octo
+  preflight_refused "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.1 || return 1
+  restore
+  # 9. Every asset replaced consistently (`gh release upload --clobber` by
+  #    any Contents-write token): a manifest, SHA256SUMS and bundles that
+  #    agree with each other and with the tag's real commit, carrying
+  #    attacker content. The release is still authored by the release
+  #    workflow, but its assets were uploaded by someone else.
+  mkdir -p "${w}/evil/site" "${w}/evil/game"
+  printf '<script>steal()</script>' >"${w}/evil/site/index.html"
+  printf '<p>g</p>' >"${w}/evil/game/index.html"
+  printf '\000asm-evil' >"${w}/evil/game/index.wasm"
+  printf 'GDPC-evil' >"${w}/evil/game/index.pck"
+  c1="$(git -C "${w}/repo" rev-parse v0.1.1)"
+  rm -rf "${a}"
+  scripts/release/package "${a}" v0.1.1 "${c1}" 99 "${w}/evil/site" "${w}/evil/game" 2>/dev/null || return 1
+  release_meta "${w}" v0.1.1 octo
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  grep -q 'uploaded (or replaced) by someone other than the release workflow' "${w}/log" || return 1
+  ! grep -q 'steal' "${w}/s3/mbucket/index.html" 2>/dev/null || return 1
+  # The same release marked immutable can't have been replaced after
+  # publication, so it is accepted (its assets are then what was published).
+  release_meta "${w}" v0.1.1 octo true
+  run_deploy "${w}" preflight DEPLOY_FIRST=true 2>>"${w}/log" || return 1
+  grep -q "$(printf 'pre\tprovenance\tpass\t.*immutable release')" "${w}/work/assertions.tsv" || return 1
+  restore
+  run_deploy "${w}" preflight DEPLOY_FIRST=true 2>>"${w}/log" || return 1
+  grep -q "$(printf 'pre\tprovenance\tpass\t.*every asset uploaded by github-actions')" "${w}/work/assertions.tsv" || return 1
+  # 10. A tag moved to a commit that is not on main.
+  git -C "${w}/repo" checkout -q -b side
+  git -C "${w}/repo" commit -q --allow-empty -m side
+  git -C "${w}/repo" checkout -q main
+  side="$(git -C "${w}/repo" rev-parse side)"
+  git -C "${w}/repo" tag -f v0.1.1 "${side}" >/dev/null
+  jq --arg c "${side}" '.commit = $c' "${a}/manifest.json" >"${w}/m" && mv "${w}/m" "${a}/manifest.json"
+  resum
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  rm -rf "${w}"
+}
+
+test_deploy_preflight_refuses_on_failure() {
+  w="$(world)" || return 1
+  # Not configured (infra not applied): refused with a clear message.
+  rm -rf "${w}/work"
+  out="$(run_deploy "${w}" config PROD_DEPLOY_ROLE_ARN= 2>&1)" && return 1
+  printf '%s' "${out}" | grep -q 'PROD_DEPLOY_ROLE_ARN are not set' || return 1
+  ! run_deploy "${w}" config PROD_GAME_BUCKET='Bad_Bucket' 2>/dev/null || return 1
+  # Only a dispatch from main.
+  ! run_deploy "${w}" config GITHUB_REF=refs/heads/feature 2>/dev/null || return 1
+  ! run_deploy "${w}" config GITHUB_REF=refs/tags/v0.1.1 2>/dev/null || return 1
+  ! run_deploy "${w}" config GITHUB_EVENT_NAME=push 2>/dev/null || return 1
+  run_deploy "${w}" config 2>/dev/null || return 1
+  # Nothing has ever been deployed: refused unless first_deploy is set.
+  preflight_refused "${w}" || return 1
+  # Deploy v0.1.0 for real, then break Production: a deploy is refused.
+  rm -rf "${w}/work"
+  deploy_ok "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 || return 1
+  printf 'v0.1.0' >"${w}/broken"
+  preflight_refused "${w}" || return 1
+  preflight_refused "${w}" DEPLOY_FIRST=true || return 1
+  rm -f "${w}/broken"
+  # A garbled version.json: no verifiable rollback target.
+  cp "${w}/s3/mbucket/version.json" "${w}/vj"
+  printf '{"version":"v0.1.0; rm -rf /","commit":"x"}' >"${w}/s3/mbucket/version.json"
+  preflight_refused "${w}" || return 1
+  cp "${w}/vj" "${w}/s3/mbucket/version.json"
+  # The rollback target's release fails verification: refused.
+  printf 'x' >>"${w}/rel/v0.1.0/assets/marketing-site.tar.gz"
+  preflight_refused "${w}" || return 1
+  # Production is left exactly as it was.
+  [ "$(served_version "${w}" mbucket)" = v0.1.0 ] && [ "$(served_version "${w}" gbucket)" = v0.1.0 ] || return 1
+  rm -rf "${w}"
+}
+
+test_deploy_rolls_back_on_failed_postcheck() {
+  w="$(world)" || return 1
+  deploy_ok "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.0 ] || return 1
+  # v0.1.1 breaks the Marketing Site once it is live.
+  printf 'v0.1.1' >"${w}/broken"
+  rm -f "${w}/aws.log"
+  run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  if run_deploy "${w}" apply 2>>"${w}/log"; then
+    printf 'a broken deploy passed\n'
+    return 1
+  fi
+  [ "$(cut -f 1 "${w}/work/outcome")" = rolled-back ] || return 1
+  # It was deployed, then the previous version came back, files and all.
+  grep -q "$(printf 'post\tprod-smoke-marketing\tfail')" "${w}/work/assertions.tsv" || return 1
+  grep -q "$(printf 'rollback\tprod-smoke-marketing\tpass')" "${w}/work/assertions.tsv" || return 1
+  grep -q "$(printf 'rollback\tversion-marketing\tpass')" "${w}/work/assertions.tsv" || return 1
+  grep -q "$(printf 'rollback\tversion-game\tpass')" "${w}/work/assertions.tsv" || return 1
+  [ "$(grep -c '^s3 sync .* s3://mbucket/' "${w}/aws.log")" -eq 2 ] || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.0 ] && [ "$(served_version "${w}" gbucket)" = v0.1.0 ] || return 1
+  grep -qx '<p>v0.1.0</p>' "${w}/s3/mbucket/index.html" || return 1
+  [ -f "${w}/s3/mbucket/css/v0.1.0.css" ] && [ ! -e "${w}/s3/mbucket/css/v0.1.1.css" ] || return 1
+  gzip -dc "${w}/s3/gbucket/index.wasm" | grep -q 'asm-v0.1.0' || return 1
+  grep -q 'rolled-back' "${w}/summary.md" || true
+  run_deploy "${w}" summary 2>/dev/null || return 1
+  grep -q '^## Deploy: rolled-back' "${w}/summary.md" || return 1
+  grep -q '| v0.1.1 |' "${w}/summary.md" || return 1
+
+  # A healthy deploy of v0.1.1 replaces v0.1.0 and removes its stale files.
+  rm -f "${w}/broken"
+  deploy_ok "${w}" || return 1
+  [ "$(cut -f 1 "${w}/work/outcome")" = deployed ] || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.1 ] && [ ! -e "${w}/s3/mbucket/css/v0.1.0.css" ] || return 1
+  # And previous rolls it back by hand.
+  deploy_ok "${w}" DEPLOY_VERSION=previous || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.0 ] || return 1
+  rm -rf "${w}"
+}
+
+# ---- manifest, release skill, workflow checks ----
+
+test_release_manifest_matches_schema() {
+  w="$(world)" || return 1
+  check-jsonschema --schemafile schemas/release-manifest.schema.json "${w}/rel/v0.1.1/assets/manifest.json" >/dev/null || return 1
+  # A release without the game export records the skip instead of faking it.
+  mkdir -p "${w}/site"
+  printf '<p>x</p>' >"${w}/site/index.html"
+  scripts/release/package "${w}/dist" v0.2.0 "${sha_a}" 5 "${w}/site" - "no export yet" 2>/dev/null || return 1
+  check-jsonschema --schemafile schemas/release-manifest.schema.json "${w}/dist/manifest.json" >/dev/null || return 1
+  jq -e '(.bundles | keys) == ["marketing"] and .skipped == [{"bundle": "game", "reason": "no export yet"}]' \
+    "${w}/dist/manifest.json" >/dev/null || return 1
+  names="$(cut -c 67- "${w}/dist/SHA256SUMS" | tr '\n' ' ')"
+  [ "${names}" = 'manifest.json marketing-site.tar.gz ' ] || return 1
+  # Never a reserved version.json inside a bundle, never a bad version.
+  printf '{}' >"${w}/site/version.json"
+  ! scripts/release/package "${w}/dist2" v0.2.0 "${sha_a}" 5 "${w}/site" - 2>/dev/null || return 1
+  rm -f "${w}/site/version.json"
+  ! scripts/release/package "${w}/dist3" v0.2.0-rc "${sha_a}" 5 "${w}/site" - 2>/dev/null || return 1
+  # Glob characters would turn the deploy's sync --exclude into a pattern.
+  for bad in 'a*.js' 'b?.js' 'c[1].js'; do
+    printf 'x' >"${w}/site/${bad}"
+    if scripts/release/package "${w}/dist-glob" v0.2.0 "${sha_a}" 5 "${w}/site" - 2>/dev/null; then
+      printf 'packaged %s\n' "${bad}"
+      return 1
+    fi
+    rm -f "${w}/site/${bad}"
+  done
+  rm -rf "${w}"
+}
+
+test_release_skill_recommends_patch_by_default() {
+  w="$(world)" || return 1
+  git -C "${w}/repo" commit -q --allow-empty -m "Radar (#7) (#8)"
+  c8="$(git -C "${w}/repo" rev-parse HEAD)"
+  c1="$(git -C "${w}/repo" rev-parse v0.1.1)"
+  here="$(pwd)"
+  prs() {
+    printf '[{"number":8,"title":"Radar (#7)","url":"https://example.invalid/8","mergedAt":"2026-11-27T00:00:00Z","labels":%s,"mergeCommit":{"oid":"%s"}},' "$1" "${c8}"
+    printf '{"number":6,"title":"Old (#5)","url":"https://example.invalid/6","mergedAt":"2026-11-26T00:00:00Z","labels":[{"name":"release:major"}],"mergeCommit":{"oid":"%s"}}]\n' "${c1}"
+  }
+  rec() { (cd "${w}/repo" && PATH="${w}/bin:${PATH}" STUB_DIR="${w}" "${here}/scripts/release/recommend"); }
+  prs '[]' >"${w}/prs.json"
+  rec >"${w}/out.json" || return 1
+  check-jsonschema --schemafile schemas/release-recommendation.schema.json "${w}/out.json" >/dev/null || return 1
+  # #6 is already in v0.1.1 (its major label no longer counts); #8 has no
+  # release label, so the recommendation is a patch.
+  jq -e '.last_release == "v0.1.1" and ([.pull_requests[].number] == [8])
+    and .pull_requests[0].bump == "patch"
+    and .recommendation.bump == "patch" and .recommendation.release == true
+    and .recommendation.next_version == "v0.1.2"' "${w}/out.json" >/dev/null || return 1
+  # Exactly one gh call.
+  calls="$(grep -c . "${w}/gh.log")"
+  [ "${calls}" -eq 1 ] || return 1
+  prs '[{"name":"release:minor"}]' >"${w}/prs.json"
+  rec >"${w}/out.json" || return 1
+  jq -e '.recommendation.bump == "minor" and .recommendation.next_version == "v0.2.0"' "${w}/out.json" >/dev/null || return 1
+  prs '[{"name":"release:major"},{"name":"release:minor"}]' >"${w}/prs.json"
+  rec >"${w}/out.json" || return 1
+  jq -e '.recommendation.bump == "major" and .recommendation.next_version == "v1.0.0"' "${w}/out.json" >/dev/null || return 1
+  printf '[]\n' >"${w}/prs.json"
+  rec >"${w}/out.json" || return 1
+  jq -e '.recommendation.release == false and .recommendation.bump == "patch"' "${w}/out.json" >/dev/null || return 1
+  check-jsonschema --schemafile schemas/release-recommendation.schema.json "${w}/out.json" >/dev/null || return 1
+  rm -rf "${w}"
+}
+
+# workflow_fixture <dir> <name> <yaml>
+workflow_fixture() {
+  mkdir -p "$1"
+  printf '%s\n' "$3" >"$1/$2"
+}
+
+good_deploy='name: deploy
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - run: "true"'
+
+good_release='name: release
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: "true"'
+
+# variant <yaml> <sed script>
+variant() {
+  printf '%s\n' "$1" | sed "$2"
+}
+
+test_production_dispatch_only_rejects_automatic_triggers() {
+  scripts/checks/production-dispatch-only >/dev/null || return 1
+  d="$(mktemp -d)"
+  workflow_fixture "${d}/ok" deploy.yml "${good_deploy}"
+  scripts/checks/production-dispatch-only "${d}/ok" >/dev/null || return 1
+  nl='\
+'
+  i=0
+  for script in \
+    "s/^  workflow_dispatch:\$/  workflow_dispatch:${nl}  push:${nl}    tags: [v1]/" \
+    "s/^  workflow_dispatch:\$/  workflow_call:/" \
+    "s/^  workflow_dispatch:\$/  workflow_dispatch:${nl}  workflow_run:${nl}    workflows: [release]/" \
+    "s/^on:\$/on: [push, workflow_dispatch]/;/^  workflow_dispatch:\$/d" \
+    "s/^on:\$/on: schedule/;/^  workflow_dispatch:\$/d" \
+    "s/environment: production/environment: Production/;s/^  workflow_dispatch:\$/  push:/" \
+    "s/environment: production/environment: \${{ github.ref_name }}/;s/^  workflow_dispatch:\$/  push:/" \
+    "s/environment: production/environment:${nl}      name: production/;s/^  workflow_dispatch:\$/  pull_request_target:/" \
+    "s/environment: production/environment: \"production \"/;s/^  workflow_dispatch:\$/  push:/" \
+    "s/environment: production/environment: prod-copy/;s/^  workflow_dispatch:\$/  push:/" \
+    "s/environment: production/environment: PRODUCTION_2/;s/^  workflow_dispatch:\$/  schedule:/" \
+    "s/^      contents: read\$/      contents: read${nl}      actions: write/"; do
+    i=$((i + 1))
+    variant "${good_deploy}" "${script}" >"${d}/v"
+    mkdir -p "${d}/bad${i}"
+    cp "${d}/v" "${d}/bad${i}/deploy.yml"
+    if cmp -s "${d}/v" "${d}/ok/deploy.yml"; then
+      printf 'variant %s did not change the fixture\n' "${i}"
+      return 1
+    fi
+    if scripts/checks/production-dispatch-only "${d}/bad${i}" >/dev/null; then
+      printf 'accepted variant %s:\n' "${i}"
+      cat "${d}/v"
+      return 1
+    fi
+  done
+  # The refusal names the rule.
+  out="$(scripts/checks/production-dispatch-only "${d}/bad1")" && return 1
+  printf '%s\n' "${out}" | grep -q 'uses the production environment but triggers push, workflow_dispatch' || return 1
+  # Dotfile workflows are checked too, and symlinks are refused.
+  workflow_fixture "${d}/dot" deploy.yml "${good_deploy}"
+  variant "${good_deploy}" "s/^  workflow_dispatch:\$/  push:/" >"${d}/dot/.evil.yml"
+  ! scripts/checks/production-dispatch-only "${d}/dot" >/dev/null || return 1
+  workflow_fixture "${d}/sym" deploy.yml "${good_deploy}"
+  ln -s "${d}/ok/deploy.yml" "${d}/sym/other.yml"
+  ! scripts/checks/production-dispatch-only "${d}/sym" >/dev/null || return 1
+  # A workflow on any other trigger must declare its token permissions.
+  workflow_fixture "${d}/noperm" deploy.yml "${good_deploy}"
+  workflow_fixture "${d}/noperm" r.yml 'on: [push]
+jobs:
+  r:
+    runs-on: ubuntu-latest'
+  out="$(scripts/checks/production-dispatch-only "${d}/noperm")" && return 1
+  printf '%s\n' "${out}" | grep -q 'no explicit permissions' || return 1
+  # A remote reusable workflow is refused even from a dispatch-only workflow.
+  workflow_fixture "${d}/dremote" deploy.yml "${good_deploy}"
+  workflow_fixture "${d}/dremote" other.yml 'on: workflow_dispatch
+jobs:
+  x:
+    uses: someone/else/.github/workflows/deploy.yml@0123456789abcdef0123456789abcdef01234567'
+  ! scripts/checks/production-dispatch-only "${d}/dremote" >/dev/null || return 1
+  # A remote reusable workflow would run in this repository's environments.
+  workflow_fixture "${d}/remote" deploy.yml "${good_deploy}"
+  workflow_fixture "${d}/remote" other.yml 'on: push
+permissions:
+  contents: read
+jobs:
+  x:
+    uses: someone/else/.github/workflows/deploy.yml@0123456789abcdef0123456789abcdef01234567'
+  ! scripts/checks/production-dispatch-only "${d}/remote" >/dev/null || return 1
+  rm -rf "${d}"
+}
+
+test_workflow_permissions_rejects_extra_scopes() {
+  scripts/checks/workflow-permissions >/dev/null || return 1
+  d="$(mktemp -d)"
+  nl='\
+'
+  # perms <deploy-sed> <release-sed> [other.yml]: exit 0 if the check passes.
+  perms() {
+    rm -rf "${d}/w"
+    mkdir -p "${d}/w"
+    variant "${good_deploy}" "$1" >"${d}/w/deploy.yml"
+    variant "${good_release}" "$2" >"${d}/w/release.yml"
+    if [ -n "${3:-}" ]; then printf '%s\n' "$3" >"${d}/w/other.yml"; fi
+    scripts/checks/workflow-permissions "${d}/w" >/dev/null
+  }
+  perms "" "" || return 1
+  ! perms "s/^  contents: read\$/  contents: read${nl}  actions: write/" "" || return 1
+  ! perms "s/^      contents: read\$/      contents: write/" "" || return 1
+  ! perms "s/^      contents: read\$/      contents: read${nl}      pull-requests: read/" "" || return 1
+  ! perms "/^    permissions:\$/,/^      contents: read\$/d" "" || return 1
+  # deploy.yml must really run in production (it can't silently drop it).
+  ! perms "/environment: production/d" "" || return 1
+  ! perms "s/environment: production/environment: staging/" "" || return 1
+  ! perms "" "s/^  contents: write\$/  contents: write${nl}  actions: write/" || return 1
+  ! perms "" "s/^permissions:\$/permissions: write-all/;/^  contents: write\$/d" || return 1
+  ! perms "" "s/^      contents: read\$/      contents: read${nl}      id-token: write/" || return 1
+  # Only release.yml may write contents, and every workflow declares permissions.
+  ! perms "" "" 'on: push
+permissions:
+  contents: write
+jobs: {}' || return 1
+  ! perms "" "" 'on: push
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"' || return 1
+  perms "" "" 'on: push
+permissions:
+  contents: read
+jobs: {}' || return 1
+  # Dotfile workflows are checked too.
+  perms "" "" 'on: push
+permissions:
+  contents: read
+jobs: {}' || return 1
+  printf 'on: push\npermissions: write-all\njobs: {}\n' >"${d}/w/.hidden.yml"
+  ! scripts/checks/workflow-permissions "${d}/w" >/dev/null || return 1
+  rm -f "${d}/w/release.yml"
+  ! scripts/checks/workflow-permissions "${d}/w" >/dev/null || return 1
+  rm -rf "${d}"
+}
+
+# Each site has its own rollback target, checked exactly once, from a fresh
+# work directory as on a new runner, including when the sites serve
+# different versions (a marketing-only release, then a full one).
+test_deploy_preflight_checks_each_site_rollback_target() {
+  w="$(world)" || return 1
+  deploy_ok "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 || return 1
+  # Same version on both sites.
+  rm -rf "${w}/work"
+  run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  for s in marketing game; do
+    n="$(grep -c "$(printf '^pre\trollback-%s\tpass\tv0.1.0 ' "${s}")" "${w}/work/assertions.tsv" || true)"
+    [ "${n}" -eq 1 ] || {
+      printf 'rollback-%s recorded %s times\n' "${s}" "${n}"
+      return 1
+    }
+  done
+  # A marketing-only release: marketing moves on, the game stays on v0.1.0.
+  new_release "${w}" v0.1.2 nogame || return 1
+  rm -rf "${w}/work"
+  deploy_ok "${w}" || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.2 ] && [ "$(served_version "${w}" gbucket)" = v0.1.0 ] || return 1
+  run_deploy "${w}" summary 2>/dev/null || return 1
+  grep -q 'Not in this release (left as they were): game' "${w}/summary.md" || return 1
+  # A full release with the sites on different versions.
+  new_release "${w}" v0.1.3 || return 1
+  rm -rf "${w}/work"
+  run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  grep -q "$(printf '^pre\trollback-marketing\tpass\tv0.1.2 ')" "${w}/work/assertions.tsv" || return 1
+  grep -q "$(printf '^pre\trollback-game\tpass\tv0.1.0 ')" "${w}/work/assertions.tsv" || return 1
+  [ "$(grep -c "$(printf '^pre\trollback-')" "${w}/work/assertions.tsv")" -eq 2 ] || return 1
+  # v0.1.3 breaks Production: each site goes back to its own version.
+  printf 'v0.1.3' >"${w}/broken"
+  ! run_deploy "${w}" apply 2>>"${w}/log" || return 1
+  [ "$(cut -f 1 "${w}/work/outcome")" = rolled-back ] || return 1
+  [ "$(served_version "${w}" mbucket)" = v0.1.2 ] && [ "$(served_version "${w}" gbucket)" = v0.1.0 ] || return 1
+  grep -qx '<p>v0.1.2</p>' "${w}/s3/mbucket/index.html" || return 1
+  gzip -dc "${w}/s3/gbucket/index.wasm" | grep -q 'asm-v0.1.0' || return 1
+  rm -rf "${w}"
+}
+
+# The post-deploy check compares the served bytes, not only the headers: a
+# failed upload that leaves the old file (right type and encoding) is caught.
+test_deploy_postcheck_compares_served_sha256() {
+  w="$(world)" || return 1
+  deploy_ok "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 || return 1
+  # Make the wasm upload of the next deploy a no-op that reports success.
+  awk '{ print } $0 == "  \"s3 cp\")" { print "    case \"$4\" in *gbucket/index.wasm) [ -f \"${STUB_DIR}/drop-wasm\" ] && exit 0 ;; *) ;; esac" }' \
+    "${w}/bin/aws" >"${w}/aws" && mv "${w}/aws" "${w}/bin/aws" && chmod +x "${w}/bin/aws"
+  grep -q 'drop-wasm' "${w}/bin/aws" || return 1
+  : >"${w}/drop-wasm"
+  rm -rf "${w}/work"
+  run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  ! run_deploy "${w}" apply 2>>"${w}/log" || return 1
+  grep -q "$(printf '^post\tupload\tpass')" "${w}/work/assertions.tsv" || return 1
+  grep -q "$(printf '^post\tasset-game-index.wasm\tfail\tgot .200 application/wasm gzip. sha256')" "${w}/work/assertions.tsv" || return 1
+  [ "$(cut -f 1 "${w}/work/outcome")" = rolled-back ] || return 1
+  rm -rf "${w}"
+}
+
+# The summary: a refusal still shows what is live, and the hint fits the outcome.
+test_deploy_summary_fits_the_outcome() {
+  w="$(world)" || return 1
+  deploy_ok "${w}" DEPLOY_FIRST=true DEPLOY_EXACT_VERSION=v0.1.0 || return 1
+  rm -f "${w}/summary.md"
+  run_deploy "${w}" summary 2>/dev/null || return 1
+  grep -q '^## Deploy: deployed' "${w}/summary.md" || return 1
+  grep -q '^| v0.1.1 | ' "${w}/summary.md" || return 1
+  # Refused (Production unhealthy): the live versions are still shown.
+  printf 'v0.1.0' >"${w}/broken"
+  rm -rf "${w}/work" "${w}/summary.md"
+  ! run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  run_deploy "${w}" summary 2>/dev/null || return 1
+  grep -q '^## Deploy: refused' "${w}/summary.md" || return 1
+  grep -q '^| marketing | v0.1.0 | v0.1.1 | v0.1.0 |' "${w}/summary.md" || return 1
+  grep -q '^Nothing was changed' "${w}/summary.md" || return 1
+  # Rolled back: no hint to deploy "previous", which is what is live.
+  rm -f "${w}/broken"
+  printf 'v0.1.1' >"${w}/broken"
+  rm -rf "${w}/work" "${w}/summary.md"
+  run_deploy "${w}" preflight 2>>"${w}/log" || return 1
+  ! run_deploy "${w}" apply 2>>"${w}/log" || return 1
+  run_deploy "${w}" summary 2>/dev/null || return 1
+  grep -q '^## Deploy: rolled-back' "${w}/summary.md" || return 1
+  ! grep -qi 'run Deploy again' "${w}/summary.md" || return 1
+  grep -q 'back on the version it served before' "${w}/summary.md" || return 1
+  rm -rf "${w}"
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/release-recommendation.schema.json",
+  "title": "Release recommendation",
+  "description": "Output of scripts/release/recommend, the release skill's measurement (#31): the PRs merged since the newest release tag, each classified, and the recommended bump.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "last_release", "since", "pull_requests", "recommendation", "how_to_release"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "last_release": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/version" }] },
+    "since": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }] },
+    "pull_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "title", "url", "merged_at", "labels", "bump", "reason"],
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "url": { "type": "string" },
+          "merged_at": { "type": "string" },
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "bump": { "$ref": "#/$defs/bump" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bump", "release", "next_version", "reason"],
+      "properties": {
+        "bump": { "$ref": "#/$defs/bump" },
+        "release": { "type": "boolean" },
+        "next_version": { "$ref": "#/$defs/version" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "how_to_release": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "bump": { "enum": ["patch", "minor", "major"] },
+    "version": { "type": "string", "pattern": "^v(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$" }
+  }
+}

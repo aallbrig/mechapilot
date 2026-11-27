@@ -1,0 +1,84 @@
+#!/bin/sh
+# Measure what the next release will hold and recommend its bump (#31): the
+# release skill's only source of numbers.
+#
+# Usage: scripts/release/recommend   (JSON on stdout: schemas/release-recommendation.schema.json)
+#
+# One gh call lists the PRs merged into main since the newest vX.Y.Z tag
+# (run `git fetch --tags origin` first so the tags are current). A PR whose
+# merge commit the tag already contains is not counted. Each PR is classified
+# by its labels: release:major, release:minor, otherwise patch (the default).
+# The recommendation is the largest bump, and the next version is what
+# release.yml would compute. Nothing is changed and nothing is dispatched.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-release
+. "${here}/lib-release"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+git tag --list >"${work}/tags"
+latest="$(release_tags <"${work}/tags" | tail -n 1)"
+since=""
+tag_sha=""
+if [ -n "${latest}" ]; then
+  tag_sha="$(git rev-parse "refs/tags/${latest}^{commit}")"
+  since="$(git log -1 --format=%cI "${tag_sha}")"
+  # A day of slack: merge times and commit times can differ, and the
+  # ancestry check below removes anything the tag already holds.
+  gh pr list --state merged --base main --limit 200 \
+    --json number,title,labels,mergedAt,mergeCommit,url --search "merged:>=${since%%T*}" >"${work}/prs.json"
+else
+  gh pr list --state merged --base main --limit 200 \
+    --json number,title,labels,mergedAt,mergeCommit,url >"${work}/prs.json"
+fi
+
+# Drop PRs whose merge commit is already in the newest release.
+: >"${work}/released"
+if [ -n "${tag_sha}" ]; then
+  jq -r '.[] | [.number, (.mergeCommit.oid // "")] | @tsv' "${work}/prs.json" >"${work}/oids"
+  tab="$(printf '\t')"
+  while IFS="${tab}" read -r n oid; do
+    check_sha "${oid}"
+    [ "${sha_ok}" = yes ] || continue
+    git cat-file -e "${oid}^{commit}" 2>/dev/null || continue
+    if git merge-base --is-ancestor "${oid}" "${tag_sha}"; then printf '%s\n' "${n}" >>"${work}/released"; fi
+  done <"${work}/oids"
+fi
+
+jq --arg latest "${latest}" --arg since "${since}" --rawfile released "${work}/released" '
+  ($released | split("\n") | map(select(length > 0) | tonumber)) as $done
+  | [.[] | select(.number as $n | $done | index($n) | not)
+     | [.labels[]?.name] as $l
+     | {number, title, url, merged_at: .mergedAt, labels: $l,
+        bump: (if ($l | index("release:major")) then "major" elif ($l | index("release:minor")) then "minor" else "patch" end),
+        reason: (if ($l | index("release:major")) then "labelled release:major"
+                 elif ($l | index("release:minor")) then "labelled release:minor"
+                 else "no release label: patch is the default" end)}]
+  | sort_by(.merged_at) as $prs
+  | ($prs | map(.bump)) as $b
+  | {schema_version: 1,
+     last_release: (if $latest == "" then null else $latest end),
+     since: (if $since == "" then null else $since end),
+     pull_requests: $prs,
+     recommendation: {
+       bump: (if ($b | index("major")) then "major" elif ($b | index("minor")) then "minor" else "patch" end),
+       release: (($prs | length) > 0)}}' "${work}/prs.json" >"${work}/out.json"
+
+bump="$(jq -r .recommendation.bump "${work}/out.json")"
+next="$("${here}/next-version" "${bump}" <"${work}/tags")"
+count="$(jq '.pull_requests | length' "${work}/out.json")"
+if [ "${count}" -eq 0 ]; then
+  reason="no pull request merged since ${latest:-the start}: nothing to release"
+elif [ -z "${latest}" ]; then
+  reason="first release: always v0.1.0"
+else
+  reason="${count} pull request(s) since ${latest}; the largest bump is ${bump}"
+fi
+jq --arg next "${next}" --arg reason "${reason}" '
+  .recommendation += {next_version: $next, reason: $reason}
+  | .how_to_release = "Releases are automatic: release.yml tags every main commit whose ci is green. To bump minor or major, label the PR release:minor or release:major before it merges. Production changes only when a human presses Actions > deploy > Run workflow (docs/RELEASING.md). Agents never dispatch it."' \
+  "${work}/out.json"

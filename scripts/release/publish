@@ -1,0 +1,69 @@
+#!/bin/sh
+# Tag a main commit and publish its GitHub Release (#31).
+#
+# Usage: scripts/release/publish <dist> <version> <commit> <notes.md>
+#
+# <dist> is scripts/release/package's output. Every asset is checked against
+# SHA256SUMS and the manifest is checked against <version> and <commit>
+# first. Then:
+#   1. the tag is created through the API at exactly <commit>. Creating a ref
+#      that already exists fails, so a tag is never moved or reused;
+#   2. the tag is read back and must point at <commit>;
+#   3. the Release is created on that existing tag (--verify-tag), with the
+#      notes and the skipped bundles, and every asset attached.
+# Needs GH_TOKEN with contents: write and GITHUB_REPOSITORY.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-release
+. "${here}/lib-release"
+
+usage='usage: publish <dist> <version> <commit> <notes.md>'
+dist="${1:?${usage}}"
+version="${2:?${usage}}"
+commit="${3:?${usage}}"
+notes="${4:?${usage}}"
+repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is unset}"
+
+fail() {
+  printf 'publish: %s\n' "$*" >&2
+  exit 1
+}
+
+check_tag "${version}"
+[ "${release_tag}" = yes ] || fail "${version} is not a vX.Y.Z version"
+require_sha "${commit}" "commit"
+[ -f "${dist}/SHA256SUMS" ] || fail "no SHA256SUMS in ${dist}"
+[ -f "${notes}" ] || fail "no notes file ${notes}"
+
+set --
+while read -r sum name; do
+  case "${name}" in
+    manifest.json | marketing-site.tar.gz | game-web.tar.gz) ;;
+    *) fail "unexpected asset in SHA256SUMS: ${name}" ;;
+  esac
+  [ -f "${dist}/${name}" ] && [ ! -L "${dist}/${name}" ] || fail "missing asset ${name}"
+  actual="$(sha256_of "${dist}/${name}")"
+  [ "${actual}" = "${sum}" ] || fail "${name} does not match SHA256SUMS"
+  set -- "$@" "${dist}/${name}"
+done <"${dist}/SHA256SUMS"
+jq -e --arg v "${version}" --arg c "${commit}" '.version == $v and .commit == $c and .schema_version == 1' \
+  "${dist}/manifest.json" >/dev/null || fail "manifest.json is not for ${version} at ${commit}"
+
+full_notes="$(mktemp)"
+trap 'rm -f "${full_notes}"' EXIT
+{
+  cat "${notes}"
+  jq -r 'if (.skipped | length) > 0 then "\n### Not in this release\n", (.skipped[] | "- \(.bundle): \(.reason)") else empty end' \
+    "${dist}/manifest.json"
+  printf '\nAssets: manifest.json (every file with its sha256), SHA256SUMS and the bundles. Deploy with Actions, Deploy, Run workflow (docs/RELEASING.md).\n'
+} >"${full_notes}"
+
+gh api --method POST "repos/${repo}/git/refs" -f "ref=refs/tags/${version}" -f "sha=${commit}" >/dev/null ||
+  fail "could not create tag ${version} (does it already exist?)"
+tagged="$(gh api "repos/${repo}/git/ref/tags/${version}" --jq '.object.type + " " + .object.sha')"
+[ "${tagged}" = "commit ${commit}" ] || fail "tag ${version} does not point at ${commit}"
+
+gh release create "${version}" --verify-tag --title "${version}" --notes-file "${full_notes}" "${dist}/SHA256SUMS" "$@"
+printf 'publish: released %s at %s\n' "${version}" "${commit}" >&2

@@ -1,0 +1,121 @@
+name: release
+
+# Automatic: every push to main whose ci run succeeded becomes a patch release
+# (#31). No human presses anything here; Production changes only when the
+# owner presses Deploy (deploy.yml). workflow_run always runs this file from
+# the default branch, and every field of the triggering run reaches a script
+# only through env, never through ${{ }} in a run block.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+# One release at a time, in order; a queued release is never cancelled.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.guard.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+    env:
+      CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          cache: true
+
+      - name: Guard (a green ci push run on a main commit not yet released)
+        id: guard
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          CI_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          CI_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: scripts/release/guard >>"${GITHUB_OUTPUT}"
+
+      - name: Plan the version and notes
+        id: plan
+        if: steps.guard.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/plan "${CI_HEAD_SHA}" "${RUNNER_TEMP}/notes.md" >>"${GITHUB_OUTPUT}"
+
+      - name: Build and package
+        if: steps.guard.outputs.release == 'yes'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          scripts/release/build "${RUNNER_TEMP}/dist" "${VERSION}" "${CI_HEAD_SHA}" "${CI_RUN_ID}"
+          cp "${RUNNER_TEMP}/notes.md" "${RUNNER_TEMP}/dist-notes.md"
+          {
+            cat "${RUNNER_TEMP}/notes.md"
+            jq -r 'if (.skipped | length) > 0 then "\n### Not in this release\n", (.skipped[] | "- \(.bundle): \(.reason)") else empty end' \
+              "${RUNNER_TEMP}/dist/manifest.json"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the release assets
+        if: steps.guard.outputs.release == 'yes'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: |
+            ${{ runner.temp }}/dist/
+            ${{ runner.temp }}/dist-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: build
+    if: needs.build.outputs.release == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          install_args: jq
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/in
+
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: scripts/release/publish "${RUNNER_TEMP}/in/dist" "${VERSION}" "${CI_HEAD_SHA}" "${RUNNER_TEMP}/in/dist-notes.md"

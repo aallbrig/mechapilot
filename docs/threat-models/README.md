@@ -8,6 +8,7 @@ Every attack class that an adversarial review has found in this repository, one 
 - [hooks-and-toolchain.md](hooks-and-toolchain.md): git hooks, pinned toolchain, dev environment
 - [infra.md](infra.md): OpenTofu, scanners, deploy trust, AWS evaluation
 - [site.md](site.md): Marketing Site measurement
+- [release.md](release.md): automatic releases, the Deploy button, rollback, workflow trigger and permission checks
 
 ## Entry format
 

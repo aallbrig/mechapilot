@@ -1,31 +1,43 @@
 #!/bin/sh
-# No production job runs on its own (#64, docs/adr/0001-owner-dispatches-production-deploys.md).
+# No production job runs on its own (#64, #31, docs/adr/0001-owner-dispatches-production-deploys.md).
 # Only the owner can dispatch, because the Agent Loop's token has no Actions
 # and no Workflows permission, so a dispatch is the human gate for Production.
 #
+# Every *.yml and *.yaml directly in the directory is checked, dotfiles
+# included; a symlink or anything but a regular file fails.
+#
 # 1. Every workflow with a job in the production environment is triggered by
 #    workflow_dispatch and nothing else: no push (branch or tag), pull
-#    request, schedule, workflow_run or workflow_call. Environment names are
-#    trimmed and lowercased, and anything that resembles production counts as
-#    production (fail closed): a name containing "prod", an expression
-#    (${{ ... }}), a non-string name, or an environment map with no name.
-# 2. A workflow that runs on anything else can't reach production indirectly:
-#    - its jobs call no reusable workflow outside this repository. A job-level
-#      `uses:` must start with ./, because a remote callee's environment
-#      resolves to this repository's, and a local callee is checked in its own
-#      file (a workflow_call trigger next to production is refused by 1);
-#    - it can't press the button itself. GITHUB_TOKEN with actions: write can
-#      dispatch workflows, and those dispatches start runs. So it declares its
-#      permissions explicitly (the repository default may be write-all), at
-#      the top level or on every job. Every value is read-all, an empty map,
-#      or a map whose actions entry (trimmed, lowercased) is read or none.
-# 3. The trigger is unambiguous: exactly one top-level on key (on, "on", 'on',
+#    request, schedule, workflow_run or workflow_call. Anything that resembles
+#    production counts as production (fail closed): a name that, lowercased
+#    and stripped of everything but letters and digits, contains "prod"; an
+#    expression (${{ ... }}); a non-string name; an environment map with no
+#    name.
+# 2. (That deploy.yml's job really is in production is checked by
+#    scripts/checks/workflow-permissions, so this check also judges trees
+#    without a deploy workflow, such as the Supervisor's view of origin/main.)
+# 3. No workflow can press the button itself. GITHUB_TOKEN with actions: write
+#    can dispatch workflows, and those dispatches start runs. In every
+#    workflow, dispatch-only or not, every declared permissions value is
+#    read-all, an empty map, or a map whose actions entry (trimmed,
+#    lowercased) is read or none, or that has no actions entry. A workflow
+#    that runs on anything but workflow_dispatch also declares its
+#    permissions explicitly (the repository default may be write-all), at the
+#    top level or on every job.
+# 4. No job in any workflow calls a reusable workflow outside this
+#    repository: a job-level `uses:` must start with ./, because a remote
+#    callee's environment resolves to this repository's. A local callee is
+#    checked in its own file (a workflow_call trigger next to production is
+#    refused by 1).
+# 5. The trigger is unambiguous: exactly one top-level on key (on, "on", 'on',
 #    or a YAML 1.1 true that some parsers read for an unquoted on).
 #
 # Usage: scripts/checks/production-dispatch-only [workflows-dir]
 #   default: .github/workflows. The Supervisor's preflight runs it on
 #   origin/main's workflows, which are the ones GitHub runs.
 set -eu
+LC_ALL=C
+export LC_ALL
 
 dir="${1:-.github/workflows}"
 [ -d "${dir}" ] || {
@@ -35,10 +47,20 @@ dir="${1:-.github/workflows}"
 
 failed=0
 checked=0
-for f in "${dir}"/*.yml "${dir}"/*.yaml; do
-  [ -f "${f}" ] || continue
+production_jobs=0
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+find "${dir}/." ! -name . -prune \( -name '*.yml' -o -name '*.yaml' \) -print | sort >"${list}"
+
+while IFS= read -r f; do
+  shown="${dir}/${f##*/}"
   if [ -L "${f}" ]; then
-    printf 'production-dispatch-only: %s is a symlink\n' "${f}"
+    printf 'production-dispatch-only: %s is a symlink\n' "${shown}"
+    failed=1
+    continue
+  fi
+  if [ ! -f "${f}" ]; then
+    printf 'production-dispatch-only: %s is not a regular file\n' "${shown}"
     failed=1
     continue
   fi
@@ -46,24 +68,27 @@ for f in "${dir}"/*.yml "${dir}"/*.yaml; do
   # Textually, so that a parser keeping only the last duplicate can't hide one.
   on_keys="$(grep -cE "^([\"']?)(on|true|True|TRUE|yes|Yes|YES|y|Y)([\"']?)[[:space:]]*:" "${f}" || true)"
   if [ "${on_keys}" -gt 1 ]; then
-    printf 'production-dispatch-only: %s: %s top-level trigger keys (on, true); exactly one is allowed\n' "${f}" "${on_keys}"
+    printf 'production-dispatch-only: %s: %s top-level trigger keys (on, true); exactly one is allowed\n' "${shown}" "${on_keys}"
     failed=1
     continue
   fi
   json="$(yq -o=json '.' "${f}")" || {
-    printf 'production-dispatch-only: %s is not valid YAML\n' "${f}"
+    printf 'production-dispatch-only: %s is not valid YAML\n' "${shown}"
     failed=1
     continue
   }
-  verdict="$(printf '%s\n' "${json}" | jq -r '
+  prod_count="$(printf '%s\n' "${json}" | jq -r '
     def norm: tostring | ascii_downcase | gsub("^\\s+|\\s+$"; "");
-    def prodlike: test("prod") or test("\\$\\{\\{");
+    def prodlike: test("\\$\\{\\{") or (gsub("[^a-z0-9]"; "") | test("prod"));
+    [(.jobs // {}) | to_entries[] | .value | select(type == "object" and has("environment")) | .environment
+      | if type == "object" then (if has("name") and (.name | type) == "string" then .name | norm else "?prod" end)
+        elif type == "string" then norm
+        else "?prod" end
+      | select(prodlike)] | length')"
+  production_jobs=$((production_jobs + prod_count))
+  verdict="$(printf '%s\n' "${json}" | jq -r --argjson prod "${prod_count}" '
+    def norm: tostring | ascii_downcase | gsub("^\\s+|\\s+$"; "");
     ((.jobs // {}) | to_entries | map(.value)) as $jobs
-    | [$jobs[] | select(has("environment")) | .environment
-        | if type == "object" then (if has("name") and (.name | type) == "string" then .name | norm else "?prod" end)
-          elif type == "string" then norm
-          else "?prod" end
-        | select(prodlike)] as $prod
     | ([keys[] | select(. == "on" or . == "true")] | length) as $on_count
     | (.on // .true // null) as $on
     | ($on | if type == "string" then [.] elif type == "array" then . elif type == "object" then keys else [] end) as $triggers
@@ -74,22 +99,22 @@ for f in "${dir}"/*.yml "${dir}"/*.yaml; do
           ([to_entries[] | select(.key | norm == "actions") | .value | norm] | any(. != "read" and . != "none"))
         else true end;
     if $on_count > 1 then "both on and true keys (exactly one trigger key is allowed)"
-    elif ($prod | length) > 0 and ($dispatch_only | not) then
+    elif $prod > 0 and ($dispatch_only | not) then
       "uses the production environment but triggers \($triggers | join(", ")) (only workflow_dispatch is allowed)"
-    elif $dispatch_only then "ok"
-    elif ([$jobs[] | select(has("uses")) | .uses | tostring | gsub("^\\s+"; "") | select(startswith("./") | not)] | length) > 0 then
-      "calls a reusable workflow outside this repository (\([$jobs[] | .uses // empty | tostring] | join(", "))); only ./ callees are allowed unless the workflow is dispatch-only"
-    elif (has("permissions") | not) and ([$jobs[] | select(has("permissions") | not)] | length) > 0 then
-      "no explicit permissions (the repository default could let GITHUB_TOKEN dispatch Deploy)"
-    elif ([(if has("permissions") then .permissions else empty end), ($jobs[] | select(has("permissions")) | .permissions)]
+    elif ([$jobs[] | select(type == "object" and has("uses")) | .uses | tostring | gsub("^\\s+"; "") | select(startswith("./") | not)] | length) > 0 then
+      "calls a reusable workflow outside this repository (\([$jobs[] | .uses // empty | tostring] | join(", "))); only ./ callees are allowed"
+    elif ([(if has("permissions") then .permissions else empty end), ($jobs[] | select(type == "object" and has("permissions")) | .permissions)]
         | any(grants_dispatch)) then
       "actions write, write-all or an unrecognised permissions value (GITHUB_TOKEN could dispatch Deploy)"
+    elif $dispatch_only then "ok"
+    elif (has("permissions") | not) and ([$jobs[] | select(type != "object" or (has("permissions") | not))] | length) > 0 then
+      "no explicit permissions (the repository default could let GITHUB_TOKEN dispatch Deploy)"
     else "ok" end')"
   if [ "${verdict}" != ok ]; then
-    printf 'production-dispatch-only: %s: %s\n' "${f}" "${verdict}"
+    printf 'production-dispatch-only: %s: %s\n' "${shown}" "${verdict}"
     failed=1
   fi
-done
+done <"${list}"
 
 if [ "${failed}" -ne 0 ]; then exit 1; fi
-printf 'production-dispatch-only: ok (%s workflows)\n' "${checked}"
+printf 'production-dispatch-only: ok (%s workflows, %s production job(s))\n' "${checked}" "${production_jobs}"

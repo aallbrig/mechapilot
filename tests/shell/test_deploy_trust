@@ -2,9 +2,8 @@
 # Tests for infra/modules/github-deploy-trust: the deploy role's trust policy.
 # The module's policy_json output is rendered offline with `tofu console` (it
 # has no provider, and console only evaluates expressions), then candidate OIDC tokens
-# are judged the way IAM would: aud by StringEquals, sub by StringLike and
-# StringNotLike, where `*` (any run of characters, ":" included) and `?` (one
-# character) are the only wildcards. The numeric IDs below are fakes.
+# are judged the way IAM would: aud and sub by StringEquals, an exact match
+# with no wildcards. The numeric IDs below are fakes.
 # Subjects use the repo's customization: include_claim_keys repo, ref,
 # environment, with immutable (owner@id/repo@id) subjects.
 
@@ -40,87 +39,76 @@ sub_key='token.actions.githubusercontent.com:sub'
 aud_key='token.actions.githubusercontent.com:aud'
 
 # The policy must have exactly the fail-closed shape: one Allow statement for
-# sts:AssumeRoleWithWebIdentity whose only conditions are aud (StringEquals),
-# one sub pattern (StringLike) and the double-environment guard (StringNotLike).
+# sts:AssumeRoleWithWebIdentity whose only condition operator is StringEquals,
+# on exactly aud and sub (no StringLike, so no wildcards anywhere).
 shape_ok() {
   printf '%s' "$1" | jq -e --arg sub "${sub_key}" --arg aud "${aud_key}" '
     (.Statement | length) == 1
     and (.Statement[0] | .Effect == "Allow"
       and .Action == "sts:AssumeRoleWithWebIdentity"
-      and (.Condition | keys) == ["StringEquals", "StringLike", "StringNotLike"]
-      and .Condition.StringEquals == {($aud): "sts.amazonaws.com"}
-      and (.Condition.StringLike | keys) == [$sub]
-      and (.Condition.StringLike[$sub] | type) == "string"
-      and .Condition.StringNotLike == {($sub): "*:environment:*:environment:*"})' >/dev/null
-}
-
-# glob_match <IAM pattern> <value>: StringLike semantics via an anchored ERE
-# (escape every ERE metacharacter, then * -> .* and ? -> .).
-glob_match() {
-  re="$(printf '%s' "$1" | sed -e 's/[][\\.^$+(){}|]/\\&/g' -e 's/[*]/.*/g' -e 's/[?]/./g')"
-  printf '%s\n' "$2" | grep -qE "^${re}\$"
+      and (.Condition | keys) == ["StringEquals"]
+      and (.Condition.StringEquals | keys) == ([$aud, $sub] | sort)
+      and .Condition.StringEquals[$aud] == "sts.amazonaws.com"
+      and (.Condition.StringEquals[$sub] | type) == "string"
+      and (.Condition.StringEquals[$sub] | test("[*?]") | not))' >/dev/null
 }
 
 # allows <policy> <aud> <sub>: exit 0 if IAM would let this token assume the role.
 allows() {
   shape_ok "$1" || return 1
   aud="$(printf '%s' "$1" | jq -r --arg k "${aud_key}" '.Statement[0].Condition.StringEquals[$k]')"
-  like="$(printf '%s' "$1" | jq -r --arg k "${sub_key}" '.Statement[0].Condition.StringLike[$k]')"
-  notlike="$(printf '%s' "$1" | jq -r --arg k "${sub_key}" '.Statement[0].Condition.StringNotLike[$k]')"
-  [ "$2" = "${aud}" ] || return 1
-  glob_match "${like}" "$3" || return 1
-  ! glob_match "${notlike}" "$3"
+  sub="$(printf '%s' "$1" | jq -r --arg k "${sub_key}" '.Statement[0].Condition.StringEquals[$k]')"
+  [ "$2" = "${aud}" ] && [ "$3" = "${sub}" ]
 }
 
 prefix='repo:octo@11/game@22'
 aud='sts.amazonaws.com'
 
-test_deploy_trust_allows_release_tag_in_production() {
-  p="$(render_trust)" || return 1
-  allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1.2.3:environment:production"
-}
-
-test_deploy_trust_rejects_branch_ref() {
+# #31: deploys run from main in the production environment, and nothing else
+# (no tag, no other branch, no pull request, no other environment) may assume
+# the role.
+test_deploy_role_trusts_main_production_only() {
   p="$(render_trust)" || return 1
   shape_ok "${p}" || return 1
-  ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:production" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/v1.2.3:environment:production"
-}
-
-test_deploy_trust_rejects_environment_without_tag() {
-  p="$(render_trust)" || return 1
-  shape_ok "${p}" || return 1
-  ! allows "${p}" "${aud}" "${prefix}:environment:production" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/pull/7/merge:environment:production"
-}
-
-test_deploy_trust_rejects_tag_without_environment() {
-  p="$(render_trust)" || return 1
-  shape_ok "${p}" || return 1
-  ! allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1.2.3" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1.2.3:environment:staging" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1.2.3:environment:production-copy"
+  [ "$(printf '%s' "${p}" | jq -r --arg k "${sub_key}" '.Statement[0].Condition.StringEquals[$k]')" = \
+    "${prefix}:ref:refs/heads/main:environment:production" ] || return 1
+  allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:production" || return 1
+  for s in \
+    "${prefix}:ref:refs/tags/v1.2.3:environment:production" \
+    "${prefix}:ref:refs/heads/main2:environment:production" \
+    "${prefix}:ref:refs/heads/feature:environment:production" \
+    "${prefix}:ref:refs/heads/main/x:environment:production" \
+    "${prefix}:ref:refs/pull/7/merge:environment:production" \
+    "${prefix}:ref:refs/heads/main:environment:staging" \
+    "${prefix}:ref:refs/heads/main:environment:production-copy" \
+    "${prefix}:ref:refs/heads/main" \
+    "${prefix}:environment:production"; do
+    if allows "${p}" "${aud}" "${s}"; then
+      printf 'trusted: %s\n' "${s}"
+      return 1
+    fi
+  done
 }
 
 # A workflow chooses its environment name, and a missing environment is created
-# unprotected. Names with ":" must not splice a fake tag or environment in.
+# unprotected. Names with ":" must not splice a fake ref or environment in.
 test_deploy_trust_rejects_colon_tricks_in_environment_names() {
   p="$(render_trust)" || return 1
   shape_ok "${p}" || return 1
-  ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:production:ref:refs/tags/v1" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:x:ref:refs/tags/v1:environment:production" &&
-    ! allows "${p}" "${aud}" "${prefix}:ref:refs/tags/v1:environment:x:environment:production" &&
+  ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:production:ref:refs/heads/main" &&
+    ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/x:environment:x:ref:refs/heads/main:environment:production" &&
+    ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:x:environment:production" &&
     ! allows "${p}" "${aud}" "${prefix}:ref:refs/heads/main:environment:production:environment:production"
 }
 
 test_deploy_trust_rejects_other_key_orders_repositories_and_audiences() {
   p="$(render_trust)" || return 1
   shape_ok "${p}" || return 1
-  ! allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/tags/v1" &&
-    ! allows "${p}" "${aud}" "repo:octo@11/other@33:ref:refs/tags/v1:environment:production" &&
-    ! allows "${p}" "${aud}" "repo:octo/game:ref:refs/tags/v1:environment:production" &&
-    ! allows "${p}" "${aud}" "repo:evil@11/game@22:ref:refs/tags/v1:environment:production" &&
-    ! allows "${p}" "https://example.invalid" "${prefix}:ref:refs/tags/v1:environment:production"
+  ! allows "${p}" "${aud}" "${prefix}:environment:production:ref:refs/heads/main" &&
+    ! allows "${p}" "${aud}" "repo:octo@11/other@33:ref:refs/heads/main:environment:production" &&
+    ! allows "${p}" "${aud}" "repo:octo/game:ref:refs/heads/main:environment:production" &&
+    ! allows "${p}" "${aud}" "repo:evil@11/game@22:ref:refs/heads/main:environment:production" &&
+    ! allows "${p}" "https://example.invalid" "${prefix}:ref:refs/heads/main:environment:production"
 }
 
 test_deploy_trust_is_what_the_prod_role_uses() {

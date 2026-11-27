@@ -1425,7 +1425,9 @@ jobs:
     secrets: inherit' || return 1
   out="$("${check}" "${d}/remote")" && return 1
   printf '%s\n' "${out}" | grep -q 'calls a reusable workflow outside this repository' || return 1
-  # A local callee is checked in its own file; a dispatch-only caller may call anything.
+  # A local callee is checked in its own file. A remote callee is refused even
+  # from a dispatch-only caller (#31, the stricter rule): its jobs would run in
+  # this repository's production environment with code nobody here reviewed.
   workflow "${d}/local" r.yml 'on: push
 permissions: {contents: read}
 jobs:
@@ -1436,7 +1438,7 @@ jobs:
 jobs:
   d:
     uses: someone/else/.github/workflows/deploy.yml@main' || return 1
-  "${check}" "${d}/dispatch-remote" >/dev/null || return 1
+  ! "${check}" "${d}/dispatch-remote" >/dev/null || return 1
   # Names and values are trimmed and lowercased, and anything production-like,
   # or unnamed, counts as production.
   for env in '{name: " production"}' 'Production-2' 'PROD' '{url: "https://mechafighter.com/"}' '[production]'; do
