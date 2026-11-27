@@ -113,11 +113,12 @@ func _on_run_started(_level_number: int) -> void:
 
 
 func _on_run_ended(summary: RunSummary) -> void:
-	if summary.victory != victory:
+	# The rules enter Game Over or Victory before announcing the Run's end, so
+	# only the screen on show takes it: a hidden screen never keeps a stale Run.
+	if summary.victory != victory or not is_visible_in_tree():
 		return
 	_summary = summary
-	if is_visible_in_tree():
-		_start_tally()
+	_start_tally()
 
 
 func _on_scoreboard_qualified(_rank: int) -> void:
@@ -129,6 +130,7 @@ func _on_scoreboard_qualified(_rank: int) -> void:
 
 func _on_enter() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	_summary = null
 	_qualified = false
 	_submitted = false
 	_start_tally()

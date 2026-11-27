@@ -4,11 +4,18 @@ extends UiScreen
 ## tutorial hints, rumble and touch stick opacity, plus reset to defaults.
 ## Every change is an intent (profile.settings_change_requested); the shown
 ## values always come from profile.settings_changed, so the screen shows what
-## was really stored. Opened from the Title and from Pause.
+## was really stored. Opened from the Title and from Pause. Everything,
+## Reset and Back included, fits on screen from a phone in portrait to 4K.
 
 const VOLUME_STEP: float = 0.05
 const OPACITY_STEP: float = 0.05
-const SLIDER_SIZE: Vector2 = Vector2(UiBuild.COLUMN_WIDTH, 36.0)
+const ITEM_WIDTH: float = 300.0
+const SLIDER_SIZE: Vector2 = Vector2(ITEM_WIDTH, 36.0)
+const ACTION_WIDTH: float = 240.0
+const COLUMN_GAP: int = 32
+## Wider than tall: the sliders and toggles sit side by side (so the panel fits
+## a 640 UI pixel high landscape screen); otherwise they stack.
+const SIDE_BY_SIDE: int = 2
 
 var _shown: GameSettings = GameSettings.new()
 var _master: HSlider
@@ -20,46 +27,48 @@ var _hints: CheckButton
 var _rumble: CheckButton
 var _opacity: HSlider
 var _back: Button
+var _columns: GridContainer
 
 
 func _ready() -> void:
-	var margin: MarginContainer = UiBuild.full_margin()
-	add_child(margin)
-	var scroll: ScrollContainer = ScrollContainer.new()
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.follow_focus = true
-	margin.add_child(scroll)
-	var center: CenterContainer = CenterContainer.new()
-	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.add_child(center)
-	var panel: PanelContainer = PanelContainer.new()
-	panel.theme_type_variation = &"MenuPanel"
-	center.add_child(panel)
-	var content: VBoxContainer = UiBuild.column(10)
-	panel.add_child(content)
+	var content: VBoxContainer = UiBuild.centered_panel(self)
+	content.add_theme_constant_override(&"separation", UiBuild.GAP)
 	content.add_child(UiBuild.label("SETTINGS", &"HeaderLabel"))
-	_master = _slider(content, "Master volume", 0.0, 1.0, VOLUME_STEP)
-	_music = _slider(content, "Music volume", 0.0, 1.0, VOLUME_STEP)
-	_sfx = _slider(content, "SFX volume", 0.0, 1.0, VOLUME_STEP)
-	_shake = _toggle(content, "Screen shake")
-	_reduced_motion = _toggle(content, "Reduced motion")
-	_hints = _toggle(content, "Tutorial hints")
-	_rumble = _toggle(content, "Rumble")
+	_columns = GridContainer.new()
+	_columns.add_theme_constant_override(&"h_separation", COLUMN_GAP)
+	_columns.add_theme_constant_override(&"v_separation", UiBuild.GAP)
+	_columns.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(_columns)
+	var sliders: VBoxContainer = UiBuild.column(6)
+	var toggles: VBoxContainer = UiBuild.column(6)
+	_columns.add_child(sliders)
+	_columns.add_child(toggles)
+	_master = _slider(sliders, "Master volume", 0.0, 1.0, VOLUME_STEP)
+	_music = _slider(sliders, "Music volume", 0.0, 1.0, VOLUME_STEP)
+	_sfx = _slider(sliders, "SFX volume", 0.0, 1.0, VOLUME_STEP)
 	_opacity = _slider(
-		content,
+		sliders,
 		"Touch stick opacity",
 		GameSettings.MIN_TOUCH_STICK_OPACITY,
 		GameSettings.MAX_TOUCH_STICK_OPACITY,
 		OPACITY_STEP
 	)
-	var reset: Button = UiBuild.button("RESET TO DEFAULTS")
+	_shake = _toggle(toggles, "Screen shake")
+	_reduced_motion = _toggle(toggles, "Reduced motion")
+	_hints = _toggle(toggles, "Tutorial hints")
+	_rumble = _toggle(toggles, "Rumble")
+	var actions: HBoxContainer = UiBuild.row()
+	content.add_child(actions)
+	var reset: Button = UiBuild.button("RESET")
+	reset.custom_minimum_size.x = ACTION_WIDTH
 	_wire(reset.pressed.connect(_on_reset))
-	content.add_child(reset)
+	actions.add_child(reset)
 	_back = UiBuild.button("BACK")
+	_back.custom_minimum_size.x = ACTION_WIDTH
 	_wire(_back.pressed.connect(request_back))
-	content.add_child(_back)
+	actions.add_child(_back)
 	juice(_back, UiCue.Cue.BACK)
+	_fit()
 	for check: CheckButton in [_shake, _reduced_motion, _hints, _rumble]:
 		_wire(check.toggled.connect(_on_changed.unbind(1)))
 	for slider: HSlider in [_master, _music, _sfx, _opacity]:
@@ -69,6 +78,21 @@ func _ready() -> void:
 
 func default_focus() -> Control:
 	return _master
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_RESIZED and _columns != null:
+		_fit()
+
+
+## Two columns when the screen is wider than tall, one otherwise.
+func _fit() -> void:
+	_columns.columns = SIDE_BY_SIDE if size.x > size.y else 1
+
+
+## How many columns the controls use now.
+func column_count() -> int:
+	return _columns.columns
 
 
 func handle_cancel() -> bool:
@@ -146,7 +170,7 @@ func _toggle(parent: Control, text: String) -> CheckButton:
 	var check: CheckButton = CheckButton.new()
 	check.text = text
 	check.focus_mode = Control.FOCUS_ALL
-	check.custom_minimum_size = Vector2(UiBuild.COLUMN_WIDTH, UiBuild.BUTTON_HEIGHT)
+	check.custom_minimum_size = Vector2(ITEM_WIDTH, UiBuild.BUTTON_HEIGHT)
 	parent.add_child(check)
 	return check
 

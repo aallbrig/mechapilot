@@ -2,7 +2,8 @@ class_name Hud
 extends UiScreen
 ## The in-play HUD (#73): Armor bar, lives icons, score with a punch, the
 ## combo, the Boss Gauge and, in the Boss Fight, the boss's health bar. Plus
-## the on-screen pause button for touch, and the pause keys (Esc, P, Start).
+## the on-screen pause button for touch. The pause keys (Esc, P, Start) are
+## routed by UiRoot.
 ## Everything but the pause button lets the pointer through to the game.
 
 const BAR_SIZE: Vector2 = Vector2(220.0, 24.0)
@@ -89,6 +90,11 @@ func lives_shown() -> int:
 	return _lives.lives()
 
 
+## True while the Boss Gauge is shown (not behind the Level Intro card).
+func gauge_shown() -> bool:
+	return _gauge_row.visible
+
+
 ## Boss Gauge fill, 0 to 1.
 func gauge_ratio() -> float:
 	return _gauge_bar.ratio if _gauge_row.visible else 0.0
@@ -104,14 +110,15 @@ func boss_ratio() -> float:
 	return _boss_bar.ratio
 
 
+## Asks to pause (the pause keys reach this through UiRoot, which makes one
+## decision per key press).
+func request_pause() -> void:
+	_request_pause()
+
+
 ## The on-screen pause button (touch and mouse).
 func pause_button() -> Button:
 	return _pause_button
-
-
-func _unhandled_input(event: InputEvent) -> void:
-	if is_visible_in_tree() and UiInput.is_pause(event):
-		_request_pause()
 
 
 func _subscribe() -> void:
@@ -119,6 +126,7 @@ func _subscribe() -> void:
 		[
 			_bus.run.run_started.connect(_on_run_started),
 			_bus.run.level_intro_started.connect(_on_level_intro_started),
+			_bus.run.level_intro_completed.connect(_on_level_intro_completed),
 			_bus.run.score_changed.connect(_on_score_changed),
 			_bus.run.combo_changed.connect(_on_combo_changed),
 			_bus.run.boss_gauge_changed.connect(_on_boss_gauge_changed),
@@ -152,7 +160,12 @@ func _on_run_started(_level_number: int) -> void:
 func _on_level_intro_started(
 	_level_number: int, _level_name: String, _objective: String, _duration: float
 ) -> void:
+	# The Level Intro card owns the middle of the screen: the gauge waits.
 	_boss_row.visible = false
+	_gauge_row.visible = false
+
+
+func _on_level_intro_completed(_level_number: int) -> void:
 	_gauge_row.visible = true
 
 

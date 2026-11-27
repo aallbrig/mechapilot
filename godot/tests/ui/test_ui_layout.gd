@@ -133,3 +133,50 @@ func test_theme_uses_bundled_ofl_fonts() -> void:
 	var _one_theme: GdUnitAssert = assert_str(root_theme.resource_path).is_equal(
 		"res://ui/theme/theme.tres"
 	)
+
+
+## The OFL requires each font's licence to ship with it: the Web export's
+## include filter must cover both licence files (and CREDITS.md, which the
+## Credits screen reads).
+func test_export_includes_font_licences() -> void:
+	var presets: ConfigFile = ConfigFile.new()
+	var loaded: Error = presets.load("res://export_presets.cfg")
+	var filter: String = presets.get_value("preset.0", "include_filter", "")
+	var patterns: PackedStringArray = []
+	for pattern: String in filter.split(","):
+		var _added: bool = patterns.append(pattern.strip_edges())
+	var uncovered: Array[String] = []
+	for path: String in [
+		"ui/theme/fonts/Orbitron-OFL.txt", "ui/theme/fonts/ChakraPetch-OFL.txt", "CREDITS.md"
+	]:
+		var covered: bool = false
+		for pattern: String in patterns:
+			covered = covered or path.match(pattern)
+		if not covered:
+			uncovered.append(path)
+	var _read: GdUnitAssert = assert_int(loaded).is_equal(OK)
+	var _web: GdUnitAssert = assert_str(presets.get_value("preset.0", "platform", "")).is_equal(
+		"Web"
+	)
+	var _shipped: GdUnitAssert = assert_array(uncovered).is_empty()
+
+
+func test_settings_fit_1080p_with_reset_and_back_visible() -> void:
+	var hidden: Array[String] = []
+	var columns: Array[int] = []
+	for screen_size: Vector2 in [UiHarness.LANDSCAPE, UiHarness.PORTRAIT]:
+		var h: UiHarness = UiHarness.new(screen_size)
+		add_child(h.host)
+		h.reach_title()
+		h.ui.open(&"settings")
+		await await_idle_frame()
+		await await_idle_frame()
+		var settings: SettingsScreen = h.screen(&"Settings") as SettingsScreen
+		columns.append(settings.column_count())
+		var bounds: Rect2 = Rect2(Vector2.ZERO, screen_size)
+		for control: Control in settings.juiced_controls():
+			if control is Button and not bounds.encloses(control.get_global_rect()):
+				hidden.append("%s %s" % [screen_size, (control as Button).text])
+		h.dispose()
+	var _two_then_one: GdUnitAssert = assert_array(columns).is_equal([2, 1])
+	var _all_visible: GdUnitAssert = assert_array(hidden).is_empty()

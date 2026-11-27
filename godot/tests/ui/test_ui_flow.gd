@@ -204,3 +204,51 @@ func test_play_again_starts_new_run() -> void:
 		[&"Hud", &"LevelIntro"]
 	)
 	var _fresh: GdUnitAssert = assert_str((_h.screen(&"Hud") as Hud).score_text()).is_equal("0")
+
+
+func test_game_over_saves_with_production_listener_order() -> void:
+	var h: UiHarness = UiHarness.new(UiHarness.LANDSCAPE, true, true)
+	add_child(h.host)
+	h.reach_title()
+	h.bus.flow.announce_play_requested()
+	h.reach_game_over(2)
+	var game_over: RunEndScreen = h.screen(&"GameOver") as RunEndScreen
+	var asking: bool = game_over.is_asking_initials()
+	game_over.picker().type_letter("Q")
+	game_over.picker().submit()
+	var saved: Array[ScoreEntry] = h.scoreboard.entries()
+	var shown: Array[StringName] = h.ui.visible_screens()
+	h.dispose()
+	var _asked: GdUnitAssert = assert_bool(asking).is_true()
+	var _saved: GdUnitAssert = assert_int(saved.size()).is_equal(1)
+	var _initials: GdUnitAssert = assert_str(saved[0].initials).is_equal("QAA")
+	var _board: GdUnitAssert = assert_array(shown).is_equal([&"Scoreboard"])
+
+
+func test_run_end_screens_take_only_their_own_run_and_reset_on_enter() -> void:
+	_h.reach_title()
+	var game_over: RunEndScreen = _h.screen(&"GameOver") as RunEndScreen
+	var victory: RunEndScreen = _h.screen(&"Victory") as RunEndScreen
+	# A Victory summary never fills the Game Over screen, and the reverse.
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.BOSS_FIGHT, GameState.Phase.GAME_OVER)
+	_h.bus.run.announce_run_ended(RunSummary.new(5000, 6, 60.0, 9, true))
+	var game_over_rows: int = game_over.tally().lines().size()
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.VICTORY)
+	_h.bus.run.announce_run_ended(RunSummary.new(5000, 3, 60.0, 9, false))
+	var victory_rows: int = victory.tally().lines().size()
+	# A Run that placed asks for initials; entering again for a Run that did
+	# not place must not ask again.
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.VICTORY, GameState.Phase.GAME_OVER)
+	_h.bus.run.announce_run_ended(RunSummary.new(7000, 2, 60.0, 9, false))
+	_h.bus.profile.announce_scoreboard_qualified(0)
+	var first_asks: bool = game_over.is_asking_initials()
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.LEVEL_INTRO)
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.GAME_OVER)
+	# A score of 0 never places, so the real Scoreboard stays quiet.
+	_h.bus.run.announce_run_ended(RunSummary.new(0, 1, 5.0, 0, false))
+	var second_asks: bool = game_over.is_asking_initials()
+	var _own_only: GdUnitAssert = assert_int(game_over_rows).is_equal(0)
+	var _victory_own_only: GdUnitAssert = assert_int(victory_rows).is_equal(0)
+	var _asked: GdUnitAssert = assert_bool(first_asks).is_true()
+	var _reset: GdUnitAssert = assert_bool(second_asks).is_false()
+	var _offers: GdUnitAssert = assert_bool(game_over.play_again_button().visible).is_true()

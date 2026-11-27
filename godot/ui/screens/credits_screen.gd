@@ -2,7 +2,11 @@ class_name CreditsScreen
 extends UiScreen
 ## Credits (#73): every asset and its licence, scrolling. The list is read from
 ## res://CREDITS.md, the same table the asset-credits check reads, so the
-## screen can never drift from it (the Web export includes the file).
+## screen can never drift from it (the Web export includes the file). Each
+## credit shows the asset's name, its author and its licence (file paths are
+## for the asset-credits check, not for players). The full SIL Open Font
+## Licence of each bundled font follows the list: the OFL requires it to ship
+## with the font, and the Web export includes those files too.
 
 const SCROLL_SPEED: float = 40.0
 const SCROLL_START_DELAY: float = 1.5
@@ -13,6 +17,7 @@ var _list: VBoxContainer
 var _back: Button
 var _scroll_tween: Tween
 var _credits: Array[PackedStringArray] = []
+var _licences: PackedStringArray = []
 
 
 func _ready() -> void:
@@ -40,6 +45,10 @@ func _ready() -> void:
 			&"HintLabel"
 		)
 	)
+	_list.add_child(UiBuild.label("FONT LICENCES", &"ComboLabel"))
+	_licences = read_font_licences()
+	for licence: String in _licences:
+		_list.add_child(UiBuild.paragraph(licence, &"HintLabel"))
 	_back = UiBuild.button("BACK")
 	if _back.pressed.connect(request_back) != OK:
 		push_error("CreditsScreen: could not wire Back")
@@ -59,6 +68,25 @@ func handle_cancel() -> bool:
 ## The credits shown: [asset, source, licence] per row of CREDITS.md.
 func credits() -> Array[PackedStringArray]:
 	return _credits.duplicate()
+
+
+## The full text of each bundled font's licence (SIL OFL 1.1).
+func licence_texts() -> PackedStringArray:
+	return _licences.duplicate()
+
+
+## Reads the OFL text shipped next to each bundled font.
+static func read_font_licences() -> PackedStringArray:
+	var texts: PackedStringArray = []
+	for file: FileAccess in [
+		FileAccess.open("res://ui/theme/fonts/Orbitron-OFL.txt", FileAccess.READ),
+		FileAccess.open("res://ui/theme/fonts/ChakraPetch-OFL.txt", FileAccess.READ),
+	]:
+		if file == null:
+			push_error("CreditsScreen: a font licence file is missing")
+			continue
+		var _added: bool = texts.append(file.get_as_text().strip_edges())
+	return texts
 
 
 ## The rows of the asset table in res://CREDITS.md, as plain text cells.
@@ -85,10 +113,20 @@ static func parse_row(line: String) -> PackedStringArray:
 	if cells.size() != 3 or cells[0].strip_edges() == "Asset":
 		return PackedStringArray()
 	var plain: PackedStringArray = []
-	var links: RegEx = RegEx.create_from_string("\\[([^\\]]*)\\]\\([^)]*\\)")
 	for cell: String in cells:
-		var _added: bool = plain.append(links.sub(cell, "$1", true).replace("`", "").strip_edges())
+		var _added: bool = plain.append(plain_text(cell))
 	return plain
+
+
+## A Markdown cell as player-facing text: links become their text, and
+## backticked file paths (with any "(licence: ...)" note left empty by them)
+## are dropped.
+static func plain_text(cell: String) -> String:
+	var text: String = RegEx.create_from_string("\\[([^\\]]*)\\]\\([^)]*\\)").sub(cell, "$1", true)
+	text = RegEx.create_from_string("`[^`]*`").sub(text, "", true)
+	text = RegEx.create_from_string("\\(\\s*(licence:)?[\\s,]*\\)").sub(text, "", true)
+	text = RegEx.create_from_string("\\s+").sub(text, " ", true)
+	return text.replace(" ,", ",").strip_edges().trim_prefix(",").strip_edges()
 
 
 func _on_enter() -> void:

@@ -14,17 +14,27 @@ var run: RunHarness = RunHarness.new()
 var bus: EventBus = run.bus
 var scoreboard_store: MemoryDocumentStore = MemoryDocumentStore.new()
 var settings_store: MemoryDocumentStore = MemoryDocumentStore.new()
-var scoreboard: Scoreboard = Scoreboard.new(bus, scoreboard_store)
+## Built in _init() (it hears run_ended before the screens), or in boot() for
+## the production order, where the screens connect first (see _init()).
+var scoreboard: Scoreboard = null
 var settings: Settings = Settings.new(bus, settings_store)
 var host: Control = Control.new()
 var ui: UiRoot = (load("res://ui/ui_root.tscn") as PackedScene).instantiate() as UiRoot
 ## Every UI cue announced, in order.
 var cues: Array[UiCue.Cue] = []
 var _reduced_motion: bool = true
+var _screens_first: bool = false
 
 
-func _init(host_size: Vector2 = LANDSCAPE, reduced_motion: bool = true) -> void:
+## `screens_first`: wire the Scoreboard after the screens, as main.gd does
+## (its children are ready, and connected, before it builds the rules).
+func _init(
+	host_size: Vector2 = LANDSCAPE, reduced_motion: bool = true, screens_first: bool = false
+) -> void:
 	_reduced_motion = reduced_motion
+	_screens_first = screens_first
+	if not screens_first:
+		scoreboard = Scoreboard.new(bus, scoreboard_store)
 	TweenFx.reduced_motion = reduced_motion
 	host.size = host_size
 	ui.use_bus(bus)
@@ -37,6 +47,8 @@ func _init(host_size: Vector2 = LANDSCAPE, reduced_motion: bool = true) -> void:
 ## Restores the stores and boots, as main.gd does (Boot is shown). Call after
 ## the host is in the tree.
 func boot() -> void:
+	if _screens_first:
+		scoreboard = Scoreboard.new(bus, scoreboard_store)
 	settings.restore()
 	if _reduced_motion:
 		bus.profile.announce_settings_change_requested(_reduced(settings.current()))

@@ -105,8 +105,7 @@ func test_back_closes_sub_screens_with_every_device() -> void:
 func test_pause_settings_and_resume_by_key() -> void:
 	_h.reach_title()
 	_h.bus.flow.announce_play_requested()
-	var hud: Hud = _h.screen(&"Hud") as Hud
-	hud._unhandled_input(_key(KEY_P))
+	_h.ui._unhandled_input(_key(KEY_P))
 	var paused: GameState.Phase = _h.run.machine.state()
 	_h.ui.open(&"settings")
 	var over_pause: Array[StringName] = _h.ui.visible_screens()
@@ -241,3 +240,31 @@ func test_reduced_motion_setting_stops_juice_motion() -> void:
 	var _was_on: GdUnitAssert = assert_bool(motion_on).is_false()
 	var _now_off: GdUnitAssert = assert_bool(TweenFx.reduced_motion).is_true()
 	var _no_squash: GdUnitAssert = assert_float(play.scale.x).is_equal_approx(1.0, 0.001)
+
+
+## The real input path: each press goes through a viewport (Viewport.push_input:
+## _input, GUI focus, then _unhandled_input), so a key seen by two handlers
+## would show up as a pause followed by an immediate resume.
+func test_esc_p_and_start_pause_once_through_the_viewport() -> void:
+	var viewport: SubViewport = auto_free(SubViewport.new())
+	viewport.size = Vector2i(UiHarness.LANDSCAPE)
+	viewport.gui_disable_input = false
+	add_child(viewport)
+	_h.host.reparent(viewport)
+	_h.reach_title()
+	_h.bus.flow.announce_play_requested()
+	_h.run.advance(_h.run.levels[0].intro_duration + RunHarness.STEP)
+	var start: InputEventJoypadButton = InputEventJoypadButton.new()
+	start.button_index = JOY_BUTTON_START
+	start.pressed = true
+	var seen: Array[String] = []
+	for press: InputEvent in [_key(KEY_ESCAPE), _key(KEY_P), start]:
+		viewport.push_input(press)
+		await await_idle_frame()
+		seen.append(GameState.Phase.keys()[_h.run.machine.state()])
+		viewport.push_input(press)
+		await await_idle_frame()
+		seen.append(GameState.Phase.keys()[_h.run.machine.state()])
+	var _once_each: GdUnitAssert = assert_array(seen).is_equal(
+		["PAUSED", "SKIRMISH", "PAUSED", "SKIRMISH", "PAUSED", "SKIRMISH"]
+	)

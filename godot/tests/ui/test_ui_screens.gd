@@ -147,7 +147,7 @@ func test_settings_screen_round_trips_the_store() -> void:
 	var reloaded: Settings = Settings.new(_h.bus, _h.settings_store)
 	reloaded.restore()
 	var shown_after_restore: GameSettings = screen.shown()
-	_button(&"Settings", "RESET TO DEFAULTS").pressed.emit()
+	_button(&"Settings", "RESET").pressed.emit()
 	var defaults: GameSettings = GameSettings.new()
 	defaults.reduced_motion = false
 	var _master: GdUnitAssert = assert_float(stored.master_volume).is_equal_approx(0.3, 0.001)
@@ -248,3 +248,36 @@ func test_credits_list_every_row_of_credits_md() -> void:
 	var _all: GdUnitAssert = assert_int(credits.size()).is_equal(rows)
 	var _plain: GdUnitAssert = assert_str(credits[0][1]).not_contains("](")
 	var _fonts: GdUnitAssert = assert_int(fonts.size()).is_equal(2)
+
+
+func test_credits_show_name_author_and_licence_text() -> void:
+	_h.reach_title()
+	_h.ui.open(&"credits")
+	var screen: CreditsScreen = _h.screen(&"Credits") as CreditsScreen
+	var with_paths: Array[String] = []
+	for credit: PackedStringArray in screen.credits():
+		for cell: String in credit:
+			if cell.contains("`") or cell.contains("/") or cell.contains("()"):
+				with_paths.append(cell)
+	var licences: PackedStringArray = screen.licence_texts()
+	var _no_paths: GdUnitAssert = assert_array(with_paths).is_empty()
+	var _name: GdUnitAssert = assert_str(screen.credits()[0][0]).is_equal(
+		"Orbitron, the display font"
+	)
+	var _author: GdUnitAssert = assert_str(screen.credits()[0][1]).is_equal(
+		"The Orbitron Project Authors, via Google Fonts"
+	)
+	var _licence: GdUnitAssert = assert_str(screen.credits()[0][2]).is_equal("OFL 1.1")
+	var _two: GdUnitAssert = assert_int(licences.size()).is_equal(2)
+	var _ofl_a: GdUnitAssert = assert_str(licences[0]).contains("SIL Open Font License")
+	var _ofl_b: GdUnitAssert = assert_str(licences[1]).contains("Chakra Petch")
+
+
+func test_hud_gauge_hides_behind_level_intro_card() -> void:
+	_h.reach_title()
+	_h.bus.flow.announce_play_requested()
+	var hud: Hud = _h.screen(&"Hud") as Hud
+	var during_intro: bool = hud.gauge_shown()
+	_h.run.advance(_h.run.levels[0].intro_duration + RunHarness.STEP)
+	var _hidden: GdUnitAssert = assert_bool(during_intro).is_false()
+	var _back: GdUnitAssert = assert_bool(hud.gauge_shown()).is_true()

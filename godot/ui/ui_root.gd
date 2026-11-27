@@ -6,7 +6,12 @@ extends Control
 ## the last-used device and the reduced-motion setting to every screen.
 ##
 ## Back, Esc and gamepad B go to the top screen's handle_cancel(); while
-## Paused, the pause controls do too. The bus is Events unless use_bus() gave
+## Paused, the pause controls do too. In play, the pause controls pause. This
+## root is the only place pause keys are read, and it decides once per event
+## from the Game State the event arrived in, so one Esc can never pause and
+## then resume (the HUD and the Pause screen both see the same event
+## otherwise, and `get_viewport().set_input_as_handled()` is banned by
+## scripts/checks/godot-safe-api). The bus is Events unless use_bus() gave
 ## another one before the root entered the tree (tests do).
 
 ## The screens (node names) shown in each Game State, bottom to top.
@@ -117,6 +122,11 @@ func _gui_input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if GameState.is_play(_phase) and UiInput.is_pause(event):
+		var hud: Hud = screen(&"Hud") as Hud
+		if hud != null and hud.is_visible_in_tree():
+			hud.request_pause()
+		return
 	if _wants_cancel(event):
 		var _handled: bool = _cancel()
 
