@@ -67,8 +67,25 @@ func test_every_visual_scene_exposes_its_required_markers() -> void:
 
 
 func test_registries_cover_every_enemy_and_boss_of_the_spec() -> void:
+	var errors: Array[String] = []
+	var level_bosses: Array[StringName] = []
+	for level: LevelDefinition in LevelLibrary.all_levels(errors):
+		var boss: BossVisual = VisualLibrary.boss_for(level)
+		if boss != null:
+			level_bosses.append(level.boss.id)
+			boss.free()
+	var kinds: Array[StringName] = []
+	for kind: int in EnemyKind.IDS.size():
+		var enemy: EnemyVisual = VisualLibrary.enemy_for(kind as EnemyKind.Kind)
+		if enemy != null:
+			kinds.append(EnemyKind.IDS[kind])
+			enemy.free()
 	var _enemies: GdUnitAssert = assert_array(VisualLibrary.enemy_ids()).is_equal(ENEMY_IDS)
+	var _roster: GdUnitAssert = assert_array(EnemyKind.IDS).is_equal(ENEMY_IDS)
+	var _every_kind: GdUnitAssert = assert_array(kinds).is_equal(ENEMY_IDS)
 	var _bosses: GdUnitAssert = assert_array(VisualLibrary.boss_ids()).is_equal(BOSS_IDS)
+	var _levels_load: GdUnitAssert = assert_array(errors).is_empty()
+	var _every_level_boss: GdUnitAssert = assert_array(level_bosses).is_equal(BOSS_IDS)
 
 
 func test_every_piece_bakes_into_one_surface() -> void:

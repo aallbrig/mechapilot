@@ -3,7 +3,7 @@ extends GdUnitTestSuite
 ## environment, the storm's weather works, and cloud layers wrap around the
 ## player however far it flies.
 
-## The sky ids of the six levels, in level order (#73's level table).
+## The sky themes of the six levels, in level order (#73's level table).
 const SKY_IDS: Array[StringName] = [
 	&"dawn", &"storm", &"sunset", &"night", &"stratosphere", &"orbit"
 ]
@@ -20,15 +20,21 @@ func test_every_level_sky_id_maps_to_an_environment() -> void:
 		add_child(sky)
 		broken.append_array(_environment_problems(sky_id, sky))
 		sky.free()
-	var file: FileAccess = FileAccess.open("res://levels/level_1.json", FileAccess.READ)
-	var parsed: Variant = JSON.parse_string(file.get_as_text())
-	var level: Dictionary = parsed if parsed is Dictionary else {}
-	file.close()
-	var sky_value: Variant = level["sky"] if level.has("sky") else ""
-	var level_sky: StringName = StringName(str(sky_value))
+	# Every Level, read through core/'s LevelDefinition, gets its own theme's sky.
+	var errors: Array[String] = []
+	var levels: Array[LevelDefinition] = LevelLibrary.all_levels(errors)
+	var level_themes: Array[StringName] = []
+	for level: LevelDefinition in levels:
+		level_themes.append(level.sky_theme)
+		var sky: SkyEnvironment = SkyLibrary.for_level(level)
+		if sky == null or sky.sky_id != level.sky_theme:
+			broken.append("level %d: no sky for theme %s" % [level.number, level.sky_theme])
+		if sky != null:
+			sky.free()
 	var _ids: GdUnitAssert = assert_array(SkyLibrary.ids()).is_equal(SKY_IDS)
-	var _level_1: GdUnitAssert = assert_bool(SkyLibrary.has_sky(level_sky)).is_true()
-	var _first: GdUnitAssert = assert_str(String(level_sky)).is_equal("dawn")
+	var _themes: GdUnitAssert = assert_array(LevelDefinition.SKY_THEMES).is_equal(SKY_IDS)
+	var _levels_load: GdUnitAssert = assert_array(errors).is_empty()
+	var _one_per_level: GdUnitAssert = assert_array(level_themes).is_equal(SKY_IDS)
 	var _complete: GdUnitAssert = assert_array(broken).is_empty()
 
 

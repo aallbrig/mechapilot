@@ -1,7 +1,7 @@
 class_name VisualLibrary
 extends RefCounted
-## The model scenes logic instances, by id. Enemy ids follow the 1.0 spec's
-## roster (#73) and boss ids its boss names, in snake_case. Every scene's root
+## The model scenes logic instances, by id. Enemy ids are EnemyKind.IDS and
+## boss ids are the Level data's `boss.id` (BossDefinition.id), both from #73. Every scene's root
 ## is a VisualRig (see its required_markers() for what logic can rely on).
 
 const PLAYER_MECH: PackedScene = preload("res://game/visuals/player/player_mech.tscn")
@@ -43,6 +43,16 @@ static func boss(boss_id: StringName) -> BossVisual:
 		push_error("VisualLibrary: no boss with id %s" % boss_id)
 		return null
 	return BOSSES[boss_id].instantiate() as BossVisual
+
+
+## A new enemy model for a kind of the roster.
+static func enemy_for(kind: EnemyKind.Kind) -> EnemyVisual:
+	return enemy(EnemyKind.id_of(kind))
+
+
+## A new model of the Level's boss.
+static func boss_for(level: LevelDefinition) -> BossVisual:
+	return boss(level.boss.id)
 
 
 static func enemy_ids() -> Array[StringName]:
