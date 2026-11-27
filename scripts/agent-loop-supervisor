@@ -437,7 +437,7 @@ pinned_sha() {
 runtime_paths() {
   git -C "${runtime_repo}" ls-tree -r --name-only "$1" -- \
     scripts/claude-statusline scripts/agent-loop-heartbeat scripts/agent-loop-lib \
-    scripts/lib-toolchain \
+    scripts/lib-toolchain scripts/hook-timing scripts/pre-push-select scripts/pre-push-run \
     .claude/agent-loop-settings.json .claude/skills/agent-loop/SKILL.md \
     package.json package-lock.json infra .githooks
 }

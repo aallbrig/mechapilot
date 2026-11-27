@@ -10,7 +10,7 @@ set -eu
 # Time the whole hook (build/hook-timings.jsonl): run it again as a child of
 # scripts/hook-timing, which marks the child with HOOK_TIMING_CHILD.
 if [ -z "${HOOK_TIMING_CHILD:-}" ]; then
-  exec scripts/hook-timing pre-commit "lint" "$0" "$@"
+  exec "$(dirname "$0")/../scripts/hook-timing" pre-commit "lint" "$0" "$@"
 fi
 unset HOOK_TIMING_CHILD
 

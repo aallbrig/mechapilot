@@ -15,9 +15,9 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
 unset HOOK_TIMING_CHILD
 # Git passes the refs being pushed on stdin.
-selected="$(scripts/pre-push-select)"
+selected="$("$(dirname "$0")/../scripts/pre-push-select")"
 [ -n "${selected}" ] || selected=ci:fast
 # What the timing line records: the tasks, plus test:shell:new for new test files.
 label="$(printf '%s\n' "${selected}" | sed 's/^shell-test:.*/test:shell:new/' | uniq | tr '\n' ' ')"
 printf 'pre-push: %s\n' "${label}"
-exec scripts/hook-timing pre-push "${label}" scripts/pre-push-run "${selected}"
+exec "$(dirname "$0")/../scripts/hook-timing" pre-push "${label}" "$(dirname "$0")/../scripts/pre-push-run" "${selected}"

@@ -1216,7 +1216,7 @@ test_supervisor_matches_the_session_by_pane_pid_only() {
 fake_runtime() {
   mkdir -p "$1/rt/.githooks" "$1/rt/scripts" "$1/bin"
   cp .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit "$1/rt/.githooks/"
-  cp scripts/lib-toolchain "$1/rt/scripts/"
+  cp scripts/lib-toolchain scripts/hook-timing scripts/pre-push-select scripts/pre-push-run "$1/rt/scripts/"
   mkdir -p "$1/checkout/scripts"
   printf ': >"%s/marker-checkout-toolchain"\n' "$1" >"$1/checkout/scripts/lib-toolchain"
   git -C "$1/checkout" init -q || return 1
@@ -1244,6 +1244,10 @@ test_pinned_hooks_use_the_pinned_toolchain() {
   one_ready_issue "${d}"
   supervisor "${d}" once >/dev/null || return 1
   [ -f "${d}/state/runtime/scripts/lib-toolchain" ] && [ ! -w "${d}/state/runtime/scripts/lib-toolchain" ] || return 1
+  # So are the scripts the hooks call beside them (#66): the checkout may not have them.
+  for s in hook-timing pre-push-select pre-push-run; do
+    [ -f "${d}/state/runtime/scripts/${s}" ] && [ ! -w "${d}/state/runtime/scripts/${s}" ] || return 1
+  done
   grep -qx 'AGENT_LOOP_SESSION=1' "${d}/state/launch" || return 1
   # In the session (a read-only state dir, as inside the sandbox) the pinned
   # pre-commit runs neither the checkout's toolchain script nor mise.

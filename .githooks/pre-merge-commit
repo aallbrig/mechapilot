@@ -17,7 +17,7 @@ unset HOOK_TIMING_CHILD
 # the required ci check before anything merges.
 if [ "${AGENT_LOOP_SESSION:-}" = 1 ] && [ -n "${AGENT_LOOP_STATE_DIR:-}" ]; then
   printf 'pre-merge-commit: task ci:sandbox (Agent Loop session)\n'
-  exec scripts/hook-timing pre-merge-commit ci:sandbox task ci:sandbox
+  exec "$(dirname "$0")/../scripts/hook-timing" pre-merge-commit ci:sandbox task ci:sandbox
 fi
 printf 'pre-merge-commit: task ci\n'
-exec scripts/hook-timing pre-merge-commit ci task ci
+exec "$(dirname "$0")/../scripts/hook-timing" pre-merge-commit ci task ci

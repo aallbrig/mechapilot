@@ -219,7 +219,13 @@ test_pre_push_uses_mains_verification_guard() {
 test_pre_merge_commit_and_ci_run_full_gate() {
   hook=.githooks/pre-merge-commit
   last="$(grep -v '^[[:space:]]*#' "${hook}" | grep -v '^[[:space:]]*$' | tail -n 1)"
-  [ "${last}" = "exec scripts/hook-timing pre-merge-commit ci task ci" ] || return 1
+  dollar='$'
+  timing="exec \"${dollar}(dirname \"${dollar}0\")/../scripts/hook-timing\" pre-merge-commit"
+  [ "${last}" = "${timing} ci task ci" ] || return 1
+  # The Agent Loop session's merge hook runs its full gate (ci:sandbox), never a selection.
+  grep -qxF "  ${timing} ci:sandbox task ci:sandbox" "${hook}" || return 1
+  execs="$(grep -c '^[[:space:]]*exec ' "${hook}")"
+  [ "${execs}" -eq 2 ] || return 1
   ! grep -q 'pre-push-select' "${hook}" || return 1
   run="$(yq -r '.jobs.ci.steps[] | select(.name == "task ci") | .run' .github/workflows/ci.yml)"
   [ "${run}" = "task ci" ] || return 1
