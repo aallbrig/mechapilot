@@ -33,8 +33,8 @@ jobs:
   part:
     name: part (${{ matrix.part }}${{ matrix.shard && ' ' || '' }}${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Measured on 2026-11-27 (#119): the slowest part (a shell shard) took
-    # about 6 minutes, setup included; 15 leaves 2x headroom.
+    # Measured on 2026-11-27 (#119, 3 runs): the slowest part (a shell shard)
+    # took 7m18s to 9m35s, setup included (median 7m21s); 15 leaves about 2x.
     timeout-minutes: 15
     permissions:
       contents: read
@@ -142,9 +142,9 @@ jobs:
     # skips it, which scripts/ci-verdict never counts as green.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # Measured on 2026-11-27 (#119): about 3 minutes (setup, merge, and the
-    # acceptance evidence, which runs task:/check: criteria such as task:lint);
-    # 15 leaves headroom. scripts/checks/workflow-permissions keeps it from 10
+    # Measured on 2026-11-27 (#119, 3 runs): 35 to 50 seconds for criteria
+    # without task: refs; a task:lint criterion adds about 1.5 minutes; 15
+    # leaves headroom for task:/check: criteria. scripts/checks/workflow-permissions keeps it from 10
     # to 30.
     timeout-minutes: 15
     permissions:
