@@ -4,6 +4,8 @@ extends GdUnitTestSuite
 ## hover, focus and press juice with sound on every interactive control.
 
 var _h: UiHarness
+var _input: PlayerInput
+var _controls: TouchControls
 
 
 func before_test() -> void:
@@ -123,11 +125,75 @@ func test_pause_settings_and_resume_by_key() -> void:
 	)
 
 
+## The real screens and the game's touch controls in one viewport that is fed
+## real input (push_input), as the game composes them in main.tscn.
+func _touch_viewport() -> SubViewport:
+	var viewport: SubViewport = auto_free(SubViewport.new())
+	viewport.size = Vector2i(UiHarness.LANDSCAPE)
+	viewport.gui_disable_input = false
+	add_child(viewport)
+	_input = PlayerInput.new()
+	viewport.add_child(_input)
+	_controls = TouchControls.new()
+	viewport.add_child(_controls)
+	_controls.size = UiHarness.LANDSCAPE
+	_controls.attach(_h.bus, _input, true)
+	# The harness's host Control stands in for main.tscn's CanvasLayer, which
+	# takes no pointer input, so it must not either.
+	_h.host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_h.host.reparent(viewport)
+	return viewport
+
+
+func _screen_touch(at: Vector2, pressed: bool) -> InputEventScreenTouch:
+	var touch: InputEventScreenTouch = InputEventScreenTouch.new()
+	touch.position = at
+	touch.pressed = pressed
+	return touch
+
+
+## #84: the one on-screen pause button is the touch controls' (the HUD has none).
 func test_pause_button_pauses_for_touch() -> void:
+	var viewport: SubViewport = _touch_viewport()
 	_h.reach_title()
 	_h.bus.flow.announce_play_requested()
-	(_h.screen(&"Hud") as Hud).pause_button().pressed.emit()
+	var center: Vector2 = _controls.pause_button_rect().get_center()
+	viewport.push_input(_screen_touch(center, true))
+	viewport.push_input(_screen_touch(center, false))
+	await await_idle_frame()
 	var _paused: GdUnitAssert = assert_int(_h.run.machine.state()).is_equal(GameState.Phase.PAUSED)
+
+
+func test_ui_root_passes_gameplay_touches_through() -> void:
+	var viewport: SubViewport = _touch_viewport()
+	_h.reach_title()
+	_h.bus.flow.announce_play_requested()
+	var intro: PilotIntent = await _steer(viewport, Vector2(200.0, 400.0))
+	_h.run.advance(_h.run.levels[0].intro_duration + RunHarness.STEP)
+	var skirmish: GameState.Phase = _h.run.machine.state()
+	var hud_shown: bool = _h.ui.visible_screens().has(&"Hud")
+	var play: PilotIntent = await _steer(viewport, Vector2(300.0, 500.0))
+	var _in_skirmish: GdUnitAssert = assert_int(skirmish).is_equal(GameState.Phase.SKIRMISH)
+	var _with_hud: GdUnitAssert = assert_bool(hud_shown).is_true()
+	var _intro_steers: GdUnitAssert = assert_vector(intro.move).is_equal_approx(
+		Vector2.RIGHT, Vector2(0.01, 0.01)
+	)
+	var _play_steers: GdUnitAssert = assert_vector(play.move).is_equal_approx(
+		Vector2.RIGHT, Vector2(0.01, 0.01)
+	)
+
+
+## Touch the left half at `at`, drag a full stick right, read the intent, lift.
+func _steer(viewport: SubViewport, at: Vector2) -> PilotIntent:
+	viewport.push_input(_screen_touch(at, true))
+	var drag: InputEventScreenDrag = InputEventScreenDrag.new()
+	drag.position = at + Vector2(TouchSticks.STICK_RANGE, 0.0)
+	viewport.push_input(drag)
+	await await_idle_frame()
+	var intent: PilotIntent = _input.read_intent()
+	viewport.push_input(_screen_touch(drag.position, false))
+	await await_idle_frame()
+	return intent
 
 
 func test_pause_quit_asks_for_confirmation() -> void:
