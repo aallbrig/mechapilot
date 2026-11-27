@@ -44,8 +44,8 @@ fog_sky_affect = 0.0
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
 render_priority = -1
 shader = ExtResource("3_cloud")
-shader_parameter/lit_color = null
-shader_parameter/shade_color = null
+shader_parameter/lit_color = Vector3(1, 0.86, 0.88)
+shader_parameter/shade_color = Vector3(0.62, 0.52, 0.7)
 shader_parameter/softness = null
 
 [node name="DawnSky" type="Node3D"]

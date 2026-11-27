@@ -1,0 +1,55 @@
+#!/bin/sh
+# Tests for the godot-safe-api bans added by #27 (run by scripts/test-shell):
+# output that can splice a check runner's log, and decoding media or config from
+# data in code (which would ship assets the credits check never sees).
+
+# write_code <file> <body lines...>: a plain project script whose one function
+# has the given body.
+write_code() {
+  file="$1"
+  shift
+  {
+    printf 'extends Node\n\n\nfunc probe() -> void:\n'
+    for line in "$@"; do printf '\t%s\n' "${line}"; done
+  } >"${d}/core/${file}"
+}
+
+test_safe_api_rejects_raw_and_rich_printing() {
+  # shellcheck source=test_godot_safe_api
+  . tests/shell/test_godot_safe_api
+  safe_project
+  # printraw writes no newline, so a "#" it prints is glued onto the start of
+  # the next line a check runner reads (the gate-bypass repro hid a result
+  # line that way); print_rich can carry terminal control sequences.
+  write_code hush.gd 'printraw("#")'
+  rejects "no raw or rich printing" || return 1
+  write_code hush.gd 'print_rich("[b]x[/b]")'
+  rejects "no raw or rich printing" || return 1
+  write_code hush.gd 'print("plain lines are fine")'
+  scripts/checks/godot-safe-api "${d}"
+}
+
+test_safe_api_rejects_decoding_media_or_config_from_data() {
+  # shellcheck source=test_godot_safe_api
+  . tests/shell/test_godot_safe_api
+  safe_project
+  for call in 'var _e: Error = Image.new().load_svg_from_string("<svg/>")' \
+    'var _e: Error = Image.new().load_png_from_buffer(PackedByteArray())' \
+    'var _e: Error = Image.new().load_jpg_from_buffer(PackedByteArray())' \
+    'var _e: Error = Image.new().load_webp_from_buffer(PackedByteArray())' \
+    'var _c: ConfigFile = ConfigFile.new()'; do
+    write_code decode.gd "${call}"
+    rejects "no decoding media or config from data" || {
+      printf 'accepted: %s\n' "${call}"
+      return 1
+    }
+  done
+}
+
+test_safe_api_rejects_str_to_var() {
+  # shellcheck source=test_godot_safe_api
+  . tests/shell/test_godot_safe_api
+  safe_project
+  write_code parse.gd 'var _v: Variant = str_to_var("Object(DPITexture)")'
+  rejects "no reflection"
+}

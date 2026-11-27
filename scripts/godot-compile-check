@@ -33,7 +33,10 @@ if [ -d "${project}/.godot" ]; then cp -R "${project}/.godot/." "${box}/dotgodot
 
 # Engine error lines. A scene with a broken ext_resource still loads and
 # instantiates, so these lines are the only signal and always fail the check.
-error_lines='^(ERROR|SCRIPT ERROR|USER ERROR):|Parse Error'
+# Matched anywhere in a line, not only at its start: text printed without a
+# newline (printraw, banned by godot-safe-api) could otherwise glue a prefix
+# onto an error line and hide it.
+error_lines='(ERROR|SCRIPT ERROR|USER ERROR):|Parse Error'
 
 # Import first so class_name and autoload caches exist on a fresh checkout.
 rc=0
@@ -50,9 +53,11 @@ GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${project}" --
 grep -E 'compile-check:|godot-run: sandbox|SCRIPT ERROR|Parse Error|ERROR:' "${log}" || true
 
 summary="$(sed -n 's/^compile-check: ok scripts=\([0-9]*\) scenes=\([0-9]*\)$/\1/p' "${log}")"
+summaries="$(grep -c 'compile-check: ok ' "${log}")" || true
 on_disk="$(find "${project}" -iname '*.gd' -type f ! -path "${project}/addons/*" ! -path "${project}/.godot/*" | wc -l | tr -d ' ')"
 
-if [ "${rc}" -ne 0 ] || [ -z "${summary}" ] || grep -Eq "${error_lines}" "${log}"; then
+# Exactly one summary line: a second (printed by project code) fails the run.
+if [ "${rc}" -ne 0 ] || [ -z "${summary}" ] || [ "${summaries}" -ne 1 ] || grep -Eq "${error_lines}" "${log}"; then
   printf 'godot-compile-check: FAILED (exit %s)\n' "${rc}" >&2
   exit 1
 fi

@@ -38,6 +38,39 @@ func test_every_level_sky_id_maps_to_an_environment() -> void:
 	var _complete: GdUnitAssert = assert_array(broken).is_empty()
 
 
+func test_every_sky_cloud_layer_keeps_its_theme_colours() -> void:
+	# Each theme's cloud colours (lit, shade), written out independently of the
+	# scenes, so a save that drops or nulls them fails here.
+	var expected: Dictionary[StringName, Array] = {
+		&"dawn": [Vector3(1, 0.86, 0.88), Vector3(0.62, 0.52, 0.7)],
+		&"storm": [Vector3(0.55, 0.57, 0.62), Vector3(0.22, 0.23, 0.27)],
+		&"sunset": [Vector3(1, 0.72, 0.42), Vector3(0.5, 0.25, 0.35)],
+		&"night": [Vector3(0.25, 0.3, 0.45), Vector3(0.06, 0.08, 0.15)],
+		&"stratosphere": [Vector3(0.95, 0.85, 1), Vector3(0.5, 0.35, 0.7)],
+		&"orbit": [Vector3(1, 1, 1), Vector3(0.8, 0.86, 1)],
+	}
+	var wrong: Array[String] = []
+	var layers_seen: int = 0
+	for sky_id: StringName in expected:
+		var sky: SkyEnvironment = SkyLibrary.instantiate(sky_id)
+		add_child(sky)
+		var colours: Array = expected[sky_id]
+		for layer: CloudLayer in sky.cloud_layers():
+			layers_seen += 1
+			var material: ShaderMaterial = layer.material_override as ShaderMaterial
+			var lit: Variant = material.get_shader_parameter(&"lit_color") if material else null
+			var shade: Variant = material.get_shader_parameter(&"shade_color") if material else null
+			if not (
+				lit is Vector3 and lit == colours[0] and shade is Vector3 and shade == colours[1]
+			):
+				wrong.append("%s %s: lit %s, shade %s" % [sky_id, layer.name, lit, shade])
+		sky.free()
+	var _layers: GdUnitAssert = assert_int(layers_seen).is_greater_equal(
+		expected.size() * MIN_CLOUD_LAYERS
+	)
+	var _colours: GdUnitAssert = assert_array(wrong).is_empty()
+
+
 func test_unknown_sky_id_has_no_environment() -> void:
 	var _known: GdUnitAssert = assert_bool(SkyLibrary.has_sky(&"dawn")).is_true()
 	var _unknown: GdUnitAssert = assert_bool(SkyLibrary.has_sky(&"mars")).is_false()

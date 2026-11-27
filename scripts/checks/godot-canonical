@@ -8,19 +8,24 @@
 # then scans files whose form is known exactly. A hand-edited file fails here
 # until it is opened and saved in Godot (or rewritten with --write).
 #
-# How: the project is copied to a private directory, imported, and every text
-# resource and scene is loaded and re-saved in place by scripts/godot-canonical.gd
-# through scripts/godot-run (bubblewrap on Linux, as for every step that loads
-# project code). The checker compares Godot's saved bytes with the committed
-# original, read from the real project (mounted read-only), so an import or
-# project code that rewrote the copy first cannot launder a file. A file that
-# does not load, or any difference, fails; so does a run whose summary line is
-# missing, carries the wrong nonce (a random value project code cannot read),
-# or counts fewer files than are on disk.
+# How: the project is copied to a private directory, and each text resource and
+# scene in the copy gets a trailing comment line carrying a random marker.
+# The pinned Godot, through scripts/godot-run (bubblewrap on Linux, as for every
+# step that loads project code), loads and re-saves every one in place with
+# scripts/godot-canonical.gd; its saver drops the comment. Nothing Godot or
+# project code prints is read, only Godot's exit status. Afterwards this script
+# decides from the files alone:
+#   - a file still carrying its marker was not re-saved: fail;
+#   - a re-saved file whose bytes differ from the committed one (cmp): fail;
+#   - a key that held a value in the committed file and is `null` once saved is
+#     data the save lost (a value whose type no longer fits its property): fail,
+#     and --write never writes that file.
+# Project code cannot write these files (godot-safe-api bans every writer of
+# res:// paths, and on Linux the sandbox holds only the private copy).
 #
 # Usage: scripts/checks/godot-canonical [--write] [project-dir]   (default: godot)
 #   --write  copy Godot's saved form back over every file that differs
-set -eu
+set -euf
 LC_ALL=C
 export LC_ALL
 
@@ -46,12 +51,20 @@ copy="${work}/project"
 box="${work}/box"
 log="${work}/log"
 mkdir -p "${copy}" "${box}/dotgodot"
-# A private copy, so the in-place re-save can never touch the real project.
 (cd "${root}" && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
   mkdir -p "${copy}/${f%/*}"
   cp -p "${root}/${f}" "${copy}/${f}"
 done
 if [ -d "${root}/.godot" ]; then cp -R "${root}/.godot/." "${box}/dotgodot/"; fi
+
+# The files to judge, project-relative, outside addons/ and .godot/.
+(cd "${root}" && find . -path ./.godot -prune -o -path ./addons -prune -o -type f \
+  \( -iname '*.tres' -o -iname '*.tscn' -o -iname '*.escn' \) -print) | sed 's|^\./||' | sort >"${work}/files"
+
+marker="; godot-canonical marker $(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+while IFS= read -r f; do
+  printf '\n%s\n' "${marker}" >>"${copy}/${f}"
+done <"${work}/files"
 
 rc=0
 GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${copy}" -- --import >"${log}" 2>&1 || rc=$?
@@ -60,49 +73,57 @@ if [ "${rc}" -ne 0 ]; then
   printf 'godot-canonical: import failed (exit %s)\n' "${rc}" >&2
   exit 1
 fi
-nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 rc=0
-GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${copy}" --readable "${checker}" \
-  --readable "${root}" -- -s "${checker}" -- "--original=${root}" "--nonce=${nonce}" >"${log}" 2>&1 || rc=$?
+GODOT_RUN_TIMEOUT="${timeout_secs}" "${here}/godot-run" "${box}" "${copy}" --readable "${checker}" -- \
+  -s "${checker}" >"${log}" 2>&1 || rc=$?
+if [ "${rc}" -ne 0 ]; then
+  cat "${log}" >&2
+  printf 'godot-canonical: Godot could not load and re-save every file (exit %s)\n' "${rc}" >&2
+  exit 1
+fi
 
 # Under the sandbox Godot worked on the box's own copy of the project.
 saved="${copy}"
 if [ -d "${box}/project" ]; then saved="${box}/project"; fi
 
 status=0
-on_disk="$(find "${root}" -path "${root}/.godot" -prune -o -path "${root}/addons" -prune -o -type f \
-  \( -iname '*.tres' -o -iname '*.tscn' -o -iname '*.escn' \) -print | wc -l | tr -d ' ')"
-checked="$(sed -n "s/^canonical: checked \\([0-9]*\\) ${nonce}\$/\\1/p" "${log}")"
-summaries="$(grep -c '^canonical: checked ' "${log}")" || true
-if [ "${rc}" -ne 0 ] || [ -z "${checked}" ] || [ "${summaries}" -ne 1 ]; then
-  cat "${log}" >&2
-  printf 'godot-canonical: the re-save run failed (exit %s)\n' "${rc}" >&2
-  exit 1
-fi
-while IFS= read -r line; do
-  case "${line}" in
-    'canonical: differs res://'*)
-      f="${line#canonical: differs res://}"
-      if [ "${write}" = yes ]; then
-        cp "${saved}/${f}" "${root}/${f}"
-        printf 'godot-canonical: rewrote %s in Godot'"'"'s saved form\n' "${f}"
-      else
-        printf 'godot-canonical: %s is not in Godot'"'"'s saved form; open and save it in Godot (or run scripts/checks/godot-canonical --write)\n' "${f}" >&2
-        status=1
-      fi
-      ;;
-    'canonical: unloadable res://'* | 'canonical: unsavable res://'*)
-      printf 'godot-canonical: %s\n' "${line#canonical: }" >&2
-      status=1
-      ;;
-    *) ;;
-  esac
-done <"${log}"
-if [ "${checked}" -ne "${on_disk}" ]; then
-  printf 'godot-canonical: checked %s files but %s are on disk\n' "${checked}" "${on_disk}" >&2
-  status=1
-fi
+count=0
+while IFS= read -r f; do
+  count=$((count + 1))
+  if [ ! -f "${saved}/${f}" ] || grep -Fqx "${marker}" "${saved}/${f}"; then
+    printf 'godot-canonical: %s was not re-saved by Godot (does it load?)\n' "${f}" >&2
+    status=1
+    continue
+  fi
+  if cmp -s "${root}/${f}" "${saved}/${f}"; then continue; fi
+  # Keys with a value in the committed file that the save wrote as null.
+  lost="$(awk '
+    FNR == NR {
+      if (match($0, / = /) && substr($0, RSTART + 3) != "null") valued[substr($0, 1, RSTART - 1)] = 1
+      next
+    }
+    match($0, / = null$/) && (substr($0, 1, RSTART - 1) in valued) && !seen[substr($0, 1, RSTART - 1)]++ {
+      print substr($0, 1, RSTART - 1)
+    }
+  ' "${root}/${f}" "${saved}/${f}")"
+  if [ -n "${lost}" ]; then
+    for key in ${lost}; do
+      printf 'godot-canonical: %s: saving in Godot turns %s into null (its stored value no longer fits its type; that is data loss, not form)\n' \
+        "${f}" "${key}" >&2
+    done
+    status=1
+    continue
+  fi
+  if [ "${write}" = yes ]; then
+    cp "${saved}/${f}" "${root}/${f}"
+    printf 'godot-canonical: rewrote %s in Godot'"'"'s saved form\n' "${f}"
+  else
+    printf 'godot-canonical: %s is not in Godot'"'"'s saved form; open and save it in Godot (or run scripts/checks/godot-canonical --write)\n' "${f}" >&2
+    status=1
+  fi
+done <"${work}/files"
+
 if [ "${status}" -eq 0 ]; then
-  printf 'godot-canonical: ok (%s text resources and scenes in Godot'"'"'s saved form)\n' "${checked}"
+  printf 'godot-canonical: ok (%s text resources and scenes in Godot'"'"'s saved form)\n' "${count}"
 fi
 exit "${status}"
