@@ -10,7 +10,6 @@ const CHANNELS: Array[Script] = [
 	EventBus.EnemyChannel,
 	EventBus.BossChannel,
 	EventBus.ProfileChannel,
-	EventBus.DevChannel,
 ]
 
 var _received: Array[Array] = []

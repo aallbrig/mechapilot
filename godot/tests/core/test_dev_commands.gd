@@ -206,3 +206,42 @@ func test_ledger_developer_rules_keep_the_run_rules() -> void:
 	var _combo: GdUnitAssert = assert_int(_run.ledger.multiplier()).is_equal(1)
 	var _gauge: GdUnitAssert = assert_int(_run.progression.gauge()).is_equal(0)
 	var _marked: GdUnitAssert = assert_bool(_run.ledger.is_dev_assisted()).is_true()
+
+
+## The same guarantees test_events.gd gives the other channels, for Events.dev.
+func test_dev_channel_is_typed_announced_and_unique() -> void:
+	var problems: Array[String] = []
+	var dev: Script = EventBus.DevChannel
+	var methods: Dictionary[String, int] = {}
+	for method: Dictionary in dev.get_script_method_list():
+		var method_args: Array = method["args"]
+		var method_name: String = method["name"]
+		methods[method_name] = method_args.size()
+	var others: Array[String] = []
+	var channels: Array[Script] = [
+		EventBus.FlowChannel,
+		EventBus.RunChannel,
+		EventBus.PlayerChannel,
+		EventBus.EnemyChannel,
+		EventBus.BossChannel,
+		EventBus.ProfileChannel,
+	]
+	for channel: Script in channels:
+		for sig: Dictionary in channel.get_script_signal_list():
+			var other_name: String = sig["name"]
+			others.append(other_name)
+	var signals: Array[Dictionary] = dev.get_script_signal_list()
+	for sig: Dictionary in signals:
+		var sig_name: String = sig["name"]
+		var sig_args: Array = sig["args"]
+		for arg: Dictionary in sig_args:
+			var arg_type: int = arg["type"]
+			if arg_type == TYPE_NIL:
+				problems.append("untyped %s" % sig_name)
+		var announcer: String = "announce_%s" % sig_name
+		if not methods.has(announcer) or methods[announcer] != sig_args.size():
+			problems.append("no %s" % announcer)
+		if others.has(sig_name):
+			problems.append("duplicate %s" % sig_name)
+	var _three: GdUnitAssert = assert_int(signals.size()).is_equal(3)
+	var _clean: GdUnitAssert = assert_array(problems).is_empty()
