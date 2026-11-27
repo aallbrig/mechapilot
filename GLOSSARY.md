@@ -35,7 +35,7 @@ The pre-release copy of the sites, updated on every merge to main. Also called S
 _Avoid_: preview
 
 **Production**:
-The public mechafighter.com and game.mechafighter.com, updated only on a release.
+The public mechafighter.com and game.mechafighter.com, updated only by a Deploy.
 _Avoid_: live, prod site
 
 ## Workflow
@@ -47,6 +47,14 @@ _Avoid_: build loop
 **Supervisor**:
 The token-free watcher that starts the Agent Loop when work exists, revives it when it stalls, and restarts it before its context grows too large.
 _Avoid_: daemon, watchdog
+
+**Release**:
+A `vX.Y.Z` tag on main plus its GitHub Release (site and game bundles, manifest, checksums), made automatically for every main commit whose ci is green. A release changes nothing on its own; Production changes only on a Deploy.
+_Avoid_: build, version (as a noun for the artifacts)
+
+**Deploy**:
+The one human button (Actions, deploy) that puts a Release on Production, with checks before and after and an automatic rollback. Deploying an older Release is a rollback.
+_Avoid_: ship, push to prod
 
 **Provably Complete**:
 An issue whose acceptance criteria are all demonstrated by the verification stack, so it may merge into main without a human.

@@ -1,0 +1,64 @@
+#!/bin/sh
+# Decide whether release.yml may release a commit (#31).
+#
+# Usage: scripts/release/guard   (prints release=yes or release=no for $GITHUB_OUTPUT)
+#
+# release.yml runs on every completed ci workflow run (workflow_run) and
+# passes the triggering run's fields here through the environment, never
+# through ${{ }} in a script. A release needs all of:
+#   RELEASE_EVENT       workflow_run
+#   CI_WORKFLOW_PATH    .github/workflows/ci.yml (the ci workflow itself)
+#   CI_CONCLUSION       success (ci is green)
+#   CI_EVENT            push (a merge to main, not a pull request or a manual run)
+#   CI_HEAD_BRANCH      main
+#   CI_HEAD_REPOSITORY  equal to GITHUB_REPOSITORY (no fork's "main")
+#   CI_HEAD_SHA         a full SHA that is reachable from RELEASE_MAIN_REF
+#                       (default origin/main) in the local clone
+#   CI_RUN_ID           the ci run's numeric id
+# Anything else is refused (exit 1). A commit that is already released, or
+# is older than (an ancestor of) the newest release, prints release=no and
+# exits 0: ci on an older commit can finish after a newer one was released.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=lib-release
+. "$(dirname "$0")/lib-release"
+
+refuse() {
+  printf 'release: REFUSED: %s\n' "$*" >&2
+  exit 1
+}
+
+[ "${RELEASE_EVENT:-}" = workflow_run ] || refuse "not triggered by a completed ci run (event ${RELEASE_EVENT:-unset})"
+[ "${CI_WORKFLOW_PATH:-}" = .github/workflows/ci.yml ] || refuse "the triggering workflow is not .github/workflows/ci.yml"
+[ "${CI_CONCLUSION:-}" = success ] || refuse "ci concluded ${CI_CONCLUSION:-unset}, not success"
+[ "${CI_EVENT:-}" = push ] || refuse "ci ran for ${CI_EVENT:-unset}, not a push to main"
+[ "${CI_HEAD_BRANCH:-}" = main ] || refuse "ci ran on a branch other than main"
+[ -n "${GITHUB_REPOSITORY:-}" ] || refuse "GITHUB_REPOSITORY is unset"
+[ "${CI_HEAD_REPOSITORY:-}" = "${GITHUB_REPOSITORY}" ] || refuse "ci ran in another repository"
+case "${CI_RUN_ID:-}" in
+  "" | *[!0-9]*) refuse "CI_RUN_ID is not a run id" ;;
+  *) ;;
+esac
+sha="${CI_HEAD_SHA:-}"
+check_sha "${sha}"
+[ "${sha_ok}" = yes ] || refuse "CI_HEAD_SHA is not a full commit SHA"
+
+main_ref="${RELEASE_MAIN_REF:-origin/main}"
+main_sha="$(git rev-parse --verify --quiet "${main_ref}^{commit}" || true)"
+[ -n "${main_sha}" ] || refuse "${main_ref} is not in this clone"
+git cat-file -e "${sha}^{commit}" 2>/dev/null || refuse "${sha} is not in this clone"
+git merge-base --is-ancestor "${sha}" "${main_sha}" || refuse "${sha} is not on main"
+
+tags="$(git tag --list)"
+latest="$(printf '%s\n' "${tags}" | release_tags | tail -n 1)"
+if [ -n "${latest}" ]; then
+  latest_sha="$(git rev-parse --verify --quiet "refs/tags/${latest}^{commit}" || true)"
+  [ -n "${latest_sha}" ] || refuse "cannot resolve ${latest}"
+  if git merge-base --is-ancestor "${sha}" "${latest_sha}"; then
+    printf 'release: %s is already in %s; nothing to release\n' "${sha}" "${latest}" >&2
+    printf 'release=no\n'
+    exit 0
+  fi
+fi
+printf 'release=yes\n'

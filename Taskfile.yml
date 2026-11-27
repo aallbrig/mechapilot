@@ -122,6 +122,10 @@ tasks:
       - check-jsonschema --schemafile schemas/html-validate-config.schema.json .htmlvalidate.json
       # Vendored: https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/schema.json
       - check-jsonschema --schemafile schemas/lychee.schema.json lychee.toml scripts/website-eval/lychee-online.toml
+      # Authored here: the release manifest (scripts/release/package) and the
+      # release skill's recommendation (scripts/release/recommend); tests/shell/test_release
+      # validates real output against both
+      - check-jsonschema --check-metaschema schemas/release-manifest.schema.json schemas/release-recommendation.schema.json
       # Authored here: the website-evaluation skill's report (scripts/website-eval/score)
       - check-jsonschema --check-metaschema schemas/website-eval.schema.json
       # Authored here (no upstream schema exists); pins the Lighthouse budgets
@@ -152,6 +156,7 @@ tasks:
       - scripts/checks/agent-loop-skill
       - scripts/checks/agent-loop-skill-commands
       - scripts/checks/threat-models
+      - scripts/checks/workflow-permissions
       - scripts/checks/production-dispatch-only
 
   infra:validate:

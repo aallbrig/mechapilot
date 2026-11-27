@@ -1,0 +1,81 @@
+#!/bin/sh
+# Shared helpers for the release and deploy scripts (#31). Sourced.
+
+# check_tag <name>: set release_tag=yes only for vMAJOR.MINOR.PATCH, each
+# part a decimal number with no leading zero and at most 9 digits (so shell
+# arithmetic can never overflow); otherwise release_tag=no. v1.2.3-rc,
+# v01.2.3, vX and v1.2 are not release tags. (Predicates set a variable and
+# return 0, so set -e stays in force inside them.)
+check_tag() {
+  release_tag=no
+  case "$1" in
+    v*) ;;
+    *) return 0 ;;
+  esac
+  case "$1" in
+    *[!v0-9.]*) return 0 ;;
+    *) ;;
+  esac
+  if printf '%s\n' "${1#v}" | grep -Eqx '(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})'; then
+    release_tag=yes
+  fi
+}
+
+# release_tags: read names on stdin, print the release tags among them, lowest
+# to highest version (numeric, not lexical, order).
+release_tags() {
+  while IFS= read -r t; do
+    check_tag "${t}"
+    if [ "${release_tag}" = yes ]; then printf '%s\n' "${t#v}"; fi
+  done | sort -t . -k1,1n -k2,2n -k3,3n -u | sed 's/^/v/'
+}
+
+# check_sha <value>: sha_ok=yes for a full 40-character lowercase hex SHA.
+check_sha() {
+  sha_ok=no
+  case "$1" in
+    *[!0-9a-f]*) return 0 ;;
+    *) ;;
+  esac
+  if [ "${#1}" -eq 40 ]; then sha_ok=yes; fi
+}
+
+# require_sha <value> <what>: exit 1 unless <value> is a full commit SHA.
+require_sha() {
+  check_sha "$1"
+  if [ "${sha_ok}" != yes ]; then
+    printf '%s is not a full commit SHA\n' "$2" >&2
+    exit 1
+  fi
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# Production hosts. Public names only; buckets and distributions come from
+# Actions variables (scripts/release/deploy config).
+marketing_url="${PROD_MARKETING_URL:-https://mechafighter.com/}"
+game_url="${PROD_GAME_URL:-https://game.mechafighter.com/}"
+
+# site_url <marketing|game>
+site_url() {
+  case "$1" in
+    marketing) printf '%s' "${marketing_url}" ;;
+    game) printf '%s' "${game_url}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The only bundles a release may carry, and their asset names.
+bundle_asset() {
+  case "$1" in
+    marketing) printf 'marketing-site.tar.gz' ;;
+    game) printf 'game-web.tar.gz' ;;
+    *) return 1 ;;
+  esac
+}

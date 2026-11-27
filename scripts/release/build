@@ -1,0 +1,40 @@
+#!/bin/sh
+# Build one release's assets with the same task targets as CI (#31).
+#
+# Usage: scripts/release/build <dist> <version> <commit> <ci-run-id>
+#
+# 1. task site:build: the Marketing Site (build/site/production).
+# 2. task godot:export:web: the Godot web export (build/web), when main has
+#    that target. TODO(#17): the target arrives with the Godot skeleton (PR
+#    #49). Until then the game bundle is skipped, explicitly: the manifest
+#    records it under "skipped" and the release notes say so. Nothing is faked.
+# 3. scripts/release/package: bundles, manifest.json and SHA256SUMS in <dist>.
+# Must run in a checkout of <commit>.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+
+usage='usage: build <dist> <version> <commit> <ci-run-id>'
+dist="${1:?${usage}}"
+version="${2:?${usage}}"
+commit="${3:?${usage}}"
+ci_run_id="${4:?${usage}}"
+
+head="$(git rev-parse HEAD)"
+if [ "${head}" != "${commit}" ]; then
+  printf 'build: the checkout is %s, not %s\n' "${head}" "${commit}" >&2
+  exit 1
+fi
+
+task site:build
+
+tasks="$(task --list-all --json)"
+if printf '%s' "${tasks}" | jq -e '[.tasks[].name] | index("godot:export:web") != null' >/dev/null; then
+  task godot:export:web
+  "${here}/package" "${dist}" "${version}" "${commit}" "${ci_run_id}" build/site/production build/web
+else
+  printf 'build: no godot:export:web task on this commit; the game bundle is skipped (TODO #17)\n' >&2
+  "${here}/package" "${dist}" "${version}" "${commit}" "${ci_run_id}" build/site/production - \
+    "no godot:export:web task on this commit yet (the Godot skeleton, #17); the Game Site is not part of this release"
+fi

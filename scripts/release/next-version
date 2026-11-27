@@ -1,0 +1,48 @@
+#!/bin/sh
+# Print the next release version (#31).
+#
+# Usage: <tag names, one per line> | scripts/release/next-version <patch|minor|major>
+#
+# The highest vX.Y.Z tag (see check_tag in lib-release: v1.2.3-rc, v01.2.3, vX and
+# other non-semver names are ignored) with the requested part bumped and the
+# lower parts reset. With no release tag at all, the first release is v0.1.0
+# whatever the bump.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=lib-release
+. "$(dirname "$0")/lib-release"
+
+bump="${1:-}"
+case "${bump}" in
+  patch | minor | major) ;;
+  *)
+    printf 'usage: next-version patch|minor|major (tags on stdin)\n' >&2
+    exit 64
+    ;;
+esac
+
+highest="$(release_tags | tail -n 1)"
+if [ -z "${highest}" ]; then
+  printf 'v0.1.0\n'
+  exit 0
+fi
+
+rest="${highest#v}"
+major="${rest%%.*}"
+rest="${rest#*.}"
+minor="${rest%%.*}"
+patch="${rest#*.}"
+case "${bump}" in
+  major) major=$((major + 1)) minor=0 patch=0 ;;
+  minor) minor=$((minor + 1)) patch=0 ;;
+  patch) patch=$((patch + 1)) ;;
+  *) exit 64 ;;
+esac
+next="v${major}.${minor}.${patch}"
+check_tag "${next}"
+if [ "${release_tag}" != yes ]; then
+  printf 'next-version: %s bumped past the 9-digit limit\n' "${highest}" >&2
+  exit 1
+fi
+printf '%s\n' "${next}"

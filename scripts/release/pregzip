@@ -1,0 +1,53 @@
+#!/bin/sh
+# Pre-compress the Godot web export's large binaries in place (#31, per #2).
+#
+# Usage: scripts/release/pregzip <export-dir> <meta-out>
+#
+# Every *.wasm and *.pck file under <export-dir> is replaced by its gzip
+# (-9, no name or timestamp, so the bytes are reproducible) under the same
+# name, and <meta-out> gets one line per file:
+#   <path relative to export-dir> TAB <Content-Type> TAB gzip
+# The deploy uploads exactly those files with that Content-Type and
+# Content-Encoding: gzip, so the browser decompresses them transparently.
+# Refuses symlinks or special files, and files that are already gzip (a
+# second pass would double-encode them).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+dir="${1:?usage: pregzip <export-dir> <meta-out>}"
+meta="${2:?usage: pregzip <export-dir> <meta-out>}"
+
+fail() {
+  printf 'pregzip: %s\n' "$*" >&2
+  exit 1
+}
+
+[ -d "${dir}" ] || fail "no directory ${dir}"
+[ ! -L "${dir}" ] || fail "${dir} is a symlink"
+odd="$(find "${dir}" ! -type f ! -type d -print | head -n 1)"
+[ -z "${odd}" ] || fail "not a regular file or directory: ${odd}"
+
+list="$(mktemp)"
+trap 'rm -f "${list}" "${list}.gz"' EXIT
+find "${dir}" -type f \( -name '*.wasm' -o -name '*.pck' \) -print | sort >"${list}"
+
+: >"${meta}"
+while IFS= read -r f; do
+  rel="${f#"${dir}"/}"
+  case "${rel}" in
+    *"	"* | *[][*?\\]* | "") fail "unsupported file name: ${rel}" ;;
+    *) ;;
+  esac
+  case "${f}" in
+    *.wasm) type=application/wasm ;;
+    *) type=application/octet-stream ;;
+  esac
+  magic="$(dd if="${f}" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  [ "${magic}" != 1f8b ] || fail "${rel} is already gzip"
+  gzip -n -9 -c "${f}" >"${list}.gz"
+  mv -f "${list}.gz" "${f}"
+  printf '%s\t%s\tgzip\n' "${rel}" "${type}" >>"${meta}"
+done <"${list}"
+count="$(wc -l <"${meta}" | tr -d ' ')"
+printf 'pregzip: %s file(s) compressed\n' "${count}" >&2

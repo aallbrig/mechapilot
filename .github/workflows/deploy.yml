@@ -1,0 +1,85 @@
+name: deploy
+
+# The owner's one button (#31): Actions, deploy, Run workflow (from main).
+# Pre-flight assertions, then the deploy, then post-deploy assertions, and an
+# automatic rollback to the version that was live if any post-check fails.
+# Nothing triggers this but a human with Actions write permission.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to deploy (previous = the one before the latest; deploying it is a rollback)
+        type: choice
+        options: [latest, previous]
+        default: latest
+      exact_version:
+        description: "Or an exact release, e.g. v0.1.7 (overrides version)"
+        type: string
+        required: false
+        default: ""
+      first_deploy:
+        description: "First deploy of a site that has no version.json yet (that site then has no rollback target)"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The environment admits only main; the deploy role trusts only main in
+    # this environment (infra/modules/github-deploy-trust).
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_VERSION: ${{ inputs.version }}
+      DEPLOY_EXACT_VERSION: ${{ inputs.exact_version }}
+      DEPLOY_FIRST: ${{ inputs.first_deploy }}
+      PROD_DEPLOY_ROLE_ARN: ${{ vars.PROD_DEPLOY_ROLE_ARN }}
+      PROD_MARKETING_BUCKET: ${{ vars.PROD_MARKETING_BUCKET }}
+      PROD_MARKETING_DISTRIBUTION_ID: ${{ vars.PROD_MARKETING_DISTRIBUTION_ID }}
+      PROD_GAME_BUCKET: ${{ vars.PROD_GAME_BUCKET }}
+      PROD_GAME_DISTRIBUTION_ID: ${{ vars.PROD_GAME_DISTRIBUTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          install_args: jq
+
+      - name: Configuration (main only; fails closed until infra is applied)
+        run: scripts/release/deploy config "${RUNNER_TEMP}/deploy"
+
+      - name: Pre-flight assertions (no credentials yet; changes nothing)
+        run: scripts/release/deploy preflight "${RUNNER_TEMP}/deploy"
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.PROD_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          role-session-name: mechafighter-deploy
+
+      - name: Deploy, post-deploy assertions, rollback on failure
+        run: |
+          aws --version
+          scripts/release/deploy apply "${RUNNER_TEMP}/deploy"
+
+      - name: Summary
+        if: always()
+        run: scripts/release/deploy summary "${RUNNER_TEMP}/deploy"

@@ -1,0 +1,112 @@
+#!/bin/sh
+# Plan the release of one main commit (#31): its version and its notes.
+#
+# Usage: scripts/release/plan <commit> <notes-out>
+#   prints version=vX.Y.Z and bump=patch|minor|major (for $GITHUB_OUTPUT)
+#
+# The change set is every first-parent commit on main after the newest
+# release tag, up to <commit>. Each one is a squash-merged PR whose subject is
+# "<PR title> (#<pr>)"; the PR title carries its issue as "(#<issue>)" and the
+# body may say "Closes #<issue>". The notes list each PR with its title and
+# linked issues.
+#
+# The bump is patch unless a PR in the change set is labelled release:major
+# or release:minor (the release skill applies those labels before merge).
+# Labels are read with `gh api repos/<repo>/pulls/<n>`, one call per PR; if
+# that is impossible the bump stays patch and the notes say why. The first
+# release is always v0.1.0.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-release
+. "${here}/lib-release"
+
+commit="${1:?usage: plan <commit> <notes-out>}"
+notes="${2:?usage: plan <commit> <notes-out>}"
+require_sha "${commit}" "commit"
+
+bt="$(printf '\140')" # a backtick
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+git tag --list >"${work}/tags"
+latest="$(release_tags <"${work}/tags" | tail -n 1)"
+if [ -n "${latest}" ]; then
+  range="refs/tags/${latest}..${commit}"
+else
+  range="${commit}"
+fi
+# One record per commit: sha, subject, body, separated by control characters
+# that cannot appear in a commit message line.
+git log --first-parent --format='%H%x1f%s%x1f%b%x1e' "${range}" >"${work}/log"
+
+# PR number = the last "(#n)" of the subject; issues = the other "(#n)" in
+# the subject plus "Closes/Fixes/Resolves #n" in the body.
+awk 'BEGIN { RS = "\036"; FS = "\037" }
+  NF >= 2 {
+    sha = $1; gsub(/^[[:space:]]+/, "", sha)
+    subj = $2; body = $3; pr = ""; issues = ""
+    if (match(subj, /[[:space:]]\(#[0-9]+\)$/)) {
+      pr = substr(subj, RSTART + 3, RLENGTH - 4)
+      subj = substr(subj, 1, RSTART - 1)
+    }
+    s = subj
+    while (match(s, /\(#[0-9]+\)/)) { issues = issues " " substr(s, RSTART + 2, RLENGTH - 3); s = substr(s, RSTART + RLENGTH) }
+    b = body
+    while (match(b, /([Cc]loses|[Ff]ixes|[Rr]esolves)[[:space:]]+#[0-9]+/)) {
+      m = substr(b, RSTART, RLENGTH); sub(/.*#/, "", m); issues = issues " " m; b = substr(b, RSTART + RLENGTH)
+    }
+    gsub(/[[:space:]]*\(#[0-9]+\)/, "", subj)
+    gsub(/\t/, " ", subj)
+    printf "%s\t%s\t%s\t%s\n", sha, pr, subj, issues
+  }' "${work}/log" >"${work}/changes.tsv"
+
+bump="patch"
+bump_note="patch (the default)"
+unreadable=""
+if [ -z "${latest}" ]; then
+  bump_note="first release"
+else
+  tab="$(printf '\t')"
+  while IFS="${tab}" read -r _sha pr _subj _issues; do
+    [ -n "${pr}" ] || continue
+    rc=0
+    gh api "repos/${GITHUB_REPOSITORY:?}/pulls/${pr}" --jq '.labels[].name' >"${work}/labels" 2>"${work}/err" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      unreadable="${unreadable} #${pr}"
+      continue
+    fi
+    if grep -qx 'release:major' "${work}/labels"; then
+      bump="major" bump_note="major (#${pr} is labelled release:major)"
+    elif grep -qx 'release:minor' "${work}/labels" && [ "${bump}" = patch ]; then
+      bump="minor" bump_note="minor (#${pr} is labelled release:minor)"
+    fi
+  done <"${work}/changes.tsv"
+  if [ -n "${unreadable}" ]; then
+    bump_note="${bump_note}; the labels of${unreadable} could not be read, so they were not counted"
+  fi
+fi
+
+version="$("${here}/next-version" "${bump}" <"${work}/tags")"
+
+{
+  printf '## %s\n\n' "${version}"
+  printf 'Commit %s%s%s. Bump: %s.\n\n' "${bt}" "${commit}" "${bt}" "${bump_note}"
+  printf '### Changes\n\n'
+  if [ -s "${work}/changes.tsv" ]; then
+    awk -F '\t' '{
+      line = "- " $3
+      if ($2 != "") line = line " (#" $2 ")"
+      n = split($4, is, " "); seen = ""
+      for (i = 1; i <= n; i++) if (is[i] != "" && index(seen, " " is[i] " ") == 0) { seen = seen " " is[i] " "; refs = refs (refs == "" ? "" : ", ") "#" is[i] }
+      if (refs != "") line = line ", issues " refs
+      refs = ""
+      print line
+    }' "${work}/changes.tsv"
+  else
+    printf -- '- No merged pull requests since %s.\n' "${latest:-the start}"
+  fi
+} >"${notes}"
+
+printf 'version=%s\nbump=%s\n' "${version}" "${bump}"

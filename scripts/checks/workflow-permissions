@@ -1,0 +1,91 @@
+#!/bin/sh
+# Least privilege for the release and deploy workflows (#31).
+#
+# Usage: scripts/checks/workflow-permissions [workflows-dir]
+#
+#   deploy.yml   requests exactly id-token: write and contents: read
+#   release.yml  requests exactly contents: write
+# at the workflow level, and every job declares its own permissions with no
+# scope and no level beyond that (read < write). No other workflow may request
+# contents: write (or write-all), so only release.yml can publish a release as
+# github-actions[bot], which the deploy's pre-flight relies on. Every other
+# workflow must declare workflow-level permissions, because a workflow that
+# declares none gets the repository's default token, which may write.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+dir="${1:-.github/workflows}"
+[ -d "${dir}" ] || {
+  printf 'workflow-permissions: no %s\n' "${dir}" >&2
+  exit 1
+}
+failed=0
+fail() {
+  printf 'workflow-permissions: %s\n' "$*"
+  failed=1
+}
+
+# policy <file> <allowed-permissions-json>
+policy() {
+  f="${dir}/$1"
+  if [ -L "${f}" ] || [ ! -f "${f}" ]; then
+    fail "$1 is missing, a symlink or not a regular file"
+    return 0
+  fi
+  json="$(yq -o=json '.' "${f}")" || {
+    fail "$1 does not parse"
+    return 0
+  }
+  problems="$(printf '%s' "${json}" | jq -r --argjson allowed "$2" '
+    def level: {"none": 0, "read": 1, "write": 2}[.] // 99;
+    def within: type == "object" and all(to_entries[]; ($allowed[.key] != null) and ((.value | level) <= ($allowed[.key] | level)));
+    (if .permissions != $allowed then "workflow-level permissions must be exactly \($allowed | tojson), not \(.permissions | tojson)" else empty end),
+    (.jobs // {} | to_entries[]
+      | if (.value | has("permissions") | not) then "job \(.key) must declare its permissions"
+        elif (.value.permissions | within | not) then "job \(.key) requests \(.value.permissions | tojson), beyond \($allowed | tojson)"
+        else empty end)')"
+  if [ -n "${problems}" ]; then
+    printf '%s\n' "${problems}" | while IFS= read -r p; do printf 'workflow-permissions: %s: %s\n' "$1" "${p}"; done
+    failed=1
+  fi
+}
+
+policy deploy.yml '{"id-token": "write", "contents": "read"}'
+# deploy.yml's jobs run in the production environment (the environment's
+# main-only branch policy and the role's trust rely on it), as exactly that name.
+if [ -f "${dir}/deploy.yml" ] && [ ! -L "${dir}/deploy.yml" ]; then
+  envs="$(yq -o=json '.' "${dir}/deploy.yml" | jq -r '[.jobs // {} | .[] | (.environment | if type == "object" then .name else . end)] | map(tostring) | unique | join(",")')" || envs=""
+  [ "${envs}" = production ] || fail "deploy.yml: every job must use the production environment (found: ${envs:-none})"
+fi
+policy release.yml '{"contents": "write"}'
+
+# Every *.yml and *.yaml directly in the directory, dotfiles included.
+list="$(mktemp)"
+trap 'rm -f "${list}"' EXIT
+find "${dir}/." ! -name . -prune \( -name '*.yml' -o -name '*.yaml' \) -print | sort >"${list}"
+while IFS= read -r f; do
+  if [ -L "${f}" ] || [ ! -f "${f}" ]; then
+    fail "${f##*/} is a symlink or not a regular file"
+    continue
+  fi
+  case "${f##*/}" in
+    release.yml) continue ;;
+    *) ;;
+  esac
+  json="$(yq -o=json '.' "${f}")" || {
+    fail "${f##*/} does not parse"
+    continue
+  }
+  writes="$(printf '%s' "${json}" | jq -r '
+    if .permissions == null then "the repository default (no workflow-level permissions)" else
+    [.permissions, (.jobs // {} | .[].permissions)]
+    | map(select(. != null))
+    | map(if type == "string" then (if . == "write-all" then "write-all" else empty end)
+          elif .contents == "write" then "contents: write" else empty end)
+    | unique | join(", ") end')" || writes="unparseable"
+  if [ -n "${writes}" ]; then fail "${f##*/} requests ${writes}; only release.yml may write contents"; fi
+done <"${list}"
+
+if [ "${failed}" -ne 0 ]; then exit 1; fi
+printf 'workflow-permissions: ok\n'

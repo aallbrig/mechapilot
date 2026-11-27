@@ -4,6 +4,6 @@ output "policy_json" {
 }
 
 output "subject_pattern" {
-  description = "The single StringLike pattern the token's sub claim must match."
+  description = "The exact (StringEquals) subject the token's sub claim must equal."
   value       = local.subject
 }

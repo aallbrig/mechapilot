@@ -1,0 +1,605 @@
+#!/bin/sh
+# Deploy a release to Production, with assertions and automatic rollback (#31).
+#
+# Usage: scripts/release/deploy config|preflight|apply|summary <work-dir>
+#        scripts/release/deploy resolve <releases.json>
+#
+# deploy.yml runs, in one job on main in the production environment:
+#   config     the run is a workflow_dispatch on main, and the five Actions
+#              variables (PROD_DEPLOY_ROLE_ARN, PROD_MARKETING_BUCKET,
+#              PROD_MARKETING_DISTRIBUTION_ID, PROD_GAME_BUCKET,
+#              PROD_GAME_DISTRIBUTION_ID) are set and well formed; they are
+#              masked in the log. Fails closed until a human applies infra/.
+#   preflight  no AWS credentials exist yet, and nothing is changed:
+#              resolve the target (DEPLOY_VERSION latest|previous, or
+#              DEPLOY_EXACT_VERSION) among releases the release workflow
+#              published; the release is immutable or every one of its
+#              assets was uploaded by the release workflow (a later
+#              `gh release upload --clobber` by anyone else is refused), and
+#              each asset is downloaded by its asset id, so exactly the vetted
+#              bytes are judged; the assets match SHA256SUMS exactly and
+#              manifest.json matches the tag's commit on main and a green ci;
+#              every bundled file matches the manifest; Production answers
+#              (prod-smoke) and the version each site serves (version.json) is
+#              recorded and its release verified the same way as that site's
+#              rollback target. A site that has never been deployed (no
+#              version.json) is refused unless DEPLOY_FIRST=true, and then it
+#              has no rollback target.
+#   apply      (after configure-aws-credentials) for each site in the target:
+#              upload the pre-gzipped files with their Content-Type and
+#              Content-Encoding, sync the rest with --delete, write
+#              version.json, invalidate CloudFront and wait. Then the
+#              post-deploy assertions: prod-smoke, version.json equals the
+#              target, and the game's pre-gzipped files answer 200 with the
+#              right type, encoding and sha256. If any fails, every site that
+#              had a previous version gets its own previous version back the
+#              same way, the assertions run again for it, and the run fails.
+#   summary    what was live before, what is live now, every assertion, and
+#              the 10 most recent releases (to $GITHUB_STEP_SUMMARY).
+#   resolve    print the release tag the inputs select from a JSON array of
+#              GitHub release objects (GET /repos/{o}/{r}/releases, every page).
+#
+# Helpers keep their variables apart by prefix (sh has no locals), so no
+# helper can clobber a caller's loop variable.
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-release
+. "${here}/lib-release"
+smoke="${here}/../checks/prod-smoke"
+release_bot="github-actions[bot]"
+
+usage='usage: deploy config|preflight|apply|summary <work-dir> | deploy resolve <releases.json>'
+cmd="${1:?${usage}}"
+arg="${2:?${usage}}"
+work=""
+
+note() {
+  printf 'deploy: %s\n' "$*" >&2
+}
+
+# assertion <phase> <name> <pass|fail> <detail>
+assertion() {
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >>"${work}/assertions.tsv"
+  note "$1: $2: $3: $4"
+}
+
+# refuse <why>: stop with nothing changed (or nothing more changed).
+refuse() {
+  note "REFUSED: $*"
+  if [ -n "${work}" ] && [ -d "${work}" ]; then printf 'refused\t%s\n' "$*" >"${work}/outcome"; fi
+  exit 1
+}
+
+# state_get <key>: a value preflight recorded (from the partial state if
+# preflight stopped early).
+state_get() {
+  sg_file="${work}/state"
+  [ -f "${sg_file}" ] || sg_file="${work}/state.tmp"
+  [ -f "${sg_file}" ] || return 0
+  awk -F '\t' -v k="$1" '$1 == k { print $2 }' "${sg_file}"
+}
+
+gh_repo="${GITHUB_REPOSITORY:-}"
+
+# ---- config ----
+
+# check_var <name> <value> <ERE>: collect a missing or malformed variable.
+check_var() {
+  if [ -z "$2" ]; then
+    missing="${missing} $1"
+  elif ! printf '%s\n' "$2" | grep -Eqx "$3"; then
+    malformed="${malformed} $1"
+  fi
+}
+
+config() {
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    for cf_value in "${PROD_DEPLOY_ROLE_ARN:-}" "${PROD_MARKETING_BUCKET:-}" "${PROD_MARKETING_DISTRIBUTION_ID:-}" \
+      "${PROD_GAME_BUCKET:-}" "${PROD_GAME_DISTRIBUTION_ID:-}"; do
+      if [ -n "${cf_value}" ]; then printf '::add-mask::%s\n' "${cf_value}"; fi
+    done
+  fi
+  [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ] || refuse "deploy runs only from Run workflow (workflow_dispatch), not ${GITHUB_EVENT_NAME:-unset}"
+  [ "${GITHUB_REF:-}" = refs/heads/main ] || refuse "deploy runs only from main, not ${GITHUB_REF:-unset}"
+  missing=""
+  malformed=""
+  check_var PROD_DEPLOY_ROLE_ARN "${PROD_DEPLOY_ROLE_ARN:-}" 'arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+'
+  cf_bucket_re='[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+  cf_dist_re='[A-Z0-9]{8,32}'
+  check_var PROD_MARKETING_BUCKET "${PROD_MARKETING_BUCKET:-}" "${cf_bucket_re}"
+  check_var PROD_MARKETING_DISTRIBUTION_ID "${PROD_MARKETING_DISTRIBUTION_ID:-}" "${cf_dist_re}"
+  check_var PROD_GAME_BUCKET "${PROD_GAME_BUCKET:-}" "${cf_bucket_re}"
+  check_var PROD_GAME_DISTRIBUTION_ID "${PROD_GAME_DISTRIBUTION_ID:-}" "${cf_dist_re}"
+  if [ -n "${missing}" ]; then
+    refuse "not configured: the Actions variable(s)${missing} are not set. A human must apply infra/ (infra/README.md) and store its outputs as variables of the production environment (docs/RELEASING.md). Nothing was changed."
+  fi
+  [ -z "${malformed}" ] || refuse "malformed Actions variable(s):${malformed}. Nothing was changed."
+}
+
+# ---- resolve ----
+
+resolve() {
+  rs_tags="$(jq -r --arg bot "${release_bot}" '
+    .[] | select(.draft == false and .prerelease == false and .author.login == $bot) | .tag_name' "$1")" ||
+    refuse "cannot read the release list"
+  rs_known="$(printf '%s\n' "${rs_tags}" | release_tags)"
+  rs_exact="${DEPLOY_EXACT_VERSION:-}"
+  rs_target=""
+  if [ -n "${rs_exact}" ]; then
+    check_tag "${rs_exact}"
+    [ "${release_tag}" = yes ] || refuse "exact_version '${rs_exact}' is not a vX.Y.Z version"
+    printf '%s\n' "${rs_known}" | grep -qx "${rs_exact}" ||
+      refuse "there is no published release ${rs_exact} from the release workflow"
+    rs_target="${rs_exact}"
+  else
+    rs_count="$(printf '%s\n' "${rs_known}" | grep -c . || true)"
+    case "${DEPLOY_VERSION:-latest}" in
+      latest) rs_target="$(printf '%s\n' "${rs_known}" | tail -n 1)" ;;
+      previous)
+        [ "${rs_count}" -ge 2 ] || refuse "there is no previous release (only ${rs_count} published)"
+        rs_target="$(printf '%s\n' "${rs_known}" | tail -n 2 | head -n 1)"
+        ;;
+      *) refuse "version must be latest or previous, not '${DEPLOY_VERSION}'" ;;
+    esac
+  fi
+  [ -n "${rs_target}" ] || refuse "there is no published release to deploy"
+  printf '%s\n' "${rs_target}"
+}
+
+# ---- verification of one release ----
+
+# verify_release <tag>: download the release into ${work}/releases/<tag> and
+# prove it is exactly what the release workflow built for that tag's commit.
+# Sets verified_commit and verified_provenance.
+verify_release() {
+  vr_tag="$1"
+  vr_dir="${work}/releases/${vr_tag}"
+  vr_a="${vr_dir}/assets"
+  rm -rf "${vr_dir}"
+  mkdir -p "${vr_a}"
+
+  # Provenance, from the API's own record of the release and its assets.
+  gh api "repos/${gh_repo}/releases/tags/${vr_tag}" >"${vr_dir}/release.json" || refuse "release ${vr_tag} not found"
+  jq -e --arg t "${vr_tag}" --arg bot "${release_bot}" \
+    '.tag_name == $t and .draft == false and .prerelease == false and .author.login == $bot' \
+    "${vr_dir}/release.json" >/dev/null ||
+    refuse "release ${vr_tag} is a draft, a pre-release, or was not published by the release workflow (${release_bot})"
+  vr_provenance="$(jq -r --arg bot "${release_bot}" '
+    if .immutable == true then "immutable release"
+    elif ((.assets | length) > 0 and all(.assets[]; .uploader.login == $bot and .state == "uploaded"))
+      then "every asset uploaded by \($bot)"
+    else "" end' "${vr_dir}/release.json")"
+  [ -n "${vr_provenance}" ] ||
+    refuse "release ${vr_tag}: an asset was uploaded (or replaced) by someone other than the release workflow, and the release is not immutable"
+  jq -r '.assets[] | [(.id | tostring), .name, (.digest // "")] | @tsv' "${vr_dir}/release.json" >"${vr_dir}/asset-list"
+  vr_names="$(cut -f 2 "${vr_dir}/asset-list" | sort)"
+  vr_unique="$(printf '%s\n' "${vr_names}" | sort -u)"
+  [ "${vr_names}" = "${vr_unique}" ] || refuse "${vr_tag}: two assets share a name"
+  vr_tab="$(printf '\t')"
+  while IFS="${vr_tab}" read -r vr_id vr_name vr_digest; do
+    case "${vr_name}" in
+      SHA256SUMS | manifest.json | marketing-site.tar.gz | game-web.tar.gz) ;;
+      *) refuse "${vr_tag}: unexpected asset ${vr_name}" ;;
+    esac
+    case "${vr_id}" in
+      "" | *[!0-9]*) refuse "${vr_tag}: asset ${vr_name} has no numeric id" ;;
+      *) ;;
+    esac
+    # By id: a replaced asset gets a new id, so these are the vetted bytes.
+    gh api -H 'Accept: application/octet-stream' "repos/${gh_repo}/releases/assets/${vr_id}" >"${vr_a}/${vr_name}" ||
+      refuse "could not download ${vr_name} of ${vr_tag}"
+    if [ -n "${vr_digest}" ]; then
+      vr_got="sha256:$(sha256_of "${vr_a}/${vr_name}")"
+      [ "${vr_got}" = "${vr_digest}" ] || refuse "${vr_tag}: ${vr_name} does not match the digest GitHub recorded"
+    fi
+  done <"${vr_dir}/asset-list"
+
+  [ -f "${vr_a}/SHA256SUMS" ] || refuse "${vr_tag} has no SHA256SUMS"
+  vr_bad="$(grep -Evc '^[0-9a-f]{64}  (manifest\.json|marketing-site\.tar\.gz|game-web\.tar\.gz)$' "${vr_a}/SHA256SUMS" || true)"
+  [ "${vr_bad}" -eq 0 ] || refuse "${vr_tag}: SHA256SUMS has ${vr_bad} malformed or unexpected line(s)"
+  cut -c 67- "${vr_a}/SHA256SUMS" | sort >"${vr_dir}/listed"
+  vr_dups="$(uniq -d "${vr_dir}/listed")"
+  [ -z "${vr_dups}" ] || refuse "${vr_tag}: SHA256SUMS lists a file twice"
+  grep -qx manifest.json "${vr_dir}/listed" || refuse "${vr_tag}: SHA256SUMS does not cover manifest.json"
+  { printf 'SHA256SUMS\n' && cat "${vr_dir}/listed"; } | sort >"${vr_dir}/expected-names"
+  (cd "${vr_a}" && ls -A) | sort >"${vr_dir}/actual-names"
+  cmp -s "${vr_dir}/expected-names" "${vr_dir}/actual-names" ||
+    refuse "${vr_tag}: the release assets are not exactly the files SHA256SUMS lists"
+  while read -r vr_sum vr_name; do
+    vr_actual="$(sha256_of "${vr_a}/${vr_name}")"
+    [ "${vr_actual}" = "${vr_sum}" ] || refuse "${vr_tag}: ${vr_name} does not match SHA256SUMS"
+  done <"${vr_a}/SHA256SUMS"
+
+  vr_commit="$(git rev-parse --verify --quiet "refs/tags/${vr_tag}^{commit}" || true)"
+  [ -n "${vr_commit}" ] || refuse "tag ${vr_tag} is not in this clone"
+  git merge-base --is-ancestor "${vr_commit}" "${DEPLOY_MAIN_REF:-HEAD}" || refuse "${vr_tag} (${vr_commit}) is not on main"
+  vr_sums="$(jq -R -s 'split("\n") | map(select(length > 0) | {key: .[66:], value: .[0:64]}) | from_entries' "${vr_a}/SHA256SUMS")"
+  jq -e --arg t "${vr_tag}" --arg c "${vr_commit}" --argjson sums "${vr_sums}" '
+    def asset_of: {marketing: "marketing-site.tar.gz", game: "game-web.tar.gz"}[.];
+    .schema_version == 1 and .version == $t and .commit == $c
+    and (.bundles | type) == "object" and (.bundles | has("marketing"))
+    and ((.bundles | keys) - ["game", "marketing"]) == []
+    and all(.bundles | to_entries[]; .value.asset == (.key | asset_of) and .value.sha256 == $sums[.value.asset])
+    and ([.bundles[].asset] | sort) == ($sums | keys | map(select(endswith(".tar.gz"))) | sort)' \
+    "${vr_a}/manifest.json" >/dev/null || refuse "${vr_tag}: manifest.json does not match the tag, its commit or SHA256SUMS"
+  jq -e '.ci.workflow == ".github/workflows/ci.yml" and .ci.event == "push" and .ci.branch == "main"
+    and .ci.conclusion == "success" and (.ci.run_id | type) == "number"' "${vr_a}/manifest.json" >/dev/null ||
+    refuse "${vr_tag}: the manifest does not record a green ci push run on main"
+
+  for vr_bundle in $(jq -r '.bundles | keys[]' "${vr_a}/manifest.json"); do
+    extract_bundle "${vr_tag}" "${vr_bundle}"
+  done
+  verified_commit="${vr_commit}"
+  verified_provenance="${vr_provenance}"
+}
+
+# extract_bundle <tag> <site>: unpack a bundle and match every file to the manifest.
+extract_bundle() {
+  eb_dir="${work}/releases/$1"
+  eb_asset="${eb_dir}/assets/$(bundle_asset "$2")"
+  eb_dest="${eb_dir}/$2"
+  tar -tzf "${eb_asset}" >"${eb_dir}/$2.names" || refuse "$1: $2 bundle is not a tar.gz"
+  tar -tvzf "${eb_asset}" >"${eb_dir}/$2.long" || refuse "$1: $2 bundle is not a tar.gz"
+  eb_types="$(cut -c 1 "${eb_dir}/$2.long" | sort -u | tr -d '\n')"
+  case "${eb_types}" in
+    - | d- | -d | d) ;;
+    *) refuse "$1: $2 bundle holds links or special files" ;;
+  esac
+  eb_unsafe="$(grep -E '^/|(^|/)\.\.(/|$)' "${eb_dir}/$2.names" | head -n 1 || true)"
+  [ -z "${eb_unsafe}" ] || refuse "$1: $2 bundle has an unsafe path"
+  rm -rf "${eb_dest}"
+  mkdir -p "${eb_dest}"
+  tar -xzf "${eb_asset}" -C "${eb_dest}" || refuse "$1: cannot unpack the $2 bundle"
+  eb_odd="$(find "${eb_dest}" ! -type f ! -type d -print | head -n 1)"
+  [ -z "${eb_odd}" ] || refuse "$1: $2 bundle unpacked a non-regular file"
+  jq -r --arg s "$2" '.bundles[$s].files[] | .path + "\t" + .sha256' "${eb_dir}/assets/manifest.json" | sort >"${eb_dir}/$2.want"
+  (cd "${eb_dest}" && find . -type f -print | sed 's|^\./||' | sort) >"${eb_dir}/$2.files"
+  : >"${eb_dir}/$2.have"
+  while IFS= read -r eb_f; do
+    eb_s="$(sha256_of "${eb_dest}/${eb_f}")"
+    printf '%s\t%s\n' "${eb_f}" "${eb_s}" >>"${eb_dir}/$2.have"
+  done <"${eb_dir}/$2.files"
+  sort -o "${eb_dir}/$2.have" "${eb_dir}/$2.have"
+  cmp -s "${eb_dir}/$2.want" "${eb_dir}/$2.have" || refuse "$1: the $2 bundle's files do not match manifest.json"
+}
+
+# live_version <site>: set live to "<version> <commit>" from the site's
+# version.json, or to "none"; live_url is the URL read.
+live_version() {
+  live=none
+  live_url="$(site_url "$1")version.json"
+  lv_file="${work}/live-$1.json"
+  rm -f "${lv_file}"
+  curl --silent --fail --max-time 20 --output "${lv_file}" "${live_url}" 2>/dev/null || return 0
+  lv_v="$(jq -r 'if (.version | type) == "string" and (.commit | type) == "string" then .version + " " + .commit else "" end' "${lv_file}" 2>/dev/null || true)"
+  check_tag "${lv_v%% *}"
+  check_sha "${lv_v#* }"
+  if [ "${release_tag}" = yes ] && [ "${sha_ok}" = yes ]; then live="${lv_v}"; fi
+}
+
+# ---- preflight ----
+
+preflight() {
+  mkdir -p "${work}"
+  # A fresh start every time, as on a new runner: nothing from an earlier
+  # attempt is trusted.
+  rm -rf "${work}/releases"
+  rm -f "${work}/state" "${work}/state.tmp" "${work}/outcome"
+  : >"${work}/assertions.tsv"
+  [ -n "${gh_repo}" ] || refuse "GITHUB_REPOSITORY is unset"
+  gh api --paginate --slurp "repos/${gh_repo}/releases?per_page=100" >"${work}/release-pages.json" ||
+    refuse "cannot list the releases"
+  jq 'add // []' "${work}/release-pages.json" >"${work}/releases.json" || refuse "cannot read the release list"
+  "${here}/deploy" resolve "${work}/releases.json" >"${work}/target" || refuse "cannot resolve the version to deploy"
+  pf_target="$(cat "${work}/target")"
+  assertion pre target pass "${pf_target} (version=${DEPLOY_VERSION:-latest}${DEPLOY_EXACT_VERSION:+, exact_version=${DEPLOY_EXACT_VERSION}})"
+
+  verify_release "${pf_target}"
+  pf_commit="${verified_commit}"
+  assertion pre provenance pass "${pf_target}: published by ${release_bot}; ${verified_provenance}"
+  assertion pre checksums pass "${pf_target}: assets match SHA256SUMS and manifest.json, every bundled file matches"
+  assertion pre ci pass "${pf_target}: ${pf_commit} is on main and its ci push run succeeded"
+  pf_manifest="${work}/releases/${pf_target}/assets/manifest.json"
+  pf_sites="$(jq -r '.bundles | keys | join(" ")' "${pf_manifest}")"
+  pf_skipped="$(jq -r '[.skipped[]?.bundle] | join(" ")' "${pf_manifest}")"
+  {
+    printf 'target\t%s\n' "${pf_target}"
+    printf 'target_commit\t%s\n' "${pf_commit}"
+    printf 'sites\t%s\n' "${pf_sites}"
+    printf 'skipped\t%s\n' "${pf_skipped}"
+  } >"${work}/state.tmp"
+
+  # Record every site's live version first, so a refusal still shows them.
+  pf_smoke=""
+  pf_unversioned=""
+  for pf_site in ${pf_sites}; do
+    live_version "${pf_site}"
+    printf 'prev_%s\t%s\n' "${pf_site}" "${live%% *}" >>"${work}/state.tmp"
+    printf 'prevcommit_%s\t%s\n' "${pf_site}" "${live#* }" >>"${work}/state.tmp"
+    if [ "${live}" = none ]; then
+      pf_unversioned="${pf_unversioned} ${pf_site}:${live_url}"
+    else
+      assertion pre "live-${pf_site}" pass "serves ${live%% *} (${live#* }): the rollback target"
+      pf_url="$(site_url "${pf_site}")"
+      pf_smoke="${pf_smoke} ${pf_url}"
+    fi
+  done
+  for pf_entry in ${pf_unversioned}; do
+    pf_site="${pf_entry%%:*}"
+    if [ "${DEPLOY_FIRST:-false}" != true ]; then
+      refuse "${pf_site}: ${pf_entry#*:} is missing or invalid, so there is no version to roll back to. If this site has never been deployed, run again with first_deploy checked. Nothing was changed."
+    fi
+    assertion pre "live-${pf_site}" pass "nothing deployed yet (first_deploy): no rollback target"
+  done
+
+  if [ -n "${pf_smoke}" ]; then
+    pf_rc=0
+    PROD_SMOKE_URLS="${pf_smoke# }" "${smoke}" >"${work}/smoke-pre.log" 2>&1 || pf_rc=$?
+    if [ "${pf_rc}" -ne 0 ]; then
+      pf_log="$(tr '\n' ' ' <"${work}/smoke-pre.log")"
+      refuse "Production is not healthy before the deploy (prod-smoke: ${pf_log}). Nothing was changed."
+    fi
+    assertion pre prod-smoke pass "${pf_smoke# }"
+  else
+    assertion pre prod-smoke pass "skipped: no site is deployed yet (first_deploy)"
+  fi
+
+  # Each site's own rollback target, verified like the target itself.
+  for pf_site in ${pf_sites}; do
+    pf_prev="$(state_get "prev_${pf_site}")"
+    [ "${pf_prev}" != none ] || continue
+    if [ ! -f "${work}/releases/${pf_prev}/assets/manifest.json" ]; then
+      verify_release "${pf_prev}"
+    fi
+    pf_want="$(state_get "prevcommit_${pf_site}")"
+    pf_have="$(jq -r .commit "${work}/releases/${pf_prev}/assets/manifest.json")"
+    [ "${pf_have}" = "${pf_want}" ] ||
+      refuse "${pf_site}: the live version.json says ${pf_prev} is ${pf_want}, but that release is ${pf_have}"
+    [ -d "${work}/releases/${pf_prev}/${pf_site}" ] || refuse "${pf_site}: the rollback target ${pf_prev} has no ${pf_site} bundle"
+    assertion pre "rollback-${pf_site}" pass "${pf_prev} verified and ready"
+  done
+
+  mv -f "${work}/state.tmp" "${work}/state"
+  printf 'preflight-ok\t%s\n' "${pf_target}" >"${work}/outcome"
+}
+
+# ---- apply ----
+
+site_bucket() {
+  case "$1" in
+    marketing) printf '%s' "${PROD_MARKETING_BUCKET}" ;;
+    *) printf '%s' "${PROD_GAME_BUCKET}" ;;
+  esac
+}
+
+site_distribution() {
+  case "$1" in
+    marketing) printf '%s' "${PROD_MARKETING_DISTRIBUTION_ID}" ;;
+    *) printf '%s' "${PROD_GAME_DISTRIBUTION_ID}" ;;
+  esac
+}
+
+# encoded_files <manifest> <site>: path, Content-Type, Content-Encoding and
+# sha256 of every pre-gzipped file of one bundle.
+encoded_files() {
+  jq -r --arg s "$2" '.bundles[$s].files[] | select(.content_encoding != null)
+    | [.path, .content_type, .content_encoding, .sha256] | @tsv' "$1"
+}
+
+# deploy_site <site> <tag>: put one verified release's bundle on one site.
+# Sets aws_failed=1 if any upload fails.
+deploy_site() {
+  ds_site="$1"
+  ds_tag="$2"
+  ds_src="${work}/releases/${ds_tag}/${ds_site}"
+  ds_manifest="${work}/releases/${ds_tag}/assets/manifest.json"
+  ds_bucket="$(site_bucket "${ds_site}")"
+  ds_commit="$(jq -r .commit "${ds_manifest}")"
+  # Newer than anything in the bucket, so `aws s3 sync` re-uploads every file
+  # even when a rollback brings back older files of the same size.
+  find "${ds_src}" -type f -exec touch {} +
+  jq -n --arg v "${ds_tag}" --arg c "${ds_commit}" '{version: $v, commit: $c}' >"${work}/version-${ds_site}.json"
+  encoded_files "${ds_manifest}" "${ds_site}" >"${work}/encoded-${ds_site}.tsv"
+  ds_excludes="${work}/excludes-${ds_site}"
+  printf 'version.json\n' >"${ds_excludes}"
+  ds_tab="$(printf '\t')"
+  while IFS="${ds_tab}" read -r ds_path ds_type ds_encoding _ds_sum; do
+    aws s3 cp "${ds_src}/${ds_path}" "s3://${ds_bucket}/${ds_path}" --content-type "${ds_type}" \
+      --content-encoding "${ds_encoding}" --only-show-errors --no-progress || aws_failed=1
+    printf '%s\n' "${ds_path}" >>"${ds_excludes}"
+  done <"${work}/encoded-${ds_site}.tsv"
+  set --
+  while IFS= read -r ds_path; do set -- "$@" --exclude "${ds_path}"; done <"${ds_excludes}"
+  aws s3 sync "${ds_src}" "s3://${ds_bucket}/" --delete --only-show-errors --no-progress "$@" || aws_failed=1
+  aws s3 cp "${work}/version-${ds_site}.json" "s3://${ds_bucket}/version.json" --content-type application/json \
+    --cache-control no-cache --only-show-errors --no-progress || aws_failed=1
+}
+
+# invalidate <site>: invalidate everything and wait until CloudFront is done.
+invalidate() {
+  iv_distribution="$(site_distribution "$1")"
+  iv_id="$(aws cloudfront create-invalidation --distribution-id "${iv_distribution}" --paths '/*' \
+    --query Invalidation.Id --output text)" || {
+    aws_failed=1
+    return 0
+  }
+  aws cloudfront wait invalidation-completed --distribution-id "${iv_distribution}" --id "${iv_id}" || aws_failed=1
+}
+
+# postcheck <phase> <site> <tag>: the post-deploy assertions for one site.
+# Sets check_failed=1 on any failure.
+postcheck() {
+  pc_url="$(site_url "$2")"
+  if PROD_SMOKE_URLS="${pc_url}" "${smoke}" >"${work}/smoke-$1-$2.log" 2>&1; then
+    assertion "$1" "prod-smoke-$2" pass "${pc_url}"
+  else
+    pc_log="$(tr '\n' ' ' <"${work}/smoke-$1-$2.log")"
+    assertion "$1" "prod-smoke-$2" fail "${pc_log}"
+    check_failed=1
+  fi
+  pc_manifest="${work}/releases/$3/assets/manifest.json"
+  live_version "$2"
+  pc_commit="$(jq -r .commit "${pc_manifest}")"
+  if [ "${live}" = "$3 ${pc_commit}" ]; then
+    assertion "$1" "version-$2" pass "version.json is $3"
+  else
+    assertion "$1" "version-$2" fail "version.json is ${live%% *}, expected $3"
+    check_failed=1
+  fi
+  encoded_files "${pc_manifest}" "$2" >"${work}/encoded-check.tsv"
+  pc_tab="$(printf '\t')"
+  while IFS="${pc_tab}" read -r pc_path pc_type pc_encoding pc_sum; do
+    pc_h="${work}/headers"
+    pc_body="${work}/body"
+    rm -f "${pc_h}" "${pc_body}"
+    # No --compressed: the stored (gzip) bytes come back as they are.
+    curl --silent --max-time 60 --output "${pc_body}" --dump-header "${pc_h}" -H 'Accept-Encoding: gzip' \
+      "${pc_url}${pc_path}" || : >"${pc_h}"
+    pc_got="$(tr -d '\r' <"${pc_h}" | awk '
+      NR == 1 { status = $2 }
+      tolower($1) == "content-type:" { t = $2; sub(/;.*/, "", t) }
+      tolower($1) == "content-encoding:" { e = $2 }
+      END { printf "%s %s %s", status, t, e }')"
+    pc_served=none
+    if [ -f "${pc_body}" ]; then pc_served="$(sha256_of "${pc_body}")"; fi
+    if [ "${pc_got}" = "200 ${pc_type} ${pc_encoding}" ] && [ "${pc_served}" = "${pc_sum}" ]; then
+      assertion "$1" "asset-$2-${pc_path}" pass "200, ${pc_type}, ${pc_encoding}, sha256 matches the manifest"
+    else
+      assertion "$1" "asset-$2-${pc_path}" fail "got '${pc_got}' sha256 ${pc_served}, expected '200 ${pc_type} ${pc_encoding}' sha256 ${pc_sum}"
+      check_failed=1
+    fi
+  done <"${work}/encoded-check.tsv"
+}
+
+apply() {
+  ap_stage=""
+  if [ -f "${work}/outcome" ]; then ap_stage="$(cut -f 1 "${work}/outcome")"; fi
+  [ "${ap_stage}" = preflight-ok ] ||
+    refuse "the pre-flight assertions have not passed; nothing was deployed"
+  config
+  ap_target="$(state_get target)"
+  ap_sites="$(state_get sites)"
+  printf 'deploying\t%s\n' "${ap_target}" >"${work}/outcome"
+
+  aws_failed=0
+  for ap_site in ${ap_sites}; do deploy_site "${ap_site}" "${ap_target}"; done
+  for ap_site in ${ap_sites}; do invalidate "${ap_site}"; done
+  check_failed=0
+  if [ "${aws_failed}" -ne 0 ]; then
+    assertion post upload fail "an upload or invalidation failed"
+    check_failed=1
+  else
+    assertion post upload pass "${ap_sites}: synced, version.json written, CloudFront invalidated"
+  fi
+  for ap_site in ${ap_sites}; do postcheck post "${ap_site}" "${ap_target}"; done
+  if [ "${check_failed}" -eq 0 ]; then
+    printf 'deployed\t%s\n' "${ap_target}" >"${work}/outcome"
+    note "deployed ${ap_target}"
+    return 0
+  fi
+
+  note "a post-deploy assertion failed: rolling back"
+  aws_failed=0
+  ap_rolled=""
+  for ap_site in ${ap_sites}; do
+    ap_prev="$(state_get "prev_${ap_site}")"
+    if [ "${ap_prev}" = none ]; then
+      assertion rollback "rollback-${ap_site}" fail "no previous version to roll back to (first deploy)"
+      continue
+    fi
+    deploy_site "${ap_site}" "${ap_prev}"
+    ap_rolled="${ap_rolled} ${ap_site}"
+  done
+  for ap_site in ${ap_rolled}; do invalidate "${ap_site}"; done
+  check_failed=0
+  [ "${aws_failed}" -eq 0 ] || {
+    assertion rollback upload fail "an upload or invalidation failed during the rollback"
+    check_failed=1
+  }
+  for ap_site in ${ap_rolled}; do
+    ap_prev="$(state_get "prev_${ap_site}")"
+    postcheck rollback "${ap_site}" "${ap_prev}"
+  done
+  if [ -n "${ap_rolled}" ] && [ "${check_failed}" -eq 0 ]; then
+    printf 'rolled-back\t%s failed its post-deploy assertions; each site is back on the version it served before, and passes them\n' "${ap_target}" >"${work}/outcome"
+  else
+    printf 'rollback-failed\t%s failed its post-deploy assertions and the rollback did not fully recover: act now\n' "${ap_target}" >"${work}/outcome"
+  fi
+  ap_detail="$(cut -f 2 "${work}/outcome")"
+  note "${ap_detail}"
+  exit 1
+}
+
+# ---- summary ----
+
+summary() {
+  sm_out="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+  sm_outcome="unknown"
+  sm_detail=""
+  if [ -f "${work}/outcome" ]; then
+    sm_outcome="$(cut -f 1 "${work}/outcome")"
+    sm_detail="$(cut -f 2 "${work}/outcome")"
+  fi
+  sm_target="$(state_get target)"
+  sm_rollback=""
+  {
+    printf '## Deploy: %s\n\n' "${sm_outcome}"
+    if [ -n "${sm_detail}" ]; then printf '%s\n\n' "${sm_detail}"; fi
+    sm_sites="$(state_get sites)"
+    if [ -n "${sm_sites}" ]; then
+      printf '| Site | Before | Target | Live now |\n|---|---|---|---|\n'
+      for sm_site in ${sm_sites}; do
+        live_version "${sm_site}"
+        sm_prev="$(state_get "prev_${sm_site}")"
+        printf '| %s | %s | %s | %s |\n' "${sm_site}" "${sm_prev:-unknown}" "${sm_target}" "${live%% *}"
+        if [ -n "${sm_prev}" ] && [ "${sm_prev}" != none ] && [ -z "${sm_rollback}" ]; then sm_rollback="${sm_prev}"; fi
+      done
+      sm_skipped="$(state_get skipped)"
+      if [ -n "${sm_skipped}" ]; then printf '\nNot in this release (left as they were): %s\n' "${sm_skipped}"; fi
+      printf '\n'
+    fi
+    if [ -s "${work}/assertions.tsv" ]; then
+      printf '### Assertions\n\n| Phase | Check | Result | Detail |\n|---|---|---|---|\n'
+      awk -F '\t' '{ gsub(/\|/, "\\|", $4); printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4 }' "${work}/assertions.tsv"
+      printf '\n'
+    fi
+    case "${sm_outcome}" in
+      deployed)
+        if [ -n "${sm_rollback}" ]; then
+          printf 'To roll back, run Deploy again with exact_version %s.\n\n' "${sm_rollback}"
+        fi
+        ;;
+      rolled-back) printf 'Production is back on the version it served before. %s needs a fix and a new release; nothing else to do now.\n\n' "${sm_target}" ;;
+      rollback-failed) printf '**Production may be broken.** Run Deploy now with exact_version set to a release known to be good.\n\n' ;;
+      refused) printf 'Nothing was changed.\n\n' ;;
+      *) ;;
+    esac
+    if [ -f "${work}/releases.json" ]; then
+      printf '### Recent releases\n\n| Version | Published |\n|---|---|\n'
+      jq -r --arg bot "${release_bot}" '.[] | select(.draft == false and .prerelease == false and .author.login == $bot)
+        | [.tag_name, (.published_at // "")] | @tsv' "${work}/releases.json" >"${work}/recent.tsv"
+      cut -f 1 "${work}/recent.tsv" | release_tags | tail -n 10 | sed '1!G;h;$!d' >"${work}/recent-tags"
+      while IFS= read -r sm_t; do
+        awk -F '\t' -v t="${sm_t}" '$1 == t { printf "| %s | %s |\n", $1, $2; exit }' "${work}/recent.tsv"
+      done <"${work}/recent-tags"
+      printf '\n'
+    fi
+  } >>"${sm_out}"
+}
+
+case "${cmd}" in
+  resolve)
+    resolve "${arg}"
+    ;;
+  config | preflight | apply | summary)
+    work="${arg}"
+    mkdir -p "${work}"
+    "${cmd}"
+    ;;
+  *)
+    printf '%s\n' "${usage}" >&2
+    exit 64
+    ;;
+esac
