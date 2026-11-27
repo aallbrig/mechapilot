@@ -198,6 +198,8 @@ tasks:
       - scripts/checks/godot-architecture
       - scripts/checks/godot-safe-api
       - scripts/checks/godot-addons
+      - scripts/checks/godot-canonical
+      - scripts/checks/asset-credits
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack

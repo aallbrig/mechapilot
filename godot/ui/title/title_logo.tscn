@@ -1,0 +1,72 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://ui/title/title_logo.gd" id="1_logo"]
+[ext_resource type="Shader" path="res://ui/title/title_logo.gdshader" id="2_shader"]
+[ext_resource type="FontFile" path="res://ui/theme/fonts/Orbitron-Variable.ttf" id="3_orbitron"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_title"]
+resource_local_to_scene = true
+shader = ExtResource("2_shader")
+shader_parameter/top_color = null
+shader_parameter/mid_color = null
+shader_parameter/low_color = null
+shader_parameter/shine_color = null
+shader_parameter/text_size = null
+shader_parameter/shine_period = null
+shader_parameter/shine_duration = null
+shader_parameter/shine_width = null
+shader_parameter/shine_amount = null
+shader_parameter/shine_slant = null
+
+[sub_resource type="FontVariation" id="FontVariation_title"]
+base_font = ExtResource("3_orbitron")
+variation_embolden = 0.6
+variation_transform = Transform2D(1, 0, -0.22, 1, 0, 0)
+spacing_glyph = 2
+
+[sub_resource type="LabelSettings" id="LabelSettings_title"]
+resource_local_to_scene = true
+font = SubResource("FontVariation_title")
+font_size = 96
+outline_size = 9
+outline_color = Color(0.03, 0.05, 0.16, 1)
+shadow_size = 5
+shadow_color = Color(0, 0, 0, 0.55)
+shadow_offset = Vector2(5, 5)
+
+[node name="TitleLogo" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_logo")
+
+[node name="Lettering" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_constants/separation = 0
+alignment = 1
+
+[node name="Title" type="Label" parent="Lettering"]
+material = SubResource("ShaderMaterial_title")
+layout_mode = 2
+text = "MECHA FIGHTER"
+label_settings = SubResource("LabelSettings_title")
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Stripe" type="ColorRect" parent="Lettering"]
+custom_minimum_size = Vector2(0, 5)
+layout_mode = 2
+size_flags_horizontal = 4
+size_flags_stretch_ratio = 0.0
+mouse_filter = 2
+color = Color(0.9, 0.1, 0.12, 1)

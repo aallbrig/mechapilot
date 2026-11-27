@@ -1,0 +1,120 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://game/visuals/enemies/enemy_visual.gd" id="1_enemy_visual"]
+[ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_6"]
+top_radius = 0.22
+bottom_radius = 0.2
+height = 1.0
+radial_segments = 8
+rings = 1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
+resource_name = "hull"
+albedo_color = Color(0.45, 0.2, 0.6, 1)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_7"]
+top_radius = 0.0
+bottom_radius = 0.22
+height = 0.5
+radial_segments = 8
+rings = 1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
+resource_name = "accent"
+albedo_color = Color(0.95, 0.8, 0.1, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_8"]
+radius = 0.08
+height = 0.16
+radial_segments = 6
+rings = 3
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "glow"
+albedo_color = Color(1, 0.15, 0.3, 1)
+emission_enabled = true
+emission = Color(1, 0.15, 0.3, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_9"]
+size = Vector3(0.08, 0.46, 0.46)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
+resource_name = "trim"
+albedo_color = Color(0.95, 0.8, 0.1, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_10"]
+size = Vector3(0.45, 0.75, 0.04)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.12, 0.1, 0.16, 1)
+
+[sub_resource type="TorusMesh" id="TorusMesh_11"]
+inner_radius = 0.32
+outer_radius = 0.4
+rings = 12
+ring_segments = 4
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_12"]
+top_radius = 0.12
+bottom_radius = 0.12
+height = 0.05
+radial_segments = 8
+rings = 1
+
+[node name="Drone" type="Node3D"]
+script = ExtResource("1_enemy_visual")
+
+[node name="Hull" type="MeshInstance3D" parent="."]
+unique_name_in_owner = true
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_6")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part2" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0.75, 0, 0)
+mesh = SubResource("CylinderMesh_7")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part3" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0)
+mesh = SubResource("SphereMesh_8")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="Part4" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1, 0, 0)
+mesh = SubResource("BoxMesh_9")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part5" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.45, 0, 0)
+mesh = SubResource("BoxMesh_10")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part6" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, -0.45, 0, 0)
+mesh = SubResource("BoxMesh_10")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part7" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, -0.5, 0, 0)
+mesh = SubResource("TorusMesh_11")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part8" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -0.52, 0, 0)
+mesh = SubResource("CylinderMesh_12")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="Muzzle" type="Marker3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.05, 0, 0)
+
+[node name="Exhaust" type="Marker3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, -0.56, 0, 0)

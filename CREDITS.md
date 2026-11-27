@@ -2,6 +2,10 @@
 
 Every third-party or openly licensed asset used by Mecha Fighter and its sites is listed here with its source and license. Add a row whenever you add an asset.
 
+## Game (`godot/`)
+
+The game's assets are credited in [`godot/CREDITS.md`](godot/CREDITS.md), next to the project, so the Credits screen can show them. `scripts/checks/asset-credits` keeps that list complete.
+
 ## Marketing Site (`site/`)
 
 | Asset | Source | License |

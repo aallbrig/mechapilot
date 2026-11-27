@@ -1,0 +1,111 @@
+#!/bin/sh
+# Tests for scripts/checks/godot-canonical (run by scripts/test-shell). Each
+# runs the pinned Godot through scripts/godot-run, as the check does.
+
+# A throwaway project with one plain resource, then rewritten in Godot's saved
+# form by the check itself; sets d.
+canonical_project() {
+  d="$(mktemp -d)"
+  printf 'config_version=5\n' >"${d}/project.godot"
+  mkdir -p "${d}/art"
+  printf '%s\n' '[gd_resource type="StandardMaterial3D" format=3]' '' '[resource]' \
+    'albedo_color = Color(1, 0, 0, 1)' >"${d}/art/ramp.tres"
+  scripts/checks/godot-canonical --write "${d}" >/dev/null
+}
+
+test_godot_canonical_passes_on_the_repository() {
+  scripts/checks/godot-canonical
+}
+
+test_godot_canonical_accepts_only_files_in_godots_saved_form() {
+  canonical_project
+  scripts/checks/godot-canonical "${d}" || return 1
+  # One extra space, still loadable, is no longer Godot's own bytes.
+  grep -q '^albedo_color = ' "${d}/art/ramp.tres" || return 1
+  sed 's/^albedo_color = /albedo_color  = /' "${d}/art/ramp.tres" >"${d}/art/ramp.new"
+  mv "${d}/art/ramp.new" "${d}/art/ramp.tres"
+  out="$(scripts/checks/godot-canonical "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/ramp.tres is not in Godot's saved form"*) ;;
+  *) return 1 ;;
+  esac
+}
+
+test_godot_canonical_rejects_every_hand_written_media_variant() {
+  canonical_project
+  # shellcheck source=test_asset_credits
+  . tests/shell/test_asset_credits
+  write_media_variants "${d}"
+  out="$(scripts/checks/godot-canonical "${d}" 2>&1)" && return 1
+  missed=""
+  for f in "${d}"/art/*; do
+    name="art/${f##*/}"
+    [ "${name}" = art/ramp.tres ] && continue
+    case "${out}" in
+    *"${name} is not in Godot's saved form"* | *"unloadable res://${name}"*) ;;
+    *) missed="${missed} ${name}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'accepted as Godot-saved:%s\n' "${missed}"
+    return 1
+  }
+}
+
+test_godot_canonical_ignores_output_from_project_code() {
+  canonical_project
+  # The gate-bypass repro (hush.gd): a script that, when Godot loads it, prints
+  # a "#" with no newline, gluing it onto the next line Godot writes, plus a
+  # fake verdict. The check reads no output, so a hand-written file is still
+  # caught and the run still fails.
+  mkdir -p "${d}/hush"
+  printf '%s\n' 'extends Resource' '' '' 'static func _static_init() -> void:' '	printraw("#")' \
+    '	print("godot-canonical: ok (2 text resources and scenes in Godot saved form)")' >"${d}/hush/hush.gd"
+  printf '%s\n' '[gd_resource type="Resource" format=3]' '' \
+    '[ext_resource type="Script" path="res://hush/hush.gd" id="1"]' '' '[resource]' \
+    'script = ExtResource("1")' >"${d}/art/hush.tres"
+  printf '%s\n' '[gd_resource type="StandardMaterial3D"  format=3]' '' '[resource]' \
+    'albedo_color = Color(0, 1, 0, 1)' >"${d}/art/loose.tres"
+  out="$(scripts/checks/godot-canonical "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/loose.tres is not in Godot's saved form"*) ;;
+  *) return 1 ;;
+  esac
+  # A hand-written file in a hidden directory is judged like any other.
+  rm "${d}/art/loose.tres"
+  scripts/checks/godot-canonical --write "${d}" >/dev/null || return 1
+  mkdir -p "${d}/.stash"
+  printf '%s\n' '[gd_resource type="StandardMaterial3D"  format=3]' '' '[resource]' \
+    'albedo_color = Color(0, 0, 1, 1)' >"${d}/.stash/hidden.tres"
+  out="$(scripts/checks/godot-canonical "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *".stash/hidden.tres is not in Godot's saved form"*) ;;
+  *) return 1 ;;
+  esac
+}
+
+test_godot_canonical_refuses_a_resave_that_nulls_a_value() {
+  canonical_project
+  # A plain vec3 uniform given a Color: Godot loads it, but its saver writes
+  # null, losing the colour. That must fail, and --write must not apply it.
+  printf '%s\n' 'shader_type spatial;' '' 'uniform vec3 tint = vec3(1.0);' '' \
+    'void fragment() {' '	ALBEDO = tint;' '}' >"${d}/art/tint.gdshader"
+  printf '%s\n' '[gd_resource type="ShaderMaterial" format=3]' '' \
+    '[ext_resource type="Shader" path="res://art/tint.gdshader" id="1"]' '' '[resource]' \
+    'shader = ExtResource("1")' 'shader_parameter/tint = Color(0.5, 0.25, 1, 1)' >"${d}/art/tint.tres"
+  cp "${d}/art/tint.tres" "${d}/tint.before"
+  out="$(scripts/checks/godot-canonical "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/tint.tres: saving in Godot turns shader_parameter/tint into null"*) ;;
+  *) return 1 ;;
+  esac
+  ! scripts/checks/godot-canonical --write "${d}" >/dev/null 2>&1 || return 1
+  cmp -s "${d}/art/tint.tres" "${d}/tint.before" || return 1
+  # Stored as the uniform's own type, the value survives and the file passes.
+  sed 's/^shader_parameter\/tint = Color(0.5, 0.25, 1, 1)$/shader_parameter\/tint = Vector3(0.5, 0.25, 1)/' \
+    "${d}/tint.before" >"${d}/art/tint.tres"
+  rm "${d}/tint.before"
+  scripts/checks/godot-canonical --write "${d}" >/dev/null || return 1
+  scripts/checks/godot-canonical "${d}" >/dev/null || return 1
+  grep -Fqx 'shader_parameter/tint = Vector3(0.5, 0.25, 1)' "${d}/art/tint.tres"
+}

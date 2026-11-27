@@ -1,0 +1,363 @@
+#!/bin/sh
+# Tests for scripts/checks/asset-credits (run by scripts/test-shell).
+
+# A throwaway project: project.godot, one asset and a CREDITS.md with the given
+# rows. Rows write "@" for a Markdown backtick, which keeps the fixtures readable.
+credits_fixture() {
+  d="$(mktemp -d)"
+  : >"${d}/project.godot"
+  mkdir -p "${d}/art"
+  printf 'png' >"${d}/art/ship.png"
+  {
+    printf '# Credits\n\n| Asset | Source | Licence |\n| --- | --- | --- |\n'
+    printf '%s\n' "$@"
+  } >"${d}/rows.md"
+  tr '@' '\140' <"${d}/rows.md" >"${d}/CREDITS.md"
+  rm "${d}/rows.md"
+  printf '%s' "${d}"
+}
+
+test_asset_credits_passes_on_the_repository() {
+  scripts/checks/asset-credits
+}
+
+test_asset_credits_accepts_a_credited_asset() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |')"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_accepts_a_directory_credit() {
+  d="$(credits_fixture '| @art/@ Art pack | Kenney | CC0 1.0 |')"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_an_uncredited_asset() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf 'ogg' >"${d}/art/boom.OGG"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_licence_outside_the_allowlist() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Somewhere | All rights reserved |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_stale_credit() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @art/gone.png@ Gone | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_paths_outside_the_project() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @../escape/@ Escape | Kenney | CC0 1.0 |')"
+  mkdir -p "${d}/../escape"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  d="$(credits_fixture '| @/@ Everything | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_missing_credits_file() {
+  d="$(credits_fixture)"
+  rm "${d}/CREDITS.md"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_does_not_glob_credited_paths() {
+  d="$(credits_fixture '| @*@ Wildcard | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_ignores_vendored_addons_and_the_editor_cache() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  mkdir -p "${d}/addons/x" "${d}/.godot/imported"
+  printf 'png' >"${d}/addons/x/icon.png"
+  printf 'png' >"${d}/.godot/imported/ship.png"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_an_uncredited_video_or_binary_resource() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf 'ogv' >"${d}/art/intro.ogv"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/intro.ogv"
+  printf 'res' >"${d}/art/boom.res"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/boom.res"
+  printf 'opus' >"${d}/art/theme.OPUS"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_media_embedded_in_a_text_resource() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf '[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat = 1\n' >"${d}/art/boom.tres"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/boom.tres"
+  printf '[gd_scene format=3]\n\n[sub_resource type="Image" id="1"]\ndata = {}\n' >"${d}/art/a.tscn"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/a.tscn"
+  printf '[gd_resource type="Resource" format=3]\n\n[resource]\nblob = PackedByteArray("AAAA")\n' >"${d}/art/blob.tres"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_accepts_credited_embedded_media_and_plain_resources() {
+  d="$(credits_fixture '| @art/@ Art pack | Kenney | CC0 1.0 |')"
+  printf '[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat = 1\n' >"${d}/art/boom.tres"
+  scripts/checks/asset-credits "${d}" || return 1
+  printf '[gd_scene format=3]\n\n[node name="Sfx" type="AudioStreamPlayer"]\n' >"${d}/plain.tscn"
+  printf '[gd_resource type="AudioBusLayout" format=3]\n\n[resource]\nbus/1/name = &"Music"\n' >"${d}/buses.tres"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_new_asset_under_an_original_work_directory() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Original work made for this repository | CC0 1.0 |')"
+  scripts/checks/asset-credits "${d}" || return 1
+  # A folder credit on an original-work row would also cover a third-party file
+  # dropped into that folder later, so the row itself is rejected...
+  d="$(credits_fixture '| @art/@ Our art | Original work made for this repository | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  # ...and so is the file it would have hidden.
+  printf 'png' >"${d}/art/kenney-ship.png"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/kenney-ship.png: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  # A third-party pack may still be credited as a folder.
+  d="$(credits_fixture '| @art/@ Space pack | Kenney | CC0 1.0 |')"
+  printf 'png' >"${d}/art/kenney-ship.png"
+  scripts/checks/asset-credits "${d}"
+}
+
+# Every file extension the pinned Godot editor can import or load, one per line.
+godot_importable_extensions() {
+  p="$(mktemp -d)"
+  printf 'config_version=5\n' >"${p}/project.godot"
+  printf '%s\n' 'extends SceneTree' '' '' 'func _initialize() -> void:' \
+    '	var exts: PackedStringArray = ResourceLoader.get_recognized_extensions_for_type("Resource")' \
+    '	print("EXTS:" + ",".join(exts))' '	quit()' >"${p}/list.gd"
+  out="$(scripts/godot --headless --editor --path "${p}" -s list.gd 2>/dev/null)" || true
+  rm -rf "${p}"
+  printf '%s\n' "${out}" | sed -n 's/^EXTS://p' | tr ',' '\n' | sort -u
+}
+
+test_asset_credits_covers_every_importable_extension() {
+  exts="$(godot_importable_extensions)"
+  count="$(printf '%s\n' "${exts}" | grep -c .)" || true
+  # Guard against a Godot that failed to start and listed nothing.
+  [ "${count}" -ge 40 ] || {
+    printf 'only %s extensions listed\n' "${count}"
+    return 1
+  }
+  for ext in ttf ttc otf otc pfb pfm font fnt png svg ogg wav mp3 glb blend res; do
+    printf '%s\n' "${exts}" | grep -Fqx "${ext}" || {
+      printf 'Godot did not list %s\n' "${ext}"
+      return 1
+    }
+  done
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  # Text formats are reviewed as text (scenes and resources by the embedded-media
+  # rule); every other loadable extension, plus the runtime-only video and
+  # texture formats, must be an asset.
+  for ext in ${exts} ogv dds ktx ktx2 svgz; do
+    case "${ext}" in
+    tres | tscn | escn | csv | glsl) continue ;;
+    *) ;;
+    esac
+    printf 'x' >"${d}/art/sample.${ext}"
+  done
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  missed=""
+  for f in "${d}"/art/sample.*; do
+    name="art/${f##*/}"
+    case "${out}" in
+    *"${name}: not credited"*) ;;
+    *) missed="${missed} ${name}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'not treated as assets:%s\n' "${missed}"
+    return 1
+  }
+}
+
+test_asset_credits_rejects_an_svg_embedded_as_a_dpi_texture() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf '%s\n' '[gd_resource type="DPITexture" format=3]' '' '[resource]' \
+    '_source = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"' >"${d}/art/logo.tres"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/logo.tres: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  rm "${d}/art/logo.tres"
+  printf '%s\n' '[gd_scene format=3]' '' '[sub_resource type="DPITexture" id="1"]' \
+    '_source = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"' '' \
+    '[node name="Logo" type="Sprite2D"]' 'texture = SubResource("1")' >"${d}/art/logo.tscn"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/logo.tscn: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  d2="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @art/logo.tscn@ Logo | Kenney | CC0 1.0 |')"
+  cp "${d}/art/logo.tscn" "${d2}/art/logo.tscn"
+  scripts/checks/asset-credits "${d2}"
+}
+
+# Every Godot class deriving from Texture, AudioStream, Font, Mesh or Image
+# (including the bases), one per line.
+godot_media_classes() {
+  p="$(mktemp -d)"
+  printf 'config_version=5\n' >"${p}/project.godot"
+  printf '%s\n' 'extends SceneTree' '' '' 'func _initialize() -> void:' \
+    '	var seen: Dictionary = {}' \
+    '	for base: String in ["Texture", "AudioStream", "Font", "Mesh", "Image"]:' \
+    '		seen[base] = true' \
+    '		for c: String in ClassDB.get_inheriters_from_class(base):' \
+    '			seen[c] = true' \
+    '	print("TYPES:" + ",".join(PackedStringArray(seen.keys())))' \
+    '	quit()' >"${p}/types.gd"
+  out="$(scripts/godot --headless --editor --path "${p}" -s types.gd 2>/dev/null)" || true
+  rm -rf "${p}"
+  printf '%s\n' "${out}" | sed -n 's/^TYPES://p' | tr ',' '\n' | sort -u
+}
+
+test_asset_credits_classifies_every_media_class() {
+  classes="$(godot_media_classes)"
+  count="$(printf '%s\n' "${classes}" | grep -c .)" || true
+  # Guard against a Godot that failed to start and listed nothing.
+  [ "${count}" -ge 60 ] || {
+    printf 'only %s classes listed\n' "${count}"
+    return 1
+  }
+  listed="$(scripts/checks/asset-credits --list-types)"
+  media="$(printf '%s\n' "${listed}" | sed -n 's/^media //p' | sort)"
+  procedural="$(printf '%s\n' "${listed}" | sed -nE 's/^(procedural|plain) //p' | sort)"
+  both="$(printf '%s\n%s\n' "${media}" "${procedural}" | sort | uniq -d)"
+  [ -z "${both}" ] || {
+    printf 'listed as both media and procedural: %s\n' "${both}"
+    return 1
+  }
+  unclassified=""
+  for c in ${classes}; do
+    printf '%s\n%s\n' "${media}" "${procedural}" | grep -Fqx "${c}" || unclassified="${unclassified} ${c}"
+  done
+  [ -z "${unclassified}" ] || {
+    printf 'not classified as media or procedural:%s\n' "${unclassified}"
+    return 1
+  }
+  # Every media class embedded in a text resource is an asset.
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  for t in ${media}; do
+    printf '[gd_resource type="%s" format=3]\n\n[resource]\n' "${t}" >"${d}/art/embedded-${t}.tres"
+  done
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  missed=""
+  for t in ${media}; do
+    case "${out}" in
+    *"art/embedded-${t}.tres: not credited"*) ;;
+    *) missed="${missed} ${t}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'embedded media not treated as assets:%s\n' "${missed}"
+    return 1
+  }
+}
+
+# Writes the formatting variants of embedded media into "$1"/art/ (one file
+# each), the ways the gate-bypass review found to dodge a text match.
+write_media_variants() {
+  svg='_source = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>"'
+  printf '%s\n' '[gd_resource type = "DPITexture" format=3]' '' '[resource]' "${svg}" >"$1/art/spaced.tres"
+  printf '%s\n' '   [gd_resource type="DPITexture" format=3]' '' '  [resource]' "${svg}" >"$1/art/indented.tres"
+  printf '%s\n' '[gd_resource' 'type="DPITexture"' 'format=3]' '' '[resource]' "${svg}" >"$1/art/split.tres"
+  printf '%s\n' '[gd_resource type="Resource" format=3]' '' '[resource]' \
+    'metadata/blob = PackedByteArray ("AAAA")' >"$1/art/bytes.tres"
+  printf '%s\n' '[gd_resource id="r"type="DPITexture" format=3]' '' '[resource]' "${svg}" >"$1/art/packed.tres"
+  printf '%s\n' '[gd_scene format=3]' '' '  [sub_resource' '   type = "DPITexture"' '   id="1"]' "${svg}" '' \
+    '[node name="Logo" type="Sprite2D"]' 'texture = SubResource("1")' >"$1/art/split.tscn"
+  # An inline Object(...) value builds the texture in place, in a resource
+  # declared as a plain material and on a node line in a scene.
+  object='Object(DPITexture,"_source":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>")'
+  printf '%s\n' '[gd_resource type="StandardMaterial3D" format=3]' '' '[resource]' \
+    "albedo_texture = ${object}" >"$1/art/object.tres"
+  printf '%s\n' '[gd_scene format=3]' '' '[node name="Logo" type="Sprite2D"]' \
+    "texture = ${object}" >"$1/art/object.tscn"
+  # Godot reads every byte up to 0x20 as whitespace, so a vertical tab (\013)
+  # or form feed (\014) can stand where a space or nothing was; and with two
+  # type keys in a header, Godot uses the last.
+  printf '[gd_resource\013type="DPITexture" format=3]\n\n[resource]\n%s\n' "${svg}" >"$1/art/vt-header.tres"
+  printf '[gd_resource type="DPITexture"\014format=3]\n\n[resource]\n%s\n' "${svg}" >"$1/art/ff-header.tres"
+  printf '[gd_scene format=3]\n\n[sub_resource\014type="DPITexture" id="1"]\n%s\n\n[node name="Logo" type="Sprite2D"]\ntexture = SubResource("1")\n' \
+    "${svg}" >"$1/art/ff-sub.tscn"
+  printf '[gd_resource type="StandardMaterial3D" format=3]\n\n[resource]\nalbedo_texture = Object\013(DPITexture,"_source":"<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"8\\" height=\\"8\\"/>")\n' \
+    >"$1/art/vt-object.tres"
+  printf '[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/blob = PackedByteArray\014("AAAA")\n' >"$1/art/ff-bytes.tres"
+  printf '%s\n' '[gd_resource type="StandardMaterial3D" type="DPITexture" format=3]' '' '[resource]' "${svg}" >"$1/art/dup-type.tres"
+}
+
+test_asset_credits_rejects_embedded_media_in_any_formatting_godot_parses() {
+  p="$(mktemp -d)"
+  printf 'config_version=5\n' >"${p}/project.godot"
+  mkdir -p "${p}/art"
+  write_media_variants "${p}"
+  printf '%s\n' 'extends SceneTree' '' '' 'func _initialize() -> void:' \
+    '	for f: String in DirAccess.get_files_at("res://art"):' \
+    '		var res: Resource = load("res://art/" + f)' \
+    '		print("LOADED:%s:%s" % [f, res != null])' \
+    '	quit()' >"${p}/load.gd"
+  out="$(scripts/godot --headless --path "${p}" -s load.gd 2>/dev/null)" || true
+  rm -rf "${p}"
+  parsed="$(printf '%s\n' "${out}" | sed -n 's/^LOADED:\(.*\):true$/\1/p' | sort)"
+  # Only variants the pinned Godot really loads count, and there must be some
+  # of each kind: a .tres, a .tscn and the PackedByteArray spelling.
+  for must in spaced.tres indented.tres split.tres bytes.tres split.tscn object.tres object.tscn \
+    vt-header.tres ff-header.tres ff-sub.tscn vt-object.tres ff-bytes.tres dup-type.tres; do
+    printf '%s\n' "${parsed}" | grep -Fqx "${must}" || {
+      printf 'Godot did not load %s:\n%s\n' "${must}" "${out}"
+      return 1
+    }
+  done
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  write_media_variants "${d}"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  missed=""
+  for f in ${parsed}; do
+    case "${out}" in
+    *"art/${f}: not credited"*) ;;
+    *) missed="${missed} ${f}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'loads in Godot but passed the check:%s\n' "${missed}"
+    return 1
+  }
+}
+
+test_asset_credits_text_resources_fail_closed() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  # A class on neither allowlist (here array-carried animation data) needs a credit...
+  printf '%s\n' '[gd_resource type="Animation" format=3]' '' '[resource]' 'length = 1.0' >"${d}/art/move.tres"
+  # ...so does anything the scan cannot follow: a comment, an unknown tag, an
+  # untyped resource, unbalanced text, or a node class off the node allowlist.
+  printf '%s\n' '[gd_resource type="Gradient" format=3]' '; "' '[resource]' >"${d}/art/comment.tres"
+  printf '%s\n' '[gd_resource type="Gradient" format=3]' '[mystery type="X"]' >"${d}/art/tag.tres"
+  printf '%s\n' '[gd_resource format=3]' '[resource]' >"${d}/art/untyped.tres"
+  printf '%s\n' '[gd_resource type="Gradient" format=3]' '[resource]' 'offsets = PackedFloat32Array(0, 1' >"${d}/art/open.tres"
+  printf '%s\n' '[gd_scene format=3]' '[node name="Path" type="Path3D"]' >"${d}/art/node.tscn"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  for f in move.tres comment.tres tag.tres untyped.tres open.tres node.tscn; do
+    case "${out}" in
+    *"art/${f}: not credited"*) ;;
+    *)
+      printf '%s passed\n' "${f}"
+      return 1
+      ;;
+    esac
+  done
+  # Plain resources and scenes, typed collections included, stay clear.
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf '%s\n' '[gd_scene format=3]' '' '[sub_resource type="BoxMesh" id="1"]' 'size = Vector3(1, 2, 3)' '' \
+    '[node name="Rig" type="Node3D"]' 'names = Array[StringName]([&"A", &"B"])' \
+    'colours = Dictionary[StringName, Color]({' '&"hull": Color(1, 0, 0, 1)' '})' >"${d}/art/rig.tscn"
+  scripts/checks/asset-credits "${d}"
+}

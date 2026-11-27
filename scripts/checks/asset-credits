@@ -1,0 +1,339 @@
+#!/bin/sh
+# Every media asset in the Godot project is credited, and every credit is real.
+#
+#   asset    a file under the project (outside addons/, which carries its own
+#            licences and is pinned by godot-addons, and outside .godot/) whose
+#            extension is one Godot can import or load as media (images, audio,
+#            video, models, fonts, textures and every binary resource format;
+#            tests/shell/test_asset_credits asks the pinned Godot for its list),
+#            or a text resource or scene (.tres, .tscn, .escn) unless it parses
+#            and declares only PROCEDURAL_TYPES and PLAIN_TYPES resources and
+#            NODE_TYPES nodes, with no PackedByteArray and no inline Object()
+#            value (fail closed: media embedded inline, such as an SVG in a
+#            DPITexture, or any class not on those lists makes it an asset). Plain-text code and data (.gd, .gdshader, .glsl, .csv,
+#            .json, ...) are not assets.
+#            Every Godot subclass of Texture, AudioStream, Font, Mesh and Image
+#            is in exactly one of MEDIA_TYPES and PROCEDURAL_TYPES (parameters
+#            only, references to other resources that are checked on their own,
+#            runtime-only or abstract); tests/shell/test_asset_credits asks the
+#            pinned Godot for the classes, so a new one fails until classified.
+#   credit   a table row in <project>/CREDITS.md whose first cell holds one or
+#            more backticked project-relative paths (a file, or a directory
+#            ending in "/" that covers everything below it) and whose last cell
+#            names an allowed licence (optionally as a Markdown link)
+#
+# Fails when an asset has no credit, a credit names a licence outside the
+# allowlist, a credited path does not exist (a stale credit), a credited path
+# is absolute or climbs out of the project (".."), or a row whose Source says
+# "Original work" credits a directory. Folder credits are for third-party packs
+# only: an original-work folder credit would silently cover any third-party
+# file added to that folder later, so original work is credited file by file
+# (or, when it ships no asset files, with no paths at all).
+#
+# Its scan of text resources and scenes reads them in Godot's own saved form,
+# which scripts/checks/godot-canonical (run just before it by `task checks`)
+# requires of every committed .tres, .tscn and .escn. It also stands on its own:
+# a control byte, a tag that is not laid out the way Godot writes one, or a
+# duplicate type key makes the file an asset or an error here too.
+#
+# Usage: scripts/checks/asset-credits [project-dir]   (default: godot)
+#        scripts/checks/asset-credits --list-types         (prints "media <T>"
+#        and "procedural <T>" lines, for the classification test)
+set -euf
+LC_ALL=C
+export LC_ALL
+
+# Classes that can carry media data inline in a text resource or scene.
+MEDIA_TYPES='Image ImageTexture ImageTexture3D ImageTextureLayered DPITexture
+PortableCompressedTexture2D CompressedTexture2D CompressedTexture2DArray CompressedTexture3D
+CompressedTextureLayered CompressedCubemap CompressedCubemapArray Cubemap CubemapArray
+Texture2DArray AudioStreamWAV AudioStreamMP3 AudioStreamOggVorbis FontFile ArrayMesh'
+# Classes built from parameters, from references to other resources (each
+# checked on its own), only at run time, or abstract: they hold no media.
+PROCEDURAL_TYPES='Texture Texture2D Texture3D TextureLayered Mesh Font AudioStream
+AtlasTexture AnimatedTexture CanvasTexture MeshTexture CameraTexture ViewportTexture
+ExternalTexture DrawableTexture2D CurveTexture CurveXYZTexture GradientTexture1D
+GradientTexture2D NoiseTexture2D NoiseTexture3D PlaceholderTexture2D PlaceholderTexture2DArray
+PlaceholderTexture3D PlaceholderTextureLayered PlaceholderCubemap PlaceholderCubemapArray
+Texture2DRD Texture2DArrayRD Texture3DRD TextureLayeredRD TextureCubemapRD TextureCubemapArrayRD
+PrimitiveMesh BoxMesh CapsuleMesh CylinderMesh PlaneMesh PointMesh PrismMesh QuadMesh
+SphereMesh TorusMesh TextMesh RibbonTrailMesh TubeTrailMesh ImmediateMesh PlaceholderMesh
+FontVariation SystemFont AudioStreamGenerator AudioStreamInteractive AudioStreamMicrophone
+AudioStreamPlaylist AudioStreamPolyphonic AudioStreamRandomizer AudioStreamSynchronized'
+
+# Resource classes that are not media at all, allowed in text resources and
+# scenes: materials, environments, styles, shapes and other parameter sets.
+# Anything else declared in a .tres, .tscn or .escn makes the file an asset
+# (fail closed): Animation, Shader, Curve3D, MultiMesh, ImporterMesh, collision
+# shapes built from arrays and every unknown class need a credit row.
+PLAIN_TYPES='StandardMaterial3D ORMMaterial3D ShaderMaterial CanvasItemMaterial
+ParticleProcessMaterial Environment Sky ProceduralSkyMaterial PhysicalSkyMaterial
+LabelSettings Theme StyleBoxFlat StyleBoxEmpty StyleBoxLine Gradient Curve
+BoxShape3D SphereShape3D CapsuleShape3D CylinderShape3D CircleShape2D
+RectangleShape2D CapsuleShape2D PhysicsMaterial AudioBusLayout'
+
+# Node classes a scene may use without a credit. A node holds media only
+# through its properties, which the scan covers (sub-resources, inline
+# objects, byte arrays), but a node class outside this list makes the scene an
+# asset anyway, so an unforeseen way to carry media fails closed.
+NODE_TYPES='Node Node2D Node3D Marker2D Marker3D MeshInstance3D MultiMeshInstance3D
+Camera2D Camera3D WorldEnvironment DirectionalLight3D Control CanvasLayer Label
+Button ColorRect Panel PanelContainer MarginContainer CenterContainer VBoxContainer
+HBoxContainer GridContainer Timer AudioStreamPlayer AudioStreamPlayer2D AudioStreamPlayer3D
+Sprite2D Sprite3D TextureRect Area3D CollisionShape3D'
+
+if [ "${1:-}" = "--list-types" ]; then
+  for t in ${MEDIA_TYPES}; do printf 'media %s\n' "${t}"; done
+  for t in ${PROCEDURAL_TYPES}; do printf 'procedural %s\n' "${t}"; done
+  for t in ${PLAIN_TYPES}; do printf 'plain %s\n' "${t}"; done
+  for t in ${NODE_TYPES}; do printf 'node %s\n' "${t}"; done
+  exit 0
+fi
+
+root="${1:-godot}"
+if [ ! -f "${root}/project.godot" ]; then
+  printf 'asset-credits: no project.godot in %s\n' "${root}" >&2
+  exit 1
+fi
+credits="${root}/CREDITS.md"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+status=0
+
+fail() {
+  printf 'asset-credits: %s\n' "$1" >&2
+  status=1
+}
+
+# Media assets, project-relative and sorted. Extensions match in any case.
+(cd "${root}" && find . -type f ! -path './addons/*' ! -path './.godot/*' |
+  sed 's|^\./||' | sort) >"${work}/files"
+# Images and source art; audio; video; models; fonts; then every binary
+# resource format Godot loads (opaque, so it can hold any media).
+media_ext='png|jpe?g|webp|svgz?|bmp|tga|exr|hdr|ktx2?|dds|psd|kra|xcf|aseprite|ase'
+media_ext="${media_ext}|ogg|wav|mp3|flac|opus|aac|m4a|aiff?|ogv|webm|mp4"
+media_ext="${media_ext}|glb|gltf|bin|obj|fbx|blend|dae"
+media_ext="${media_ext}|ttf|ttc|otf|otc|woff2?|fnt|font|pfb|pfm"
+media_ext="${media_ext}|res|scn|mesh|anim|material|theme|stylebox|shape|phymat|occ|lmbake|repl"
+media_ext="${media_ext}|translation|atlastex|curvetex|dpitex|meshtex|tex|fontdata|meshlib|multimesh"
+media_ext="${media_ext}|mp3str|oggvorbisstr|sample"
+grep -Ei "\\.(${media_ext})\$" "${work}/files" >"${work}/assets" || true
+# Text resources and scenes (.tres, .tscn, .escn) fail closed: one is an asset
+# unless it parses and every resource it declares ([gd_resource] and
+# [sub_resource] tags) is of a class in PROCEDURAL_TYPES or PLAIN_TYPES, and it
+# holds no PackedByteArray. A sound, image, font or mesh saved inside a text
+# file is still a sound, image, font or mesh. scan_tags reads the file the way
+# Godot's parser does, so spacing, line breaks and indentation can't hide a tag:
+# it prints "TYPE <class>" per declared resource, and "BAD <why>" for anything
+# it can't account for (an unknown tag, an untyped resource, unbalanced text).
+scan_tags() {
+  awk '
+{ text = text $0 "\n" }
+function emit(tag,    name, rest, found, t) {
+  # Godot writes a tag on one line, its words separated by single spaces. Any
+  # other layout is not Godot'"'"'s own and is refused before it is read.
+  if (tag ~ /[\t\r\n]/ || tag ~ /  / || tag ~ /^ / || tag ~ / $/) print "BAD tag layout"
+  gsub(/[ \t\r\n]+/, " ", tag)
+  sub(/^ /, "", tag)
+  name = tag
+  sub(/ .*/, "", name)
+  if (name == "gd_resource" || name == "sub_resource") {
+    rest = " " tag
+    found = 0
+    while (match(rest, /[^A-Za-z0-9_]type ?= ?[&^]?"[^"]*"/)) {
+      t = substr(rest, RSTART, RLENGTH)
+      sub(/^[^"]*"/, "", t)
+      sub(/"$/, "", t)
+      print "TYPE " t
+      found++
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    if (!found) print "BAD untyped " name
+    if (found > 1) print "BAD duplicate type in " name
+  } else if (name == "node") {
+    rest = " " tag
+    while (match(rest, /[^A-Za-z0-9_]type ?= ?[&^]?"[^"]*"/)) {
+      t = substr(rest, RSTART, RLENGTH)
+      sub(/^[^"]*"/, "", t)
+      sub(/"$/, "", t)
+      print "NODE " t
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  } else if (name != "gd_scene" && name != "ext_resource" && name != "resource" && name != "connection" && name != "editable") {
+    print "BAD tag " name
+  }
+}
+END {
+  n = length(text); i = 1; bare = ""; word = ""; depth = 0; tdepth = 0; instr = 0; intag = 0; prev = ""; tag = ""; tags = 0
+  while (i <= n) {
+    c = substr(text, i, 1)
+    if (instr) {
+      if (intag) tag = tag c
+      if (c == "\\") { if (intag) tag = tag substr(text, i + 1, 1); i += 2; continue }
+      if (c == "\"") instr = 0
+      i++
+      continue
+    }
+    if (c == "\"") { instr = 1; word = ""; bare = bare "\"\" "; if (intag) tag = tag c; i++; continue }
+    bare = bare c
+    # Godot starts a comment at ";" and Godot never writes ";", "#" or a single
+    # quote outside a string, so any of them is something this scan cannot
+    # follow: fail closed.
+    if (c == ";" || c == "#" || c == "\047") print "BAD comment or quote outside a string"
+    if (intag) {
+      if (c == "]" && tdepth == 0) { emit(tag); tags++; intag = 0; tag = ""; prev = "]"; i++; continue }
+      if (c == "[" || c == "(" || c == "{") tdepth++
+      else if (c == "]" || c == ")" || c == "}") tdepth--
+      tag = tag c
+      i++
+      continue
+    }
+    if (c ~ /[A-Za-z0-9_]/) { word = word c; prev = c; i++; continue }
+    if (c == "[" && (word == "Array" || word == "Dictionary")) { word = ""; depth++; prev = c; i++; continue }
+    word = ""
+    if (c == " " || c == "\t" || c == "\r" || c == "\n") { i++; continue }
+    if (c == "[" && depth == 0 && prev != "=") {
+      if (i > 1 && substr(text, i - 1, 1) != "\n") print "BAD tag not at a line start"
+      intag = 1; tdepth = 0; tag = ""; i++; continue
+    }
+    if (c == "[" || c == "(" || c == "{") depth++
+    else if (c == "]" || c == ")" || c == "}") { depth--; if (depth < 0) print "BAD unbalanced" }
+    prev = c
+    i++
+  }
+  if (instr || intag || depth != 0) print "BAD unterminated"
+  if (tags == 0) print "BAD no tags"
+  # An inline Object(Class, ...) value builds any resource, media included, in
+  # place. Godot never writes one when it saves, so it is never plain.
+  if (bare ~ /(^|[^A-Za-z0-9_])Object[ \t\r\n]*\(/) print "BAD inline Object()"
+}' "$1"
+}
+
+allowed_nodes=" $(printf '%s' "${NODE_TYPES}" | tr -s ' \n' '  ') "
+allowed_types=" $(printf '%s %s' "${PROCEDURAL_TYPES}" "${PLAIN_TYPES}" | tr -s ' \n' '  ') "
+
+grep -Ei '\.(tres|tscn|escn)$' "${work}/files" >"${work}/text-files" || true
+while IFS= read -r f; do
+  # A control byte (anything below 0x20 but tab, LF and CR, or DEL) is never in
+  # a file Godot wrote, and Godot reads some of them as whitespace: refused.
+  controls="$(tr -d '\011\012\015\040-\176\200-\377' <"${root}/${f}" | wc -c | tr -d ' ')"
+  if [ "${controls}" -ne 0 ]; then
+    printf '%s\n' "${f}" >>"${work}/control-bytes"
+    printf '%s\n' "${f}"
+    continue
+  fi
+  if grep -Eq 'PackedByteArray[[:space:]]*\(' "${root}/${f}"; then
+    printf '%s\n' "${f}"
+    continue
+  fi
+  scan_tags "${root}/${f}" >"${work}/tags"
+  clear=yes
+  while IFS=' ' read -r kind detail; do
+    case "${kind}" in
+      TYPE)
+        case "${allowed_types}" in
+          *" ${detail} "*) ;;
+          *) clear=no ;;
+        esac
+        ;;
+      NODE)
+        case "${allowed_nodes}" in
+          *" ${detail} "*) ;;
+          *) clear=no ;;
+        esac
+        ;;
+      *) clear=no ;;
+    esac
+  done <"${work}/tags"
+  if [ "${clear}" = no ]; then printf '%s\n' "${f}"; fi
+done <"${work}/text-files" >>"${work}/assets"
+sort -u -o "${work}/assets" "${work}/assets"
+if [ -s "${work}/control-bytes" ]; then
+  while IFS= read -r f; do
+    fail "${f}: contains a control byte (not a file Godot wrote; open and save it in Godot)"
+  done <"${work}/control-bytes"
+fi
+
+# Credit rows: "<paths>\t<licence>\t<origin>", one row per line. The licence is
+# the last cell, with a Markdown link reduced to its text; origin is "original"
+# when the Source cell (second to last) says "Original work", else "third-party".
+: >"${work}/rows"
+if [ -f "${credits}" ]; then
+  awk -F'|' '
+    /^[[:space:]]*\|/ {
+      first = $2
+      last = $(NF - 1)
+      source = tolower($(NF - 2))
+      origin = (source ~ /original work/) ? "original" : "third-party"
+      if (first !~ /`/) next
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", last)
+      if (last ~ /^\[[^]]*\]\([^)]*\)$/) { sub(/^\[/, "", last); sub(/\]\(.*$/, "", last) }
+      paths = ""
+      rest = first
+      while (match(rest, /`[^`]*`/)) {
+        p = substr(rest, RSTART + 1, RLENGTH - 2)
+        paths = paths (paths == "" ? "" : " ") p
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      printf "%s\t%s\t%s\n", paths, last, origin
+    }
+  ' "${credits}" >"${work}/rows"
+elif [ -s "${work}/assets" ]; then
+  fail "${credits} is missing, but the project has assets"
+fi
+
+: >"${work}/credited"
+tab="$(printf '\t')"
+while IFS="${tab}" read -r paths licence origin; do
+  case "${licence}" in
+    'CC0 1.0' | 'CC BY 3.0' | 'CC BY 4.0' | 'OFL 1.1' | 'MIT' | 'Apache 2.0') ;;
+    *) fail "${paths}: licence \"${licence}\" is not in the allowlist" ;;
+  esac
+  for p in ${paths}; do
+    case "${p}" in
+      /* | ../* | */../* | .. | */..)
+        fail "${p}: credited paths must stay inside the project"
+        continue
+        ;;
+      *) ;;
+    esac
+    case "${origin}:${p}" in
+      original:*/)
+        fail "${p}: original-work rows credit files, not directories (a folder credit would cover later third-party files)"
+        continue
+        ;;
+      *) ;;
+    esac
+    if [ ! -e "${root}/${p}" ]; then
+      fail "${p}: credited, but no such file or directory (stale credit)"
+      continue
+    fi
+    printf '%s\n' "${p}" >>"${work}/credited"
+  done
+done <"${work}/rows"
+
+while IFS= read -r asset; do
+  covered=no
+  while IFS= read -r p; do
+    case "${p}" in
+      */)
+        case "${asset}" in "${p}"*) covered=yes ;; *) ;; esac
+        ;;
+      *)
+        if [ "${asset}" = "${p}" ]; then covered=yes; fi
+        ;;
+    esac
+    if [ "${covered}" = yes ]; then break; fi
+  done <"${work}/credited"
+  if [ "${covered}" = no ]; then
+    fail "${asset}: not credited in ${credits}"
+  fi
+done <"${work}/assets"
+
+if [ "${status}" -eq 0 ]; then
+  count="$(wc -l <"${work}/assets" | tr -d ' ')"
+  rows="$(wc -l <"${work}/rows" | tr -d ' ')"
+  printf 'asset-credits: ok (%s assets, %s credits)\n' "${count}" "${rows}"
+fi
+exit "${status}"

@@ -32,6 +32,12 @@
 #                      get_data_dir, get_executable_path, get_environment, ...), so no
 #                      path can be computed from user:// to anywhere else
 #                      (scripts/tree-guard backs this up after the tests run)
+#   output             printraw and print_rich (no newline: they can splice a
+#                      check runner's log, gluing text onto the next line)
+#   decoding           Image.load_svg_from_string, load_*_from_buffer for images,
+#                      and ConfigFile outside tests/ (media or config decoded
+#                      from data in code would ship assets the credits check
+#                      never sees; tests are not exported)
 #   node paths         absolute ("/root...") node paths
 #   scenes             scripts embedded in .tscn/.tres (they would skip every check)
 #   @tool              @tool scripts (they run in the editor and during --import)
@@ -111,6 +117,16 @@ reflect_words='(get|set|call|callv|call_deferred|set_deferred|get_indexed|set_in
 callable_calls="${w}Callable[[:space:]]*[(.]"
 tree_words='(get_parent|find_parent|owner|get_viewport|get_window|current_scene|get_nodes_in_group|get_first_node_in_group|get_root)'
 banned_words='(Expression|ClassDB|GDScript|JavaScriptBridge|ResourceLoader|ResourceSaver|Marshalls|EditorInterface|GDExtensionManager|source_code|DirAccess|ZIPPacker|ZIPReader|PCKPacker|globalize_path|localize_path|get_user_data_dir|get_data_dir|get_config_dir|get_cache_dir|get_executable_path|get_environment|has_environment|get_system_dir|get_temp_dir|load_resource_pack|get_path)'
+# printraw writes no newline, so whatever it prints is glued onto the next line a
+# check runner reads (it hid a result line from a check once); print_rich can
+# carry terminal control sequences.
+output_words='(printraw|print_rich)'
+# Decoding media or config from data in code would ship assets that the credits
+# check never sees as files (str_to_var is banned with reflection above).
+decode_words='(load_svg_from_string|load_(png|jpg|webp|bmp|tga|ktx|svg)_from_buffer)'
+# ConfigFile likewise, outside tests/: tests are not exported, and one reads
+# export_presets.cfg to check the export's include filter.
+config_words='ConfigFile'
 engine_calls='Engine[[:space:]]*\.[[:space:]]*(get_main_loop|get_singleton|get_singleton_list|register_singleton|unregister_singleton|get_meta|set_meta|has_meta)'
 test_escape_words='(get_tree|Engine|test_parameters)'
 
@@ -167,6 +183,20 @@ while IFS= read -r f; do
   if grep -Ewn "${banned_words}" "${work}/code" >"${work}/hits"; then
     fail "${f}" "banned API" hit
   fi
+  if grep -Ewn "${output_words}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no raw or rich printing (it can splice a check runner's output)" hit
+  fi
+  if grep -Ewn "${decode_words}" "${work}/code" >"${work}/hits"; then
+    fail "${f}" "no decoding media or config from data (it would ship uncredited assets)" hit
+  fi
+  case "${f}" in
+    tests/*) ;;
+    *)
+      if grep -Ewn "${config_words}" "${work}/code" >"${work}/hits"; then
+        fail "${f}" "no decoding media or config from data (it would ship uncredited assets)" hit
+      fi
+      ;;
+  esac
   if grep -En "${engine_calls}" "${work}/code" >"${work}/hits"; then
     fail "${f}" "no Engine singletons or main loop" hit
   fi

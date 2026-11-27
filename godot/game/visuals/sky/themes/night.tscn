@@ -1,0 +1,103 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://game/visuals/sky/sky_environment.gd" id="1_sky_environm"]
+[ext_resource type="Shader" path="res://game/visuals/sky/themes/night.gdshader" id="2_night"]
+[ext_resource type="Shader" path="res://game/visuals/sky/cloud.gdshader" id="3_cloud"]
+[ext_resource type="Script" path="res://game/visuals/sky/cloud_layer.gd" id="4_cloud_layer"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = ExtResource("2_night")
+shader_parameter/zenith_color = Color(0.01, 0.02, 0.07, 1)
+shader_parameter/upper_color = Color(0.03, 0.06, 0.18, 1)
+shader_parameter/horizon_color = Color(0.08, 0.14, 0.32, 1)
+shader_parameter/low_color = Color(0.04, 0.06, 0.14, 1)
+shader_parameter/horizon_height = -0.3
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/star_density = null
+shader_parameter/star_amount = null
+shader_parameter/star_color = null
+shader_parameter/beam_color = null
+shader_parameter/beam_strength = null
+shader_parameter/beam_width = null
+shader_parameter/beam_sweep = null
+shader_parameter/beam_speed = null
+
+[sub_resource type="Sky" id="Sky_2"]
+sky_material = SubResource("ShaderMaterial_1")
+radiance_size = 0
+
+[sub_resource type="Environment" id="Environment_3"]
+background_mode = 2
+sky = SubResource("Sky_2")
+ambient_light_source = 2
+ambient_light_color = Color(0.22, 0.27, 0.45, 1)
+ambient_light_energy = 0.9
+reflected_light_source = 1
+glow_enabled = true
+glow_intensity = 0.8
+glow_bloom = 0.05
+glow_hdr_threshold = 0.9
+fog_enabled = true
+fog_light_color = Color(0.06, 0.1, 0.22, 1)
+fog_density = 0.004
+fog_sky_affect = 0.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_5"]
+render_priority = -1
+shader = ExtResource("3_cloud")
+shader_parameter/lit_color = Vector3(0.25, 0.3, 0.45)
+shader_parameter/shade_color = Vector3(0.06, 0.08, 0.15)
+shader_parameter/softness = null
+
+[node name="NightSky" type="Node3D"]
+script = ExtResource("1_sky_environm")
+sky_id = &"night"
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_3")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.906308, -0.242404, 0.346189, 0, 0.819152, 0.573576, -0.422618, -0.519837, 0.742404, 0, 0, 0)
+light_color = Color(0.6, 0.7, 1, 1)
+light_energy = 0.7
+shadow_enabled = false
+
+[node name="Clouds" type="Node3D" parent="."]
+
+[node name="CloudsFar" type="MultiMeshInstance3D" parent="Clouds"]
+script = ExtResource("4_cloud_layer")
+material_override = SubResource("ShaderMaterial_5")
+count = 26
+span = Vector2(260, 140)
+depth = -55
+size_range = Vector2(6, 12)
+stretch_range = Vector2(1.3, 2.4)
+opacity = 0.25
+wind = Vector2(-1, 0)
+seed_value = 11
+
+[node name="CloudsMid" type="MultiMeshInstance3D" parent="Clouds"]
+script = ExtResource("4_cloud_layer")
+material_override = SubResource("ShaderMaterial_5")
+count = 18
+span = Vector2(190, 110)
+depth = -30
+size_range = Vector2(4, 8)
+stretch_range = Vector2(1.3, 2.2)
+opacity = 0.3
+wind = Vector2(-1, 0)
+seed_value = 23
+
+[node name="CloudsNear" type="MultiMeshInstance3D" parent="Clouds"]
+script = ExtResource("4_cloud_layer")
+material_override = SubResource("ShaderMaterial_5")
+count = 10
+span = Vector2(140, 90)
+depth = -12
+size_range = Vector2(3, 5.5)
+stretch_range = Vector2(1.2, 2)
+opacity = 0.35
+wind = Vector2(-1, 0)
+seed_value = 37
