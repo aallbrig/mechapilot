@@ -3,7 +3,7 @@ extends Node3D
 ## The side-on camera for the 2.5D view: it looks down -Z at the XY play plane
 ## from DISTANCE away and follows the mech lazily (LazyFollow). Portrait screens
 ## pull back so at least MIN_HALF_WIDTH units stay visible either side. A safe
-## frame, SAFE_FRAME_SHARE of the visible half extents worked out from the live
+## frame, SAFE_FRAME_SHARE of the visible half extents worked out from the resting
 ## FOV, distance and aspect, is a hard limit the mech never crosses.
 ## It also carries the camera's share of the juice: trauma shake, kicks and FOV
 ## punches, which feedback and the stage trigger through its methods.
@@ -113,13 +113,15 @@ func advance(delta: float, target_position: Vector3, target_velocity: Vector3) -
 	_trauma = maxf(0.0, _trauma - TRAUMA_DECAY * delta)
 	_kick = _kick.lerp(Vector3.ZERO, 1.0 - exp(-KICK_RETURN * delta))
 	_punch = lerpf(_punch, 0.0, 1.0 - exp(-PUNCH_RETURN * delta))
-	# The safe frame uses this frame's FOV, so an FOV punch narrows it too.
+	# The safe frame uses the resting FOV: an FOV punch never narrows it, so a
+	# hit cannot shove the camera, and the frame's margin keeps the mech on
+	# screen through the punch.
 	var _focus: Vector3 = _follow.step(
 		target_position,
 		target_velocity,
 		dead_zone_for(_distance, _aspect),
 		delta,
-		safe_frame_for(_distance, _aspect, FOV - _punch)
+		safe_frame_for(_distance, _aspect, FOV)
 	)
 	_place()
 

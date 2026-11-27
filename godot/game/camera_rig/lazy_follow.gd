@@ -58,7 +58,7 @@ func step(
 	safe_frame: Vector2 = Vector2.INF
 ) -> Vector3:
 	if delta <= 0.0:
-		return _hold_in_frame(target, velocity, safe_frame)
+		return _hold_in_frame(target, safe_frame)
 	# How steady the mech is: 1 at a constant (or slow) velocity, 0 while it
 	# accelerates hard.
 	var smoothed: Vector3 = _smooth_velocity.lerp(velocity, 1.0 - exp(-VELOCITY_SMOOTHING * delta))
@@ -95,21 +95,19 @@ func step(
 	# so the whole camera (not only its goal) recentres within RECENTER seconds.
 	_focus = _focus.lerp(_goal, settle)
 	_focus.z = 0.0
-	return _hold_in_frame(target, velocity, safe_frame)
+	return _hold_in_frame(target, safe_frame)
 
 
 ## The hard limit, applied after the spring: on each axis where the mech is past
-## the safe frame, the focus moves to put it on the frame's edge and then moves
-## with the mech, so it never crosses the edge and the follow carries on smoothly.
-func _hold_in_frame(target: Vector3, velocity: Vector3, safe_frame: Vector2) -> Vector3:
-	var held_x: float = clampf(_focus.x, target.x - safe_frame.x, target.x + safe_frame.x)
-	var held_y: float = clampf(_focus.y, target.y - safe_frame.y, target.y + safe_frame.y)
-	if held_x != _focus.x:
-		_focus.x = held_x
-		_focus_velocity.x = velocity.x
-	if held_y != _focus.y:
-		_focus.y = held_y
-		_focus_velocity.y = velocity.y
+## the safe frame, the focus moves to put it on the frame's edge, so it never
+## crosses it. The spring's own velocity is left alone: it keeps building
+## toward the goal while the clamp holds, so when the clamp lets go the camera
+## is already outpacing the mech and pulls away cleanly. (Overwriting it with
+## the mech's velocity made the damping drop the camera back below the mech's
+## pace, and the mech slid back onto the edge.)
+func _hold_in_frame(target: Vector3, safe_frame: Vector2) -> Vector3:
+	_focus.x = clampf(_focus.x, target.x - safe_frame.x, target.x + safe_frame.x)
+	_focus.y = clampf(_focus.y, target.y - safe_frame.y, target.y + safe_frame.y)
 	return _focus
 
 

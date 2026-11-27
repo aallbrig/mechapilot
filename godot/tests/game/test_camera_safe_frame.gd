@@ -11,6 +11,14 @@ const RANDOM_FLIGHTS: int = 12
 const RANDOM_LEGS: int = 24
 const COAST_CHANCE: float = 0.15
 const RANDOM_FLIGHT_SEED: int = 104
+## The boosts that force the clamp at 60 fps: BOOST times top speed for
+## BOOST_TIME s, then CRUISE_TIME s at top speed, along each of BOOST_DIRECTIONS.
+const BOOST: float = 20.0
+const BOOST_TIME: float = 1.5
+const CRUISE_TIME: float = 1.5
+const BOOST_DIRECTIONS: Array[Vector3] = [
+	Vector3.RIGHT, Vector3.DOWN, Vector3(-1.0, 1.0, 0.0), Vector3(1.0, -0.4, 0.0)
+]
 ## Seconds of steady cruise in the recentre test.
 const RECENTRE_FLIGHT: float = 8.0
 
@@ -117,38 +125,60 @@ func test_mech_never_leaves_safe_frame_at_max_speed() -> void:
 
 func test_safe_frame_scales_with_aspect_and_fov() -> void:
 	var share: float = CameraRig.SAFE_FRAME_SHARE
-	var rig_error: float = 0.0
 	var frame_error: float = 0.0
-	# Tall phone portrait to super-ultrawide, at rest and under hit and death FOV
-	# punches.
+	var rig_error: float = 0.0
+	var punched_screen: float = 0.0
+	var hit_jump: float = 0.0
+	# Tall phone portrait to super-ultrawide.
 	for aspect: float in [9.0 / 20.0, 9.0 / 16.0, 1.0, 16.0 / 9.0, 21.0 / 9.0, 32.0 / 9.0]:
-		for punch: float in [0.0, 4.0, 14.0]:
-			# A mech flung far down-right in one frame ends exactly on the safe
-			# frame's corner, wherever that is on this screen.
-			var rig: CameraRig = CameraRig.new()
-			add_child(rig)
-			rig.set_view_aspect(aspect)
-			rig.snap_to(Vector3.ZERO)
-			rig.punch_fov(punch)
-			var far: Vector3 = Vector3(500.0, -300.0, 0.0)
-			rig.advance(TICK, far, Vector3.ZERO)
-			var s: Vector2 = _screen_of(rig, far, aspect)
-			rig.free()
-			rig_error = maxf(rig_error, maxf(absf(s.x - share), absf(s.y + share)))
-			# The frame's own half extents project to the same corner from a
-			# camera DISTANCE-fitted for this aspect.
-			var fov: float = CameraRig.FOV - punch
-			var d: float = CameraRig.distance_for_aspect(aspect)
+		var d: float = CameraRig.distance_for_aspect(aspect)
+		# The frame's half extents project to SAFE_FRAME_SHARE of the screen for
+		# any FOV, from a camera fitted for this aspect.
+		for fov: float in [45.0, CameraRig.FOV, 75.0]:
 			var half: Vector2 = CameraRig.safe_frame_for(d, aspect, fov)
 			var proj: Projection = Projection.create_perspective(
 				fov, aspect, CameraRig.NEAR, CameraRig.FAR
 			)
 			var clip: Vector4 = proj * Vector4(half.x, half.y, -d, 1.0)
-			var corner: Vector2 = Vector2(clip.x / clip.w, clip.y / clip.w)
-			var miss: Vector2 = (corner - Vector2(share, share)).abs()
+			var miss: Vector2 = (
+				(Vector2(clip.x / clip.w, clip.y / clip.w) - Vector2(share, share)).abs()
+			)
 			frame_error = maxf(frame_error, maxf(miss.x, miss.y))
-	var _held_on_edge: GdUnitAssert = assert_float(rig_error).is_less(1e-3)
+		# A mech flung far down-right in one frame ends exactly on the rig's safe
+		# frame corner, at SAFE_FRAME_SHARE of the screen.
+		var far: Vector3 = Vector3(500.0, -300.0, 0.0)
+		var rig: CameraRig = _held_at_edge(aspect, far)
+		var s: Vector2 = _screen_of(rig, far, aspect)
+		rig_error = maxf(rig_error, maxf(absf(s.x - share), absf(s.y + share)))
+		# The same frame then hit by an FOV punch: the punch never narrows the
+		# frame (it uses the resting FOV), so the camera goes exactly where it
+		# would have gone without the hit, and the mech stays on screen.
+		rig.advance(TICK, far, Vector3.ZERO)
+		var unhit: Vector3 = rig.camera().global_position
+		rig.free()
+		for punch: float in [4.0, 14.0]:
+			var hit: CameraRig = _held_at_edge(aspect, far)
+			hit.punch_fov(punch)
+			hit.advance(TICK, far, Vector3.ZERO)
+			hit_jump = maxf(hit_jump, (hit.camera().global_position - unhit).length())
+			var on: Vector2 = _screen_of(hit, far, aspect).abs()
+			punched_screen = maxf(punched_screen, maxf(on.x, on.y))
+			hit.free()
 	var _derived: GdUnitAssert = assert_float(frame_error).is_less(1e-4)
+	var _held_on_edge: GdUnitAssert = assert_float(rig_error).is_less(1e-3)
+	var _no_jump_on_hit: GdUnitAssert = assert_float(hit_jump).is_less(1e-3)
+	var _on_screen: GdUnitAssert = assert_float(punched_screen).is_less(1.0)
+
+
+## A rig at `aspect` whose mech was flung from the centre to `far` in one frame,
+## so the safe frame holds it on the frame's edge.
+func _held_at_edge(aspect: float, far: Vector3) -> CameraRig:
+	var rig: CameraRig = CameraRig.new()
+	add_child(rig)
+	rig.set_view_aspect(aspect)
+	rig.snap_to(Vector3.ZERO)
+	rig.advance(TICK, far, Vector3.ZERO)
+	return rig
 
 
 ## The mech's offset from where the camera centres it (its lead point, LOOKAHEAD
@@ -257,3 +287,80 @@ func test_snap_centres_mech_without_jump() -> void:
 	var _fov_reset: GdUnitAssert = assert_float(fov_at_snap).is_equal_approx(CameraRig.FOV, 1e-4)
 	var _no_jump: GdUnitAssert = assert_float(fastest).is_less_equal(_tuning.speed * 2.0)
 	var _fov_still: GdUnitAssert = assert_float(fov_drift).is_less(1e-4)
+
+
+## A mech shot along `dir` at BOOST times its top speed for BOOST_TIME seconds,
+## far past anything the camera's spring can follow, then cruising at top speed,
+## in frames of `ticks_per_frame` physics ticks. Returns per frame: the mech's
+## furthest screen offset from centre (NDC, either axis), the camera's speed
+## along `dir` and the mech's.
+func _boosted(aspect: float, dir: Vector3, ticks_per_frame: int) -> Array[Vector3]:
+	var rig: CameraRig = CameraRig.new()
+	add_child(rig)
+	rig.set_view_aspect(aspect)
+	rig.snap_to(Vector3.ZERO)
+	var p: Vector3 = Vector3.ZERO
+	var frame: float = TICK * ticks_per_frame
+	var last: Vector3 = rig.camera().global_position
+	var rows: Array[Vector3] = []
+	var t: float = 0.0
+	while t < BOOST_TIME + CRUISE_TIME:
+		var boosting: bool = t < BOOST_TIME
+		var v: Vector3 = dir * _tuning.speed * (BOOST if boosting else 1.0)
+		p += v * frame
+		t += frame
+		rig.advance(frame, p, v)
+		var cam: Vector3 = rig.camera().global_position
+		var s: Vector2 = _screen_of(rig, p, aspect).abs()
+		rows.append(Vector3(maxf(s.x, s.y), (cam - last).dot(dir) / frame, v.dot(dir)))
+		last = cam
+	rig.free()
+	return rows
+
+
+func test_clamp_holds_the_limit_at_60_fps() -> void:
+	var share: float = CameraRig.SAFE_FRAME_SHARE
+	var worst: float = 0.0
+	var least_reach: float = INF
+	for aspect: float in [9.0 / 20.0, 16.0 / 9.0, 32.0 / 9.0]:
+		for dir: Vector3 in BOOST_DIRECTIONS:
+			var reach: float = 0.0
+			for row: Vector3 in _boosted(aspect, dir.normalized(), 1):
+				reach = maxf(reach, row.x)
+			worst = maxf(worst, reach)
+			least_reach = minf(least_reach, reach)
+	# Every boost drives the mech onto the safe frame at a normal frame rate,
+	# and none gets past it.
+	var _engaged: GdUnitAssert = assert_float(least_reach).is_greater_equal(share - 1e-3)
+	var _held: GdUnitAssert = assert_float(worst).is_less_equal(share + 1e-4)
+
+
+func test_camera_does_not_snap_back_when_clamp_lets_go() -> void:
+	var share: float = CameraRig.SAFE_FRAME_SHARE
+	var released: int = 0
+	var runs: int = 0
+	var slowest_lead: float = INF
+	var back_to_edge: int = 0
+	for aspect: float in [9.0 / 20.0, 16.0 / 9.0]:
+		for dir: Vector3 in BOOST_DIRECTIONS:
+			runs += 1
+			var rows: Array[Vector3] = _boosted(aspect, dir.normalized(), 1)
+			var engaged: bool = false
+			var let_go: bool = false
+			for i: int in range(1, rows.size()):
+				var row: Vector3 = rows[i]
+				var on_edge: bool = row.x >= share - 1e-4
+				engaged = engaged or on_edge
+				if engaged and not on_edge and not let_go:
+					let_go = true
+					released += 1
+				# Once the clamp lets go, while the boost holds, the camera
+				# keeps at least the mech's pace: it never drops back, and
+				# the mech never slides back onto the edge.
+				if let_go and row.z == rows[i - 1].z and row.z > _tuning.speed * 2.0:
+					slowest_lead = minf(slowest_lead, row.y - row.z)
+					if on_edge:
+						back_to_edge += 1
+	var _every_run_releases: GdUnitAssert = assert_int(released).is_equal(runs)
+	var _keeps_pace: GdUnitAssert = assert_float(slowest_lead).is_greater_equal(-1e-3)
+	var _stays_off_edge: GdUnitAssert = assert_int(back_to_edge).is_equal(0)
