@@ -116,6 +116,10 @@ class RunChannel:
 	signal score_changed(total: int, delta: int)
 	## The combo multiplier changed (1 when no combo is running, up to 8).
 	signal combo_changed(multiplier: int)
+	## A first-flight tutorial prompt appears.
+	signal tutorial_prompt_shown(prompt: TutorialPrompt.Id)
+	## A tutorial prompt leaves: `completed` when its condition was met.
+	signal tutorial_prompt_dismissed(prompt: TutorialPrompt.Id, completed: bool)
 
 	func announce_run_started(level_number: int) -> void:
 		run_started.emit(level_number)
@@ -145,6 +149,12 @@ class RunChannel:
 
 	func announce_combo_changed(multiplier: int) -> void:
 		combo_changed.emit(multiplier)
+
+	func announce_tutorial_prompt_shown(prompt: TutorialPrompt.Id) -> void:
+		tutorial_prompt_shown.emit(prompt)
+
+	func announce_tutorial_prompt_dismissed(prompt: TutorialPrompt.Id, completed: bool) -> void:
+		tutorial_prompt_dismissed.emit(prompt, completed)
 
 
 ## The player mech.
@@ -176,6 +186,10 @@ class PlayerChannel:
 	signal repair_kit_dropped(position: Vector3)
 	## Reported by game/: the player flew through a Repair Kit.
 	signal repair_collected(position: Vector3)
+	## Reported by game/: the player steered the mech (once per Skirmish is enough).
+	signal player_moved
+	## Reported by game/: a player shot expired without hitting anything.
+	signal shot_missed(position: Vector3)
 
 	func announce_player_fired(origin: Vector3, direction: Vector3) -> void:
 		player_fired.emit(origin, direction)
@@ -214,6 +228,12 @@ class PlayerChannel:
 
 	func announce_repair_collected(position: Vector3) -> void:
 		repair_collected.emit(position)
+
+	func announce_player_moved() -> void:
+		player_moved.emit()
+
+	func announce_shot_missed(position: Vector3) -> void:
+		shot_missed.emit(position)
 
 
 ## Spawn decisions and enemy facts.
@@ -311,6 +331,8 @@ class ProfileChannel:
 	signal intel_unlocked(entry_id: StringName)
 	## Every unlocked Intel entry id, on load.
 	signal intel_changed(unlocked: Array[StringName])
+	## What the Intel codex lists (enemies, then bosses), on load.
+	signal intel_catalog_changed(entries: Array[IntelEntry])
 
 	func announce_initials_submitted(initials: String) -> void:
 		initials_submitted.emit(initials)
@@ -338,3 +360,6 @@ class ProfileChannel:
 
 	func announce_intel_changed(unlocked: Array[StringName]) -> void:
 		intel_changed.emit(unlocked)
+
+	func announce_intel_catalog_changed(entries: Array[IntelEntry]) -> void:
+		intel_catalog_changed.emit(entries)

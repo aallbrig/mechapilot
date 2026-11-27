@@ -54,6 +54,7 @@ func _fill(h: UiHarness) -> void:
 	)
 	h.bus.boss.announce_boss_warning_started("Crimson Lancer", 3.0)
 	h.bus.run.announce_level_cleared(LevelTally.new(5, 999, 1000, 870, 5000, 10000))
+	h.bus.run.announce_tutorial_prompt_shown(TutorialPrompt.Id.REPAIR_KITS)
 
 
 func test_screens_fit_phone_portrait_to_4k() -> void:

@@ -21,6 +21,7 @@ var _scoreboard: Scoreboard
 var _settings: Settings
 var _intel: IntelCodex
 var _tutorial: TutorialProgress
+var _coach: TutorialCoach
 
 @onready var _ui: UiRoot = $Ui/UiRoot
 @onready var _stage: FlightStage = $FlightStage
@@ -43,12 +44,16 @@ func _ready() -> void:
 	_scoreboard = Scoreboard.new(Events, LocalDocumentStore.new(LocalDocumentStore.Slot.SCOREBOARD))
 	_settings = Settings.new(Events, LocalDocumentStore.new(LocalDocumentStore.Slot.SETTINGS))
 	_intel = IntelCodex.new(
-		Events, LocalDocumentStore.new(LocalDocumentStore.Slot.INTEL), IntelCodex.catalog(levels)
+		Events,
+		LocalDocumentStore.new(LocalDocumentStore.Slot.INTEL),
+		IntelCodex.catalog(levels),
+		IntelCodex.entries_for(levels)
 	)
 	_tutorial = TutorialProgress.new(LocalDocumentStore.new(LocalDocumentStore.Slot.TUTORIAL))
 	# Before the stores restore, so the touch sticks hear the saved opacity.
 	_touch.attach(Events, _stage.player_input(), DisplayServer.is_touchscreen_available())
 	_wire_feedback()
+	_coach = TutorialCoach.new(Events, _tutorial)
 	_settings.restore()
 	_scoreboard.restore()
 	_intel.restore()
@@ -65,6 +70,7 @@ func _physics_process(delta: float) -> void:
 	_ledger.tick(delta)
 	_progression.tick(delta)
 	_director.tick(delta)
+	_coach.tick(delta)
 
 
 func _wire_feedback() -> void:

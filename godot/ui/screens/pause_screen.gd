@@ -1,6 +1,6 @@
 class_name PauseScreen
 extends UiScreen
-## Pause (#73): Resume, Settings and Quit to Title. Quitting asks first
+## Pause (#73): Resume, How to Play, Settings and Quit to Title. Quitting asks first
 ## ("Quit this Run?", focus on No), because it abandons the Run. Back, Esc,
 ## P or Start resume (or close the question).
 
@@ -16,6 +16,7 @@ func _ready() -> void:
 	_menu = UiBuild.column()
 	content.add_child(_menu)
 	_resume = _add_button(_menu, "RESUME", _resume_run, UiCue.Cue.BACK)
+	var _guide: Button = _add_button(_menu, "HOW TO PLAY", _open.bind(&"how_to_play"))
 	var _settings: Button = _add_button(_menu, "SETTINGS", _open.bind(&"settings"))
 	var _quit: Button = _add_button(_menu, "QUIT TO TITLE", _ask_quit)
 	_confirm = UiBuild.column()
