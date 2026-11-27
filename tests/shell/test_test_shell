@@ -68,8 +68,11 @@ test_lib_toolchain_fails_when_mise_env_fails() {
 
 test_hooks_load_toolchain_before_unsetting_git_environment() {
   # A mise [env] must not be able to reintroduce GIT_DIR after the unset.
+  # Hooks source the toolchain script beside them (the pinned copy in the Agent Loop, #64).
+  dollar='$'
+  source_line=". \"${dollar}(dirname \"${dollar}0\")/../scripts/lib-toolchain\""
   for hook in .githooks/pre-push .githooks/pre-merge-commit; do
-    lib="$(grep -n '^\. scripts/lib-toolchain$' "${hook}" | head -n 1 | cut -d: -f1)"
+    lib="$(grep -nxF "${source_line}" "${hook}" | head -n 1 | cut -d: -f1)"
     unset_line="$(grep -n '^unset GIT_DIR' "${hook}" | head -n 1 | cut -d: -f1)"
     [ -n "${lib}" ] && [ -n "${unset_line}" ] && [ "${lib}" -lt "${unset_line}" ] || return 1
   done

@@ -958,6 +958,9 @@ production_admits_only_main() {
 # schedule ever starts a production job (scripts/checks/production-dispatch-only).
 production_jobs_dispatch_only() {
   ref="${AGENT_LOOP_WORKFLOWS_REF:-origin/main}"
+  # Judge what GitHub runs now, not a stale copy (best effort: a failed fetch
+  # leaves the last copy, which the ci check already held to this rule).
+  if [ "${ref}" = origin/main ]; then git -C "${runtime_repo}" fetch --quiet origin main 2>/dev/null || true; fi
   wf="$(mktemp -d)"
   rc=0
   git -C "${runtime_repo}" archive --format=tar -o "${wf}/workflows.tar" "${ref}" -- .github/workflows || rc=1
@@ -1134,9 +1137,11 @@ start() {
     printf 'loop:start: the Supervisor starts in the loops window (task dev to watch)\n'
   else
     # A new tmux server inherits this environment; the human's panes must keep
-    # their own git hooks, so drop the Supervisor's hook-free git config first.
+    # their own git hooks, so drop the Supervisor's hook-free git config first,
+    # and its metrics settings, which belong to the Supervisor alone.
     (
-      unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+      unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 \
+        AGENT_LOOP_METRICS_FILE AGENT_LOOP_GH_SOURCE AGENT_LOOP_MACHINE
       "${repo_root}/scripts/dev/session" start-detached
     )
     printf 'loop:start: started the dev session; its loops window runs the Supervisor (task dev to watch)\n'

@@ -1660,3 +1660,27 @@ test_agent_loop_skill_triages_needs_triage_issues() {
   expect '[120]' jq -c '[.triage[].number]' "${e}/snap.json" || return 1
   check-jsonschema --schemafile schemas/agent-loop-snapshot.schema.json "${e}/snap.json" >/dev/null
 }
+
+test_agent_loop_doc_lists_the_first_run_checks() {
+  doc=docs/agent-loop.md
+  adr=docs/adr/0001-owner-dispatches-production-deploys.md
+  # The first-run checklist covers what tests can't: Remote Control under
+  # --restricted, sandboxed subagent Bash, hook-free Agent worktrees, the merge
+  # gate without Actions permission, and measuring the nudge cap and lsof scan.
+  bt="$(printf '\140')"
+  for item in "**Remote Control works with ${bt}--restricted${bt}.**" '**Subagent Bash is sandboxed.**' \
+    "**${bt}Agent${bt} worktrees run no hooks outside the sandbox.**" '**The merge gate works without Actions permission.**' \
+    '**Measure the nudge cap and the checkout scan.**' '**Commits and merges pass the pinned hooks.**'; do
+    grep -qF -- "- [ ] ${item}" "${doc}" || {
+      printf 'first-run checklist lacks: %s\n' "${item}"
+      return 1
+    }
+  done
+  # The production decision is recorded, and the docs no longer ask for a tag
+  # ruleset or a required reviewer.
+  [ -f "${adr}" ] || return 1
+  grep -qF '(adr/0001-owner-dispatches-production-deploys.md)' "${doc}" || return 1
+  grep -qF 'no required reviewers' "${adr}" || return 1
+  ! grep -qE '^[0-9]\. \*\*(Tag ruleset|Production reviewer)\*\*' "${doc}" || return 1
+  grep -qF 'Everything else off, in particular **Actions, Workflows,' "${doc}"
+}
