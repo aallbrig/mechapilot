@@ -2,121 +2,516 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/aallbrig/mechapilot/schemas/level.schema.json",
   "title": "Mecha Fighter Level",
-  "description": "One Level's tuning data (godot/levels/*.json). Units: world units, seconds, degrees. Level 1 holds the parity spec's section 18 values.",
+  "description": "One Level of the Run (godot/levels/level_N.json, #73). Units: world units, seconds, radians. core/level_definition.gd checks the same rules at runtime, plus the cross-field ones a Schema cannot express (descending boss phases, the file name matching the number).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["$schema", "id", "name", "player", "camera", "play_sphere", "intro", "spawner", "enemy", "boss", "game_over"],
+  "required": [
+    "$schema",
+    "id",
+    "number",
+    "name",
+    "objective",
+    "sky",
+    "player",
+    "camera",
+    "play_sphere",
+    "intro",
+    "roster",
+    "spawner",
+    "difficulty",
+    "boss",
+    "game_over"
+  ],
   "$defs": {
     "vec2": {
       "type": "array",
-      "items": { "type": "number" },
+      "items": {
+        "type": "number"
+      },
       "minItems": 2,
       "maxItems": 2
     },
     "vec3": {
       "type": "array",
-      "items": { "type": "number" },
+      "items": {
+        "type": "number"
+      },
       "minItems": 3,
       "maxItems": 3
     },
-    "positive": { "type": "number", "exclusiveMinimum": 0 },
-    "non_negative": { "type": "number", "minimum": 0 },
-    "fraction": { "type": "number", "minimum": 0, "maximum": 1 },
-    "count": { "type": "integer", "minimum": 1 }
+    "positive": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "non_negative": {
+      "type": "number",
+      "minimum": 0
+    },
+    "fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scale": {
+      "type": "number",
+      "minimum": 0.25,
+      "maximum": 4
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9a-f]{6}$"
+    },
+    "enemy_kind": {
+      "enum": [
+        "fighter",
+        "heavy",
+        "interceptor",
+        "drone",
+        "bomber",
+        "enemy_mech"
+      ]
+    },
+    "roster": {
+      "description": "Weighted enemy kinds. A kind joins the pick once the Level has at least min_kills kills.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "weight",
+          "min_kills"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/enemy_kind"
+          },
+          "weight": {
+            "$ref": "#/$defs/positive"
+          },
+          "min_kills": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "starts_at",
+        "attacks"
+      ],
+      "properties": {
+        "starts_at": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "attacks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "damage",
+              "telegraph",
+              "interval"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "damage": {
+                "type": "integer",
+                "minimum": 15,
+                "maximum": 35
+              },
+              "telegraph": {
+                "description": "Seconds of glow or charge before the attack fires.",
+                "type": "number",
+                "minimum": 0.4,
+                "maximum": 2
+              },
+              "interval": {
+                "$ref": "#/$defs/positive"
+              }
+            }
+          }
+        }
+      }
+    }
   },
   "properties": {
-    "$schema": { "const": "../../schemas/level.schema.json" },
-    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-    "name": { "type": "string", "minLength": 1 },
+    "$schema": {
+      "const": "../../schemas/level.schema.json"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^level_[1-6]$"
+    },
+    "number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6
+    },
+    "name": {
+      "$ref": "#/$defs/text"
+    },
+    "objective": {
+      "$ref": "#/$defs/text"
+    },
+    "sky": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "top",
+        "bottom",
+        "effects"
+      ],
+      "properties": {
+        "top": {
+          "$ref": "#/$defs/color"
+        },
+        "bottom": {
+          "$ref": "#/$defs/color"
+        },
+        "effects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "sun",
+              "rain",
+              "lightning",
+              "stars",
+              "searchlights",
+              "earth_curve"
+            ]
+          }
+        }
+      }
+    },
     "player": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["speed", "coast_factor", "initial_move", "max_health", "fire_interval", "muzzle_offset", "projectile_speed", "projectile_lifetime", "projectile_damage"],
+      "required": [
+        "speed",
+        "coast_factor",
+        "initial_move",
+        "fire_interval",
+        "muzzle_offset",
+        "projectile_speed",
+        "projectile_lifetime",
+        "projectile_damage"
+      ],
       "properties": {
-        "speed": { "$ref": "#/$defs/positive" },
-        "coast_factor": { "$ref": "#/$defs/fraction" },
-        "initial_move": { "$ref": "#/$defs/vec2" },
-        "max_health": { "$ref": "#/$defs/count" },
-        "fire_interval": { "$ref": "#/$defs/positive" },
-        "muzzle_offset": { "$ref": "#/$defs/non_negative" },
-        "projectile_speed": { "$ref": "#/$defs/positive" },
-        "projectile_lifetime": { "$ref": "#/$defs/positive" },
-        "projectile_damage": { "$ref": "#/$defs/count" }
+        "speed": {
+          "$ref": "#/$defs/positive"
+        },
+        "coast_factor": {
+          "$ref": "#/$defs/fraction"
+        },
+        "initial_move": {
+          "$ref": "#/$defs/vec2"
+        },
+        "fire_interval": {
+          "$ref": "#/$defs/positive"
+        },
+        "muzzle_offset": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "projectile_speed": {
+          "$ref": "#/$defs/positive"
+        },
+        "projectile_lifetime": {
+          "$ref": "#/$defs/positive"
+        },
+        "projectile_damage": {
+          "$ref": "#/$defs/count"
+        }
       }
     },
     "camera": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fov", "offset_landscape", "offset_portrait", "damping", "far"],
+      "required": [
+        "fov",
+        "offset_landscape",
+        "offset_portrait",
+        "damping",
+        "far"
+      ],
       "properties": {
-        "fov": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 180 },
-        "offset_landscape": { "$ref": "#/$defs/vec3" },
-        "offset_portrait": { "$ref": "#/$defs/vec3" },
-        "damping": { "$ref": "#/$defs/non_negative" },
-        "far": { "$ref": "#/$defs/positive" }
+        "fov": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 180
+        },
+        "offset_landscape": {
+          "$ref": "#/$defs/vec3"
+        },
+        "offset_portrait": {
+          "$ref": "#/$defs/vec3"
+        },
+        "damping": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "far": {
+          "$ref": "#/$defs/positive"
+        }
       }
     },
     "play_sphere": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["radius"],
+      "required": [
+        "radius"
+      ],
       "properties": {
-        "radius": { "$ref": "#/$defs/positive" }
+        "radius": {
+          "$ref": "#/$defs/positive"
+        }
       }
     },
     "intro": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["duration", "text"],
+      "required": [
+        "duration"
+      ],
       "properties": {
-        "duration": { "$ref": "#/$defs/non_negative" },
-        "text": { "type": "string" }
+        "duration": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10
+        }
       }
+    },
+    "roster": {
+      "$ref": "#/$defs/roster"
     },
     "spawner": {
+      "description": "The Skirmish spawn ramp (as in the LAN prototype): the live-enemy limit grows and the delay buffer shrinks with each kill, and a wave arrives every wave_interval seconds.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["spawn_distance", "pool", "reuse_after_death", "limit_start", "limit_per_death", "delay_min", "delay_max", "buffer_start", "buffer_per_death"],
+      "required": [
+        "spawn_distance",
+        "spawn_distance_jitter",
+        "pool",
+        "limit_start",
+        "limit_per_kill",
+        "limit_max",
+        "delay_min",
+        "delay_max",
+        "buffer_start",
+        "buffer_per_kill",
+        "buffer_min",
+        "aggression_start",
+        "aggression_per_kill",
+        "aggression_max",
+        "wave_interval",
+        "wave_size_start",
+        "wave_size_growth",
+        "wave_spread"
+      ],
       "properties": {
-        "spawn_distance": { "$ref": "#/$defs/positive" },
-        "pool": { "$ref": "#/$defs/count" },
-        "reuse_after_death": { "$ref": "#/$defs/non_negative" },
-        "limit_start": { "$ref": "#/$defs/non_negative" },
-        "limit_per_death": { "$ref": "#/$defs/non_negative" },
-        "delay_min": { "$ref": "#/$defs/non_negative" },
-        "delay_max": { "$ref": "#/$defs/non_negative" },
-        "buffer_start": { "$ref": "#/$defs/non_negative" },
-        "buffer_per_death": { "$ref": "#/$defs/non_negative" }
+        "spawn_distance": {
+          "$ref": "#/$defs/positive"
+        },
+        "spawn_distance_jitter": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "pool": {
+          "$ref": "#/$defs/count"
+        },
+        "limit_start": {
+          "type": "number",
+          "minimum": 1
+        },
+        "limit_per_kill": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "limit_max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "delay_min": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "delay_max": {
+          "$ref": "#/$defs/positive"
+        },
+        "buffer_start": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "buffer_per_kill": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "buffer_min": {
+          "$ref": "#/$defs/non_negative"
+        },
+        "aggression_start": {
+          "$ref": "#/$defs/fraction"
+        },
+        "aggression_per_kill": {
+          "$ref": "#/$defs/fraction"
+        },
+        "aggression_max": {
+          "$ref": "#/$defs/fraction"
+        },
+        "wave_interval": {
+          "$ref": "#/$defs/positive"
+        },
+        "wave_size_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wave_size_growth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wave_spread": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3.15
+        }
       }
     },
-    "enemy": {
+    "difficulty": {
+      "description": "Multipliers on every enemy kind's base speed, fire rate and bullet speed. They never fall from one Level to the next.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["health", "speed_min", "speed_max", "detect", "close_enough", "score", "contact_kills"],
+      "required": [
+        "enemy_speed_scale",
+        "enemy_fire_rate_scale",
+        "enemy_bullet_speed_scale"
+      ],
       "properties": {
-        "health": { "$ref": "#/$defs/count" },
-        "speed_min": { "$ref": "#/$defs/positive" },
-        "speed_max": { "$ref": "#/$defs/positive" },
-        "detect": { "$ref": "#/$defs/positive" },
-        "close_enough": { "$ref": "#/$defs/non_negative" },
-        "score": { "type": "integer", "minimum": 0 },
-        "contact_kills": { "type": "boolean" }
+        "enemy_speed_scale": {
+          "$ref": "#/$defs/scale"
+        },
+        "enemy_fire_rate_scale": {
+          "$ref": "#/$defs/scale"
+        },
+        "enemy_bullet_speed_scale": {
+          "$ref": "#/$defs/scale"
+        }
       }
     },
     "boss": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kills_before_boss"],
+      "required": [
+        "id",
+        "name",
+        "description",
+        "threshold",
+        "health",
+        "phases",
+        "escorts"
+      ],
       "properties": {
-        "kills_before_boss": { "$ref": "#/$defs/count" }
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/text"
+        },
+        "description": {
+          "$ref": "#/$defs/text"
+        },
+        "threshold": {
+          "description": "Boss Gauge points (earned in this Level) that summon the boss.",
+          "type": "integer",
+          "minimum": 1000
+        },
+        "health": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phases": {
+          "description": "The first phase starts at full health (starts_at 1); each later one starts when health falls to starts_at times the maximum, strictly descending.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/phase"
+                },
+                {
+                  "properties": {
+                    "starts_at": {
+                      "const": 1
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/phase"
+          }
+        },
+        "escorts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "roster",
+            "limit",
+            "delay_min",
+            "delay_max"
+          ],
+          "properties": {
+            "roster": {
+              "$ref": "#/$defs/roster"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "delay_min": {
+              "$ref": "#/$defs/positive"
+            },
+            "delay_max": {
+              "$ref": "#/$defs/positive"
+            }
+          }
+        }
       }
     },
     "game_over": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["delay_after_player_death"],
+      "required": [
+        "delay_after_player_death"
+      ],
       "properties": {
-        "delay_after_player_death": { "$ref": "#/$defs/non_negative" }
+        "delay_after_player_death": {
+          "$ref": "#/$defs/non_negative"
+        }
       }
     }
   }

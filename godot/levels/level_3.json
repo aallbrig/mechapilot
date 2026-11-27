@@ -1,0 +1,148 @@
+{
+  "$schema": "../../schemas/level.schema.json",
+  "id": "level_3",
+  "number": 3,
+  "name": "Sunset Strike",
+  "objective": "Fill the Boss Gauge, then swat the Hornet.",
+  "sky": {
+    "top": "#c2410c",
+    "bottom": "#fcd34d",
+    "effects": [
+      "sun"
+    ]
+  },
+  "player": {
+    "speed": 10,
+    "coast_factor": 0.3,
+    "initial_move": [
+      0,
+      0.5
+    ],
+    "fire_interval": 0.25,
+    "muzzle_offset": 3,
+    "projectile_speed": 24,
+    "projectile_lifetime": 10,
+    "projectile_damage": 3
+  },
+  "camera": {
+    "fov": 60,
+    "offset_landscape": [
+      0,
+      0,
+      22
+    ],
+    "offset_portrait": [
+      0,
+      -2,
+      32
+    ],
+    "damping": 1,
+    "far": 100
+  },
+  "play_sphere": {
+    "radius": 40
+  },
+  "intro": {
+    "duration": 2.5
+  },
+  "roster": [
+    {
+      "kind": "fighter",
+      "weight": 2,
+      "min_kills": 0
+    },
+    {
+      "kind": "interceptor",
+      "weight": 1,
+      "min_kills": 5
+    }
+  ],
+  "spawner": {
+    "spawn_distance": 25,
+    "spawn_distance_jitter": 4,
+    "pool": 50,
+    "limit_start": 3.0,
+    "limit_per_kill": 0.38,
+    "limit_max": 13,
+    "delay_min": 0.1,
+    "delay_max": 0.65,
+    "buffer_start": 0.9,
+    "buffer_per_kill": 0.08,
+    "buffer_min": 0.0,
+    "aggression_start": 0.3,
+    "aggression_per_kill": 0.025,
+    "aggression_max": 0.8,
+    "wave_interval": 12,
+    "wave_size_start": 4,
+    "wave_size_growth": 3,
+    "wave_spread": 0.5
+  },
+  "difficulty": {
+    "enemy_speed_scale": 1.2,
+    "enemy_fire_rate_scale": 1.2,
+    "enemy_bullet_speed_scale": 1.1
+  },
+  "boss": {
+    "id": "hornet",
+    "name": "Hornet",
+    "description": "A fast twin-rotor gunship that fires five-way spreads and dashes.",
+    "threshold": 8000,
+    "health": 300,
+    "phases": [
+      {
+        "starts_at": 1.0,
+        "attacks": [
+          {
+            "id": "spread_five",
+            "damage": 18,
+            "telegraph": 0.4,
+            "interval": 1.8
+          },
+          {
+            "id": "dash",
+            "damage": 25,
+            "telegraph": 0.6,
+            "interval": 4.0
+          }
+        ]
+      },
+      {
+        "starts_at": 0.5,
+        "attacks": [
+          {
+            "id": "spread_five",
+            "damage": 22,
+            "telegraph": 0.4,
+            "interval": 1.4
+          },
+          {
+            "id": "dash",
+            "damage": 30,
+            "telegraph": 0.5,
+            "interval": 3.0
+          }
+        ]
+      }
+    ],
+    "escorts": {
+      "roster": [
+        {
+          "kind": "fighter",
+          "weight": 1,
+          "min_kills": 0
+        },
+        {
+          "kind": "interceptor",
+          "weight": 1,
+          "min_kills": 0
+        }
+      ],
+      "limit": 3,
+      "delay_min": 2.5,
+      "delay_max": 4.5
+    }
+  },
+  "game_over": {
+    "delay_after_player_death": 2.0
+  }
+}
