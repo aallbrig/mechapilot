@@ -1,0 +1,27 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://game/visuals/title_backdrop.gd" id="1_backdrop"]
+[ext_resource type="PackedScene" path="res://game/visuals/sky/themes/dawn.tscn" id="2_dawn"]
+[ext_resource type="PackedScene" path="res://game/visuals/player/player_mech.tscn" id="3_mech"]
+[ext_resource type="PackedScene" path="res://game/visuals/enemies/fighter.tscn" id="4_fighter"]
+
+[node name="TitleBackdrop" type="Node3D"]
+script = ExtResource("1_backdrop")
+
+[node name="Sky" parent="." instance=ExtResource("2_dawn")]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 22)
+fov = 60.0
+far = 100.0
+
+[node name="Flight" type="Node3D" parent="."]
+
+[node name="Mech" parent="Flight" instance=ExtResource("3_mech")]
+transform = Transform3D(1.6, 0, 0, 0, 1.6, 0, 0, 0, 1.6, -3, -4.5, 0)
+
+[node name="Bandit1" parent="Flight" instance=ExtResource("4_fighter")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, -2, -6)
+
+[node name="Bandit2" parent="Flight" instance=ExtResource("4_fighter")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, -6.5, -10)

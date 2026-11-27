@@ -1,0 +1,75 @@
+#!/bin/sh
+# Tests for scripts/checks/asset-credits (run by scripts/test-shell).
+
+# A throwaway project: project.godot, one asset and a CREDITS.md with the given
+# rows. Rows write "@" for a Markdown backtick, which keeps the fixtures readable.
+credits_fixture() {
+  d="$(mktemp -d)"
+  : >"${d}/project.godot"
+  mkdir -p "${d}/art"
+  printf 'png' >"${d}/art/ship.png"
+  {
+    printf '# Credits\n\n| Asset | Source | Licence |\n| --- | --- | --- |\n'
+    printf '%s\n' "$@"
+  } >"${d}/rows.md"
+  tr '@' '\140' <"${d}/rows.md" >"${d}/CREDITS.md"
+  rm "${d}/rows.md"
+  printf '%s' "${d}"
+}
+
+test_asset_credits_passes_on_the_repository() {
+  scripts/checks/asset-credits
+}
+
+test_asset_credits_accepts_a_credited_asset() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |')"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_accepts_a_directory_credit() {
+  d="$(credits_fixture '| @art/@ Art pack | Kenney | CC0 1.0 |')"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_an_uncredited_asset() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf 'ogg' >"${d}/art/boom.OGG"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_licence_outside_the_allowlist() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Somewhere | All rights reserved |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_stale_credit() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @art/gone.png@ Gone | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_paths_outside_the_project() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @../escape/@ Escape | Kenney | CC0 1.0 |')"
+  mkdir -p "${d}/../escape"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  d="$(credits_fixture '| @/@ Everything | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_missing_credits_file() {
+  d="$(credits_fixture)"
+  rm "${d}/CREDITS.md"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_does_not_glob_credited_paths() {
+  d="$(credits_fixture '| @*@ Wildcard | Kenney | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_ignores_vendored_addons_and_the_editor_cache() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  mkdir -p "${d}/addons/x" "${d}/.godot/imported"
+  printf 'png' >"${d}/addons/x/icon.png"
+  printf 'png' >"${d}/.godot/imported/ship.png"
+  scripts/checks/asset-credits "${d}"
+}

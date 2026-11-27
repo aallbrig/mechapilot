@@ -1,0 +1,163 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://game/visuals/enemies/enemy_visual.gd" id="1_enemy_visual"]
+[ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
+resource_name = "hull"
+albedo_color = Color(0.2, 0.32, 0.38, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
+resource_name = "trim"
+albedo_color = Color(0.1, 0.16, 0.2, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.08, 0.1, 0.13, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
+resource_name = "accent"
+albedo_color = Color(0.2, 0.95, 0.9, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "canopy"
+albedo_color = Color(0.6, 0.9, 1, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
+resource_name = "metal"
+albedo_color = Color(0.6, 0.62, 0.66, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7"]
+resource_name = "glow"
+albedo_color = Color(0.3, 1, 0.95, 1)
+emission_enabled = true
+emission = Color(0.3, 1, 0.95, 1)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_8"]
+top_radius = 0.2
+bottom_radius = 0.27
+height = 2.8
+radial_segments = 8
+rings = 1
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_9"]
+top_radius = 0
+bottom_radius = 0.2
+height = 1.3
+radial_segments = 8
+rings = 1
+
+[sub_resource type="SphereMesh" id="SphereMesh_10"]
+radius = 0.18
+height = 0.36
+radial_segments = 8
+rings = 4
+
+[sub_resource type="BoxMesh" id="BoxMesh_11"]
+size = Vector3(0.35, 0.05, 1.1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_12"]
+size = Vector3(0.9, 0.06, 3.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_13"]
+size = Vector3(1.6, 0.05, 0.56)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_14"]
+top_radius = 0.1
+bottom_radius = 0.1
+height = 1.5
+radial_segments = 6
+rings = 1
+
+[sub_resource type="PrismMesh" id="PrismMesh_15"]
+left_to_right = 0
+size = Vector3(0.75, 0.75, 0.06)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_16"]
+top_radius = 0.2
+bottom_radius = 0.2
+height = 0.06
+radial_segments = 8
+rings = 1
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_17"]
+top_radius = 0.05
+bottom_radius = 0.05
+height = 1.3
+radial_segments = 6
+rings = 1
+
+[node name="Interceptor" type="Node3D"]
+script = ExtResource("1_enemy_visual")
+
+[node name="Hull" type="MeshInstance3D" parent="."]
+unique_name_in_owner = true
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("CylinderMesh_8")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part2" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 2.05, 0, 0)
+mesh = SubResource("CylinderMesh_9")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part3" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(2.6, 0, 0, 0, 1, 0, 0, 0, 0.9, 0.95, 0.19, 0)
+mesh = SubResource("SphereMesh_10")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="Part4" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0.921061, 0, -0.389418, 0, 1, 0, 0.389418, 0, 0.921061, 1.25, 0.02, 0)
+mesh = SubResource("BoxMesh_11")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part5" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0.939373, 0, 0.342898, 0, 1, 0, -0.342898, 0, 0.939373, -0.45, -0.02, 0)
+mesh = SubResource("BoxMesh_12")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part6" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.1, 0.16, 0)
+mesh = SubResource("BoxMesh_13")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part7" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -1.25, 0, -0.55)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part8" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6, 0.42, -0.55)
+mesh = SubResource("PrismMesh_15")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part9" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -1.25, 0, 0.55)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part10" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.6, 0.42, 0.55)
+mesh = SubResource("PrismMesh_15")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part11" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -1.43, 0, 0)
+mesh = SubResource("CylinderMesh_16")
+material_override = SubResource("StandardMaterial3D_7")
+
+[node name="Part12" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 1.75, -0.24, 0)
+mesh = SubResource("CylinderMesh_17")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Muzzle" type="Marker3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 2.45, -0.24, 0)
+
+[node name="Exhaust" type="Marker3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, -1.48, 0, 0)
