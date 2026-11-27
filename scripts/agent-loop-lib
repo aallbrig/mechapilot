@@ -22,13 +22,24 @@ def parked: [.labels[] | select(. == "needs-info" or . == "ready-for-human" or .
 def agent_ready: (.labels | index("ready-for-agent")) != null and (parked | not);
 def unblocked: (.blocked_by // 1) == 0;
 def incident: (.labels | index("prod-incident")) != null;
+# needs-triage issues the loop may triage: not parked, not yet ready-for-agent,
+# and held by no other machine.
+def triageable($m): (parked | not) and ((.labels | index("ready-for-agent")) == null) and (other_machine($m) | not);
+# The shared REST budget is below config.budget_min_pct of its limit and has
+# not reset yet: start no new work (#64).
+# A reading counts only when remaining, limit and reset are all numbers.
+def budget_low: (.rate_limit | type) == "object"
+  and ([.rate_limit.remaining, .rate_limit.limit, .rate_limit.reset] | all(type == "number"))
+  and .rate_limit.limit > 0 and .now < .rate_limit.reset
+  and (.rate_limit.remaining * 100 < .rate_limit.limit * .config.budget_min_pct);
 def work:
   .machine as $m
   | {
       mine: [.issues[] | select(agent_ready and mine($m)) | .number],
       unclaimed: [.issues[] | select(agent_ready and (mine($m) | not) and (other_machine($m) | not) and unblocked
         and (incident or (.assignees | length) == 0)) | .number],
-      prod_down: (.prod.expected and (.prod.ok | not) and (.prod.incident_open | not))
+      prod_down: (.prod.expected and (.prod.ok | not) and (.prod.incident_open | not)),
+      triage: [(.triage // [])[] | select(triageable($m)) | .number]
     };
 def last_sign_of_life: [.last_activity_at // 0, .session.started_at] | max;
 # A tool call may run silently up to its timeout, so a running tool extends the limit.
@@ -43,13 +54,16 @@ JQ
 }
 
 # agent_loop_work <snapshot-file>: the work this machine may do, as JSON
-# {"mine":[n...],"unclaimed":[n...],"prod_down":bool}.
+# {"mine":[n...],"unclaimed":[n...],"prod_down":bool,"triage":[n...]}.
 #   mine       open ready-for-agent issues labelled machine:<this alias>
 #   unclaimed  open, unblocked, unassigned ready-for-agent issues with no
 #              machine label (a prod-incident is assigned to the owner, so it
 #              counts while unblocked and no other machine holds it)
 #   prod_down  Production is expected (a v* release exists), fails its smoke
 #              check, and no prod-incident issue is open yet
+#   triage     open needs-triage issues (snapshot .triage) the session may
+#              triage: not parked, not already ready-for-agent, and held by
+#              no other machine (#64)
 # needs-info, ready-for-human and wontfix park an issue even if it still
 # carries ready-for-agent. An issue whose blocked_by is unknown counts as blocked.
 agent_loop_work() {
@@ -88,6 +102,9 @@ agent_loop_classify() {
 #                 or busy at config.force_restart_pct or more (interrupt first)
 #   stop-session  idle and no work remains (with the stop file: the current
 #                 issue is done)
+#   budget-hold   work exists, but the shared REST budget is below
+#                 config.budget_min_pct of its limit until its reset: start no
+#                 session, and send an idle session no new pass (#64)
 #   wait          nothing to do this tick
 # With the stop file set, only this machine's claimed issue counts as work, so
 # the session finishes the current issue and nothing new starts.
@@ -99,7 +116,10 @@ agent_loop_decide() {
 | $s.config as $c
 | ($s | work) as $w
 | (if $s.stop_requested then ($w.mine | length) > 0
-   else ($w.mine | length) > 0 or ($w.unclaimed | length) > 0 or $w.prod_down end) as $has_work
+   else ($w.mine | length) > 0 or ($w.unclaimed | length) > 0 or $w.prod_down or ($w.triage | length) > 0 end) as $has_work
+| (if $s | budget_low then
+    ["budget-hold", "API budget low: \($s.rate_limit.remaining)/\($s.rate_limit.limit) remaining (below \($c.budget_min_pct)%), resets in \($s.rate_limit.reset - $s.now)s"]
+   else null end) as $hold
 | ($s | class) as $class
 | ($s.context_pct // 0) as $pct
 # A nudge that was followed by a sign of life worked, so only nudges newer
@@ -119,15 +139,17 @@ if $class == "none" then
   elif ($has_work | not) then ["wait", "no work"]
   elif $s.escalations >= $c.max_escalations then
     ["wait", "held after \($s.escalations) stalls; a human checks the agent-loop-stall issue, then runs task loop:start"]
+  elif $hold != null then $hold
   elif $s.last_start_at != null and ($s.now - $s.last_start_at) < $c.start_cooldown_seconds then
     ["wait", "start cooldown, started \($s.now - $s.last_start_at)s ago"]
-  else ["start", "mine=\($w.mine) unclaimed=\($w.unclaimed) prod_down=\($w.prod_down)"] end
+  else ["start", "mine=\($w.mine) unclaimed=\($w.unclaimed) prod_down=\($w.prod_down) triage=\($w.triage)"] end
 elif $class == "stalled" then
   if $s.session.status == "waiting" then nudge_or_escalate("waiting for \($s.session.waiting_for // "input")")
   else nudge_or_escalate("busy, no heartbeat for \($s.now - ($s | last_sign_of_life))s") end
 elif $class == "idle" then
   if ($has_work | not) then
     ["stop-session", (if $s.stop_requested then "stop file set, current issue done" else "no work" end)]
+  elif $hold != null then $hold
   elif $pct >= $c.restart_pct then ["restart", "context \($pct)%"]
   elif ($s.now - ([$s.last_start_at // 0, ($s | last_sign_of_life)] | max)) < $c.nudge_gap_seconds then
     ["wait", "idle with work, active recently"]
@@ -181,6 +203,10 @@ agent_loop_default_state_dir() {
     printf '%s\n' "${AGENT_LOOP_STATE_DIR}"
     return 0
   fi
-  common="$(git -c core.hooksPath=/dev/null -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir)" || return 1
+  # An inherited GIT_DIR or GIT_WORK_TREE would name another repository.
+  common="$(
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_CONFIG_PARAMETERS
+    git -c core.hooksPath=/dev/null -C "${1:-.}" rev-parse --path-format=absolute --git-common-dir
+  )" || return 1
   printf '%s/.agent-loop\n' "$(dirname "${common}")"
 }

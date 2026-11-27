@@ -3,14 +3,68 @@
   "machine": "m-a1b2c3",
   "stop_requested": false,
   "issues": [
-    { "number": 101, "labels": ["ready-for-agent"], "assignees": [], "blocked_by": 0 },
-    { "number": 102, "labels": ["ready-for-agent"], "assignees": [], "blocked_by": 1 },
-    { "number": 103, "labels": ["ready-for-agent", "machine:m-ffffff"], "assignees": ["owner"], "blocked_by": 0 },
-    { "number": 104, "labels": ["ready-for-agent", "needs-info"], "assignees": [], "blocked_by": 0 },
-    { "number": 105, "labels": ["ready-for-agent"], "assignees": ["owner"], "blocked_by": 0 },
-    { "number": 106, "labels": ["ready-for-agent"], "assignees": [], "blocked_by": null }
+    {
+      "number": 101,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "blocked_by": 0
+    },
+    {
+      "number": 102,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "blocked_by": 1
+    },
+    {
+      "number": 103,
+      "labels": [
+        "ready-for-agent",
+        "machine:m-ffffff"
+      ],
+      "assignees": [
+        "owner"
+      ],
+      "blocked_by": 0
+    },
+    {
+      "number": 104,
+      "labels": [
+        "ready-for-agent",
+        "needs-info"
+      ],
+      "assignees": [],
+      "blocked_by": 0
+    },
+    {
+      "number": 105,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [
+        "owner"
+      ],
+      "blocked_by": 0
+    },
+    {
+      "number": 106,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "blocked_by": null
+    }
   ],
-  "prod": { "expected": false, "ok": true, "incident_open": false },
+  "triage": [],
+  "prod": {
+    "expected": false,
+    "ok": true,
+    "incident_open": false
+  },
+  "rate_limit": null,
   "session": null,
   "tool_running": false,
   "last_activity_at": null,
@@ -29,6 +83,7 @@
     "max_episode_nudges": 6,
     "restart_pct": 45,
     "force_restart_pct": 60,
-    "start_cooldown_seconds": 600
+    "start_cooldown_seconds": 600,
+    "budget_min_pct": 20
   }
 }

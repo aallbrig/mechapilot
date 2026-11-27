@@ -1,6 +1,7 @@
 #!/bin/sh
 # The Agent Loop's read-mostly door to GitHub (#20). The Supervisor uses all of
-# it; the session's allowlist permits only `blockers`. Tests stub `gh` on PATH.
+# it; the session's allowlist permits only `blockers` and `triage-view`. Tests
+# stub `gh` on PATH.
 #
 # Usage:
 #   agent-loop-gh issues <label> <cache-dir>
@@ -12,15 +13,115 @@
 #       Print the issue's open blocker count, or "unknown".
 #   agent-loop-gh issue-state <number>
 #       Print "open", "completed" or "not_planned".
+#   agent-loop-gh triage-view <number>
+#       Print the issue for the triage pass as {number, state, labels,
+#       author_trusted, title, body, comments, ignored_comments}: the title and
+#       body only when the author is the owner, a member or a collaborator,
+#       and only those authors' comments (author_association), so no outsider's
+#       text reaches the acceptance criteria the loop writes.
+#   agent-loop-gh rate-limit
+#       Print the core REST budget as {"remaining","limit","reset","used"}
+#       from the x-ratelimit-* headers of GET /rate_limit, a call that does
+#       not count against that budget.
+#   agent-loop-gh merged-pr <branch>
+#       Print the merged PR whose head is <branch> as {"pr","merged_at",
+#       "review_rounds"}, or nothing. A review round is one head SHA that got
+#       at least one review-verdict line (a push starts a new round).
 #   agent-loop-gh file-stall <title> <body-file>
 #       File an issue labelled agent-loop-stall and ready-for-human (the fix
 #       may touch the loop's permissions, which only a human changes), or
 #       comment once on the open one with the same title.
+#
+# Budget metrics (#64): every REST call above made through api_get (issues,
+# blockers, issue-state, triage-view, rate-limit) uses --include, and its x-ratelimit-*
+# headers are appended as one rate_limit event
+# (schemas/agent-loop-metrics-event.schema.json) to AGENT_LOOP_METRICS_FILE
+# when it and AGENT_LOOP_MACHINE are set. The Supervisor points it at its state
+# dir. The session's launcher points it inside the session's own checkout,
+# the only place its sandbox can write; the Supervisor never reads that file.
+# AGENT_LOOP_GH_SOURCE names the caller (supervisor or session). A failed
+# metrics write never fails the call.
 set -eu
 
 die() {
   printf 'agent-loop-gh: %s\n' "$*" >&2
   exit 1
+}
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+# header <headers-file> <name>: one header's value (names are case-insensitive).
+header() {
+  awk -v want="$2" 'BEGIN { want = tolower(want) }
+    {
+      i = index($0, ":")
+      if (i > 0 && tolower(substr($0, 1, i - 1)) == want) {
+        v = substr($0, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v); print v; exit
+      }
+    }' "$1"
+}
+
+# numbers <a> <b> <c>: "ok" when every value is a non-empty run of digits.
+numbers() {
+  for v in "$@"; do
+    case "${v}" in
+      "" | *[!0-9]*)
+        printf "bad\n"
+        return 0
+        ;;
+      *) ;;
+    esac
+  done
+  printf "ok\n"
+}
+
+# record_rate_limit <headers-file> <command-name>
+record_rate_limit() {
+  sink="${AGENT_LOOP_METRICS_FILE:-}"
+  machine="${AGENT_LOOP_MACHINE:-}"
+  [ -n "${sink}" ] || return 0
+  case "${machine}" in
+    m-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 0 ;;
+  esac
+  remaining="$(header "$1" x-ratelimit-remaining)"
+  limit="$(header "$1" x-ratelimit-limit)"
+  reset="$(header "$1" x-ratelimit-reset)"
+  used="$(header "$1" x-ratelimit-used)"
+  resource="$(header "$1" x-ratelimit-resource)"
+  ok="$(numbers "${remaining}" "${limit}" "${reset}")"
+  [ "${ok}" = ok ] || return 0
+  ok="$(numbers "${used}")"
+  [ "${ok}" = ok ] || used=$((limit - remaining))
+  case "${resource}" in "" | *[!a-z_]*) resource=unknown ;; *) ;; esac
+  source_name="${AGENT_LOOP_GH_SOURCE:-session}"
+  case "${source_name}" in supervisor | session) ;; *) source_name=session ;; esac
+  at="$(date +%s)"
+  line="$(jq -nc --argjson at "${at}" --arg machine "${machine}" --arg source "${source_name}" \
+    --arg command "$2" --arg resource "${resource}" --argjson remaining "${remaining}" \
+    --argjson limit "${limit}" --argjson reset "${reset}" --argjson used "${used}" \
+    '{at: $at, event: "rate_limit", machine: $machine, source: $source, command: $command,
+      resource: $resource, remaining: $remaining, limit: $limit, reset: $reset, used: $used}')" || return 0
+  (printf '%s\n' "${line}" >>"${sink}") 2>/dev/null || true
+}
+
+# api_get <command-name> <out-body> <gh api arguments...>: GET with --include,
+# record the rate-limit headers, write the body to <out-body> on 200 and the
+# headers to <out-body>.headers. Prints the HTTP status ("none" without one).
+api_get() {
+  name="$1"
+  out="$2"
+  shift 2
+  raw="${work}/raw"
+  # gh exits non-zero on 304 and on errors, so judge by the status line.
+  gh api --include "$@" >"${raw}" 2>/dev/null || true
+  status="$(head -n 1 "${raw}" | tr -d '\r' | cut -d ' ' -f 2)"
+  # Headers end at the first empty line; the body follows.
+  sed -n '1,/^\r\{0,1\}$/p' "${raw}" | tr -d '\r' >"${out}.headers"
+  record_rate_limit "${out}.headers" "${name}"
+  if [ "${status}" = 200 ]; then sed '1,/^\r\{0,1\}$/d' "${raw}" >"${out}"; fi
+  printf '%s\n' "${status:-none}"
 }
 
 issues() {
@@ -34,52 +135,105 @@ issues() {
   key="$(printf '%s' "${label}" | tr ':' '_')"
   etag_file="${cache}/${key}.etag"
   body_file="${cache}/${key}.json"
-  raw="$(mktemp)"
-  trap 'rm -f "${raw}"' EXIT
-  set -- api --include "repos/{owner}/{repo}/issues?state=open&labels=${label}&per_page=100"
+  set -- "repos/{owner}/{repo}/issues?state=open&labels=${label}&per_page=100"
   if [ -s "${etag_file}" ] && [ -s "${body_file}" ]; then
     etag="$(cat "${etag_file}")"
     set -- "$@" -H "If-None-Match: ${etag}"
   fi
-  # gh exits non-zero on 304, so judge by the status line instead.
-  gh "$@" >"${raw}" 2>/dev/null || true
-  status="$(head -n 1 "${raw}" | tr -d '\r' | cut -d ' ' -f 2)"
+  status="$(api_get issues "${work}/body" "$@")"
   case "${status}" in
     304) ;;
     200)
-      # Headers end at the first empty line; the JSON body follows.
-      sed '1,/^\r\{0,1\}$/d' "${raw}" >"${body_file}.tmp"
-      jq -e 'type == "array"' "${body_file}.tmp" >/dev/null || die "issues ${label}: response is not a JSON array"
-      count="$(jq length "${body_file}.tmp")"
+      jq -e 'type == "array"' "${work}/body" >/dev/null || die "issues ${label}: response is not a JSON array"
+      count="$(jq length "${work}/body")"
       if [ "${count}" -ge 100 ]; then
         die "issues ${label}: 100 or more open issues; paging is not supported"
       fi
-      sed -n '1,/^\r\{0,1\}$/p' "${raw}" | tr -d '\r' |
-        sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p' >"${etag_file}.tmp"
+      header "${work}/body.headers" etag >"${etag_file}.tmp"
+      cp "${work}/body" "${body_file}.tmp"
       mv -f "${body_file}.tmp" "${body_file}"
       mv -f "${etag_file}.tmp" "${etag_file}"
       ;;
-    *) die "issues ${label}: GitHub answered ${status:-nothing}" ;;
+    *) die "issues ${label}: GitHub answered ${status}" ;;
   esac
   jq -c '[.[] | select(has("pull_request") | not)
     | {number, labels: [.labels[].name], assignees: [.assignees[].login],
        blocked_by: (.issue_dependencies_summary.blocked_by // null)}]' "${body_file}"
 }
 
-blockers() {
+issue_number() {
   case "$1" in
     "" | *[!0-9]*) die "bad issue number: $1" ;;
     *) ;;
   esac
-  gh api "repos/{owner}/{repo}/issues/$1" --jq '.issue_dependencies_summary.blocked_by // "unknown"'
+}
+
+blockers() {
+  issue_number "$1"
+  status="$(api_get blockers "${work}/issue" "repos/{owner}/{repo}/issues/$1")"
+  [ "${status}" = 200 ] || die "blockers $1: GitHub answered ${status}"
+  jq -r '.issue_dependencies_summary.blocked_by // "unknown"' "${work}/issue"
 }
 
 issue_state() {
+  issue_number "$1"
+  status="$(api_get issue-state "${work}/issue" "repos/{owner}/{repo}/issues/$1")"
+  [ "${status}" = 200 ] || die "issue-state $1: GitHub answered ${status}"
+  jq -r 'if .state == "open" then "open" elif .state_reason == "completed" then "completed" else "not_planned" end' "${work}/issue"
+}
+
+# triage_view <n>: what the triage pass may read of an issue. Anyone can open
+# or comment on an issue in a public repository, so only text from the
+# owner, members and collaborators passes through; the rest is counted, never
+# shown (#64).
+triage_view() {
+  issue_number "$1"
+  status="$(api_get triage-view "${work}/issue" "repos/{owner}/{repo}/issues/$1")"
+  [ "${status}" = 200 ] || die "triage-view $1: GitHub answered ${status}"
+  status="$(api_get triage-view "${work}/comments" "repos/{owner}/{repo}/issues/$1/comments?per_page=100")"
+  [ "${status}" = 200 ] || die "triage-view $1: GitHub answered ${status} for its comments"
+  jq -e 'type == "array"' "${work}/comments" >/dev/null || die "triage-view $1: comments are not a JSON array"
+  jq -n --slurpfile issue "${work}/issue" --slurpfile comments "${work}/comments" '
+    def trusted: (.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) != null;
+    $issue[0] as $i
+    | ($i | trusted) as $author_trusted
+    | {number: $i.number, state: $i.state, labels: [$i.labels[]?.name],
+       author_trusted: $author_trusted,
+       title: (if $author_trusted then $i.title else null end),
+       body: (if $author_trusted then ($i.body // "") else null end),
+       comments: [$comments[0][] | select(trusted) | {author: .user.login, body: (.body // "")}],
+       ignored_comments: ([$comments[0][] | select(trusted | not)] | length)}'
+}
+
+rate_limit() {
+  status="$(api_get rate-limit "${work}/rate" rate_limit)"
+  [ "${status}" = 200 ] || die "rate-limit: GitHub answered ${status}"
+  h="${work}/rate.headers"
+  remaining="$(header "${h}" x-ratelimit-remaining)"
+  limit="$(header "${h}" x-ratelimit-limit)"
+  reset="$(header "${h}" x-ratelimit-reset)"
+  used="$(header "${h}" x-ratelimit-used)"
+  ok="$(numbers "${remaining}" "${limit}" "${reset}")"
+  [ "${ok}" = ok ] || die "rate-limit: no x-ratelimit-* headers"
+  ok="$(numbers "${used}")"
+  [ "${ok}" = ok ] || used=$((limit - remaining))
+  jq -nc --argjson r "${remaining}" --argjson l "${limit}" --argjson t "${reset}" --argjson u "${used}" \
+    '{remaining: $r, limit: $l, reset: $t, used: $u}'
+}
+
+merged_pr() {
   case "$1" in
-    "" | *[!0-9]*) die "bad issue number: $1" ;;
-    *) ;;
+    agent-loop/m-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/[1-9]*) ;;
+    *) die "bad branch: $1" ;;
   esac
-  gh api "repos/{owner}/{repo}/issues/$1" --jq 'if .state == "open" then "open" elif .state_reason == "completed" then "completed" else "not_planned" end'
+  case "${1##*/}" in *[!0-9]*) die "bad branch: $1" ;; *) ;; esac
+  gh pr list --state merged --head "$1" --limit 1 --json number,mergedAt,comments >"${work}/prs"
+  jq -c '.[0] // empty
+    | {pr: .number, merged_at: (.mergedAt | fromdateiso8601),
+       review_rounds: ([.comments[]?.body // ""
+         | [splits("\r?\n") | select(test("\\S"))] | last // ""
+         | capture("^review-verdict: (pass|block) sha=(?<sha>[0-9a-f]{40}) reviewer=[a-z][a-z0-9-]*$")?
+         | .sha] | unique | length)}' "${work}/prs"
 }
 
 file_stall() {
@@ -103,9 +257,12 @@ case "${cmd}" in
   issues) issues "${1:?label}" "${2:?cache dir}" ;;
   blockers) blockers "${1:?issue number}" ;;
   issue-state) issue_state "${1:?issue number}" ;;
+  rate-limit) rate_limit ;;
+  triage-view) triage_view "${1:?issue number}" ;;
+  merged-pr) merged_pr "${1:?branch}" ;;
   file-stall) file_stall "${1:?title}" "${2:?body file}" ;;
   *)
-    printf 'usage: agent-loop-gh issues <label> <cache-dir> | blockers <n> | issue-state <n> | file-stall <title> <body-file>\n' >&2
+    printf 'usage: agent-loop-gh issues <label> <cache-dir> | blockers <n> | issue-state <n> | triage-view <n> | rate-limit | merged-pr <branch> | file-stall <title> <body-file>\n' >&2
     exit 64
     ;;
 esac

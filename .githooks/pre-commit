@@ -2,8 +2,10 @@
 # Fast checks on what is being committed. Never bypass (--no-verify); fix the finding.
 set -eu
 # Run checks with the pinned toolchain, not whatever is on the login PATH.
+# The toolchain script is the one beside this hook, not the working tree's: in
+# the Agent Loop session both are the human-pinned, read-only copies (#64).
 # shellcheck source=../scripts/lib-toolchain
-. scripts/lib-toolchain
+. "$(dirname "$0")/../scripts/lib-toolchain"
 
 staged="$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR)"
 [ -n "${staged}" ] || exit 0

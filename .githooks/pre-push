@@ -1,8 +1,10 @@
 #!/bin/sh
 set -eu
 # Run checks with the pinned toolchain, not whatever is on the login PATH.
+# The toolchain script is the one beside this hook, not the working tree's: in
+# the Agent Loop session both are the human-pinned, read-only copies (#64).
 # shellcheck source=../scripts/lib-toolchain
-. scripts/lib-toolchain
+. "$(dirname "$0")/../scripts/lib-toolchain"
 # Git exports these to hooks; checks find the repository from the working
 # directory instead, so tests that build throwaway repos never touch this one.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \

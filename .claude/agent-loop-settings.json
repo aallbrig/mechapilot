@@ -67,6 +67,7 @@
       "Bash(scripts/agent-loop-deps)",
       "Bash(scripts/agent-loop-push *)",
       "Bash(scripts/agent-loop-gh blockers *)",
+      "Bash(scripts/agent-loop-gh triage-view *)",
       "Bash(scripts/agent-loop-report *)",
       "Bash(git status *)",
       "Bash(git diff *)",

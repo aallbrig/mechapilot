@@ -1,48 +1,218 @@
 #!/bin/sh
-# Summarize the Agent Loop's metrics (#20): issues delivered per day, median
-# time to merge, stalls, restarts and the nudge success rate. Later changes to
-# the Agent Loop are judged against these numbers.
+# Summarize the Agent Loop's metrics (#20, #64). Later changes to the Agent
+# Loop are judged against these numbers:
+#   - issues delivered per day and the median time from claim to close;
+#   - cycle time per issue (claim -> merge) and review rounds per PR;
+#   - stalls, restarts, the nudge success rate and the most nudges in one
+#     episode (the cap is 6);
+#   - how long the lsof scan of the checkout takes before a start;
+#   - the shared REST budget: the lowest reading, requests used per rate-limit
+#     window, and how often the Supervisor held new work for it;
+#   - CI minutes and the cancelled-run rate of the ci workflow.
 #
-# Usage: scripts/agent-loop-report [metrics.jsonl]
+# Usage: scripts/agent-loop-report [--json] [--no-ci] [metrics.jsonl]
 #   default file: <state-dir>/metrics.jsonl (see scripts/agent-loop-lib)
-# A nudge succeeded when no stall followed it within 30 minutes. Days are UTC.
+#   --json   print one object that conforms to schemas/agent-loop-report.schema.json
+#   --no-ci  skip the CI numbers (no network at all)
+# It reads only that file, plus one `gh run list` for the CI numbers (never one
+# call per run). When that call fails, the CI numbers are reported as
+# unavailable. A nudge succeeded when no stall followed it within 30 minutes.
+# Days are UTC. A review round is one PR head SHA that received a
+# review-verdict (scripts/agent-loop-gh merged-pr). CI minutes are wall-clock
+# minutes from a run's start to its last update, not billed minutes.
 set -eu
 
 lib_dir="$(cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=agent-loop-lib
 . "${lib_dir}/agent-loop-lib"
 
-if [ "$#" -gt 0 ]; then
-  file="$1"
-else
+format=table
+ci=true
+file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) format=json ;;
+    --no-ci) ci=false ;;
+    -*)
+      printf 'usage: agent-loop-report [--json] [--no-ci] [metrics.jsonl]\n' >&2
+      exit 64
+      ;;
+    *) file="$1" ;;
+  esac
+  shift
+done
+if [ -z "${file}" ]; then
   state_dir="$(agent_loop_default_state_dir)"
   file="${state_dir}/metrics.jsonl"
 fi
-if [ ! -s "${file}" ]; then
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+# Only regular files are read (a FIFO would block, a link could point anywhere).
+if [ -L "${file}" ] || { [ -e "${file}" ] && [ ! -f "${file}" ]; }; then
+  printf 'agent-loop-report: %s is not a regular file\n' "${file}" >&2
+  exit 1
+fi
+if [ ! -s "${file}" ] && [ "${format}" = table ]; then
   printf 'agent-loop-report: no metrics yet (%s)\n' "${file}"
   exit 0
 fi
+# Lines that are not JSON, and events that don't match their schema
+# (schemas/agent-loop-metrics-event.schema.json: the fields this report reads,
+# with their types), are skipped, never fatal.
+if [ -s "${file}" ]; then
+  jq -c '.' "${file}" 2>/dev/null >"${work}/parsed" || true
+  # jq stops at the first malformed line; fall back to one line at a time.
+  lines="$(wc -l <"${file}")"
+  kept="$(wc -l <"${work}/parsed")"
+  if [ "${kept}" -lt "${lines}" ]; then
+    : >"${work}/parsed"
+    while IFS= read -r line; do
+      printf '%s\n' "${line}" | jq -c '.' 2>/dev/null >>"${work}/parsed" || true
+    done <"${file}"
+  fi
+  jq -c '
+    def count: type == "number" and . >= 0 and . == floor;
+    def text: type == "string";
+    select(type == "object" and (.at | count) and (.event | text) and (.machine | text))
+    | select(
+        if .event == "delivered" then (.issue | count) and (.seconds | count)
+          and ((has("pr") | not) or ((.pr | count) and (.merged_at | count) and (.review_rounds | count)))
+        elif .event == "claimed" or .event == "unclaimed" then .issue | count
+        elif .event == "restart" then (.pct | type) == "number"
+        elif .event == "nudge" then (has("count") | not) or (.count | count)
+        elif .event == "checkout_scan" then .seconds | count
+        elif .event == "rate_limit" then ([.remaining, .limit, .reset, .used] | all(count)) and ((has("resource") | not) or (.resource | text))
+        elif .event == "budget_hold" or .event == "budget_unknown" or .event == "stall" then .reason | text
+        else true end)' "${work}/parsed" >"${work}/events"
+else
+  : >"${work}/events"
+fi
 
-jq -rs -f /dev/stdin "${file}" <<'JQ'
-def dur: (. / 3600 | floor) as $h | ((. % 3600) / 60 | floor) as $m
-  | if $h > 0 then "\($h)h \($m | tostring | if length < 2 then "0" + . else . end)m" else "\($m)m" end;
+printf 'null\n' >"${work}/runs.json"
+if [ "${ci}" = true ]; then
+  if gh run list --workflow ci.yml --limit 200 \
+    --json databaseId,status,conclusion,startedAt,updatedAt,headBranch >"${work}/runs.raw" 2>/dev/null &&
+    jq -e 'type == "array"' "${work}/runs.raw" >/dev/null 2>&1; then
+    cp "${work}/runs.raw" "${work}/runs.json"
+  fi
+fi
+
+now="$(date +%s)"
+jq -s --slurpfile runs "${work}/runs.json" --argjson now "${now}" -f /dev/stdin "${work}/events" >"${work}/report.json" <<'JQ'
 def median: sort | length as $n
   | if $n == 0 then null elif $n % 2 == 1 then .[($n - 1) / 2] else ((.[$n / 2 - 1] + .[$n / 2]) / 2 | floor) end;
+def num: select(type == "number");
+def int: select(type == "number" and . == floor and . >= 0);
 . as $all
-| [$all[] | select(.event == "delivered")] as $delivered
-| [$all[] | select(.event == "stall") | .at] as $stalls
-| [$all[] | select(.event == "nudge") | .at] as $nudges
+| [$all[] | select(.event == "delivered" and (.issue | int) and (.seconds | int) and (.at | int))] as $delivered
+| [$all[] | select(.event == "stall") | .at | num] as $stalls
+| [$all[] | select(.event == "nudge") | .at | num] as $nudges
 | [$nudges[] | . as $t | select([$stalls[] | select(. >= $t and . - $t <= 1800)] | length == 0)] as $nudge_ok
-| ([$delivered[] | .seconds] | median) as $median
+| [$all[] | select(.event == "claimed" and (.issue | int) and (.at | int))] as $claims
+| [$delivered[]
+    | . as $d
+    | ([$claims[] | select(.issue == $d.issue and .at <= $d.at) | .at] | max) as $claimed
+    | ($claimed // ($d.at - $d.seconds)) as $from
+    | (if ($d.merged_at | type) == "number" then $d.merged_at else $d.at end) as $to
+    | {issue: $d.issue, claimed_at: $from, delivered_at: $d.at,
+       pr: (if ($d.pr | type) == "number" then $d.pr else null end),
+       merged_at: (if ($d.merged_at | type) == "number" then $d.merged_at else null end),
+       cycle_seconds: ([$to - $from, 0] | max),
+       review_rounds: (if ($d.review_rounds | type) == "number" then $d.review_rounds else null end)}] as $issues
+| [$issues[] | select(.review_rounds != null) | .review_rounds] as $rounds
+| [$all[] | select(.event == "rate_limit" and (.remaining | int) and (.limit | int) and (.reset | int) and (.at | int))] as $rates
+| [$rates[] | select((.resource // "core") == "core")] as $core
+| ($core | min_by(if .limit > 0 then .remaining / .limit else 1 end)) as $lowest
+| [$core | group_by(.reset)[] | map(.used // (.limit - .remaining)) | max] as $windows
+| [$all[] | select(.event == "checkout_scan") | .seconds | int] as $scans
+| ($runs[0]) as $r
+| {
+    generated_at: $now,
+    delivered: {
+      count: ($delivered | length),
+      per_day: ($delivered | group_by(.at | strftime("%Y-%m-%d"))
+        | map({day: (.[0].at | strftime("%Y-%m-%d")), count: length})),
+      median_seconds: ([$delivered[] | .seconds] | median)
+    },
+    issues: $issues,
+    review_rounds: {prs: ($rounds | length), median: ($rounds | median), max: ($rounds | max)},
+    stalls: ($stalls | length),
+    restarts: ([$all[] | select(.event == "restart")] | length),
+    nudges: {
+      count: ($nudges | length),
+      succeeded: ($nudge_ok | length),
+      max_per_episode: ([$all[] | select(.event == "nudge") | .count | int] | max)
+    },
+    checkout_scans: {count: ($scans | length), median_seconds: ($scans | median), max_seconds: ($scans | max)},
+    api: {
+      readings: ($rates | length),
+      lowest: (if $lowest == null then null else {remaining: $lowest.remaining, limit: $lowest.limit, at: $lowest.at} end),
+      used_per_window: {windows: ($windows | length), median: ($windows | median), max: ($windows | max)},
+      budget_holds: ([$all[] | select(.event == "budget_hold")] | length),
+      budget_unknown: ([$all[] | select(.event == "budget_unknown")] | length)
+    },
+    ci: (if $r == null then null else
+      [$r[] | select(.status == "completed")] as $done
+      | [$done[] | select(.conclusion == "cancelled")] as $cancelled
+      | def minutes: [.[] | select(.startedAt != null and .updatedAt != null)
+          | ((.updatedAt | fromdateiso8601) - (.startedAt | fromdateiso8601))] | add // 0 | . / 60 | . * 10 | round / 10;
+      {
+        runs: ($r | length),
+        completed: ($done | length),
+        cancelled: ($cancelled | length),
+        cancelled_rate: (if ($done | length) == 0 then null else ($cancelled | length) / ($done | length) end),
+        minutes: ($done | minutes),
+        loop_minutes: ([$done[] | select((.headBranch // "") | startswith("agent-loop/"))] | minutes)
+      } end)
+  }
+JQ
+
+if [ "${format}" = json ]; then
+  cat "${work}/report.json"
+  exit 0
+fi
+
+jq -r -f /dev/stdin "${work}/report.json" <<'JQ'
+def dur: (. / 3600 | floor) as $h | ((. % 3600) / 60 | floor) as $m
+  | if $h > 0 then "\($h)h \($m | tostring | if length < 2 then "0" + . else . end)m" else "\($m)m" end;
+def pad($n): tostring | . + (" " * ([$n - length, 0] | max));
+def stamp: strftime("%Y-%m-%d %H:%MZ");
+def pct: . * 100 | round | tostring + "%";
+. as $r
 | [
-    "delivered: \($delivered | length)",
+    "delivered: \($r.delivered.count)",
     "delivered per day (UTC):",
-    ($delivered | group_by(.at | strftime("%Y-%m-%d"))
-      | map("  \(.[0].at | strftime("%Y-%m-%d"))  \(length)") | if length == 0 then ["  none"] else . end | .[]),
-    "median time to merge: \(if $median == null then "n/a" else ($median | dur) end)",
-    "stalls: \($stalls | length)",
-    "restarts: \([$all[] | select(.event == "restart")] | length)",
-    "nudges: \($nudges | length) (\($nudge_ok | length) succeeded\(if ($nudges | length) > 0 then ", \(($nudge_ok | length) * 100 / ($nudges | length) | round)%" else "" end))"
+    ($r.delivered.per_day | map("  \(.day)  \(.count)") | if length == 0 then ["  none"] else . end | .[]),
+    "median time to merge: \(if $r.delivered.median_seconds == null then "n/a" else ($r.delivered.median_seconds | dur) end)",
+    "stalls: \($r.stalls)",
+    "restarts: \($r.restarts)",
+    "nudges: \($r.nudges.count) (\($r.nudges.succeeded) succeeded\(if $r.nudges.count > 0 then ", \($r.nudges.succeeded * 100 / $r.nudges.count | round)%" else "" end))",
+    "most nudges in one episode: \($r.nudges.max_per_episode // "n/a") (cap 6)",
+    "",
+    "cycle time per issue (claim -> merge):",
+    (if ($r.issues | length) == 0 then "  none" else
+      ("  " + ("ISSUE" | pad(7)) + ("PR" | pad(7)) + ("CLAIMED" | pad(19)) + ("MERGED" | pad(19)) + ("CYCLE" | pad(9)) + "REVIEW ROUNDS"),
+      ($r.issues[] | "  " + ("#\(.issue)" | pad(7)) + (if .pr == null then "-" else "#\(.pr)" end | pad(7))
+        + (.claimed_at | stamp | pad(19)) + (if .merged_at == null then "-" else (.merged_at | stamp) end | pad(19))
+        + (.cycle_seconds | dur | pad(9)) + (.review_rounds // "-" | tostring))
+    end),
+    "review rounds per PR: \(if $r.review_rounds.prs == 0 then "n/a" else "median \($r.review_rounds.median), max \($r.review_rounds.max) (\($r.review_rounds.prs) PRs)" end)",
+    "",
+    "CI (ci workflow, last \(if $r.ci == null then "-" else $r.ci.runs end) runs from one gh run list):",
+    (if $r.ci == null then "  unavailable (gh run list failed or --no-ci)" else
+      "  completed: \($r.ci.completed), cancelled: \($r.ci.cancelled)\(if $r.ci.cancelled_rate == null then "" else " (\($r.ci.cancelled_rate | pct))" end)",
+      "  CI minutes: \($r.ci.minutes) (agent-loop branches: \($r.ci.loop_minutes))"
+    end),
+    "",
+    "API budget (core REST):",
+    "  readings: \($r.api.readings)\(if $r.api.lowest == null then "" else ", lowest \($r.api.lowest.remaining)/\($r.api.lowest.limit) at \($r.api.lowest.at | stamp)" end)",
+    "  used per rate-limit window: \(if $r.api.used_per_window.windows == 0 then "n/a" else "median \($r.api.used_per_window.median), max \($r.api.used_per_window.max) (\($r.api.used_per_window.windows) windows)" end)",
+    "  budget holds: \($r.api.budget_holds)",
+    "  budget unknown, so the hold failed open: \($r.api.budget_unknown)\(if $r.api.budget_unknown > 0 then " (WARNING)" else "" end)",
+    "",
+    "checkout scans (lsof before a start): \(if $r.checkout_scans.count == 0 then "n/a" else "\($r.checkout_scans.count), median \($r.checkout_scans.median_seconds)s, max \($r.checkout_scans.max_seconds)s" end)"
   ]
 | .[]
 JQ
