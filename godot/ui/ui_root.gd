@@ -13,6 +13,9 @@ extends Control
 ## otherwise, and `get_viewport().set_input_as_handled()` is banned by
 ## scripts/checks/godot-safe-api). The bus is Events unless use_bus() gave
 ## another one before the root entered the tree (tests do).
+##
+## On top of every screen sits the Developer console (#116, ui/dev/), which
+## shows only in Developer mode and never takes gameplay input.
 
 ## The screens (node names) shown in each Game State, bottom to top.
 const SCREENS_FOR: Dictionary[GameState.Phase, Array] = {
@@ -41,6 +44,7 @@ var _screens: Dictionary[StringName, UiScreen] = {}
 var _shown: Array[UiScreen] = []
 var _stack: Array[UiScreen] = []
 var _phase: GameState.Phase = GameState.Phase.BOOT
+var _dev_console: DevConsole = DevConsole.new()
 
 
 ## Use `bus` instead of the Events autoload. Call before adding to the tree.
@@ -61,6 +65,8 @@ func _ready() -> void:
 	_wire(_bus.flow.game_state_changed.connect(_on_game_state_changed))
 	_wire(_bus.flow.input_device_changed.connect(_on_input_device_changed))
 	_wire(_bus.profile.settings_changed.connect(_on_settings_changed))
+	add_child(_dev_console)
+	_dev_console.bind(_bus)
 
 
 ## The names of the screens shown now, bottom to top.
@@ -70,6 +76,11 @@ func visible_screens() -> Array[StringName]:
 		if screen_node.visible:
 			names.append(screen_node.name)
 	return names
+
+
+## The Developer console (#116).
+func dev_console() -> DevConsole:
+	return _dev_console
 
 
 ## The screen named `screen_name` (a node name such as &"Title"), or null.

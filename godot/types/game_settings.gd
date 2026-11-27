@@ -22,6 +22,9 @@ var tutorial_hints: bool = true
 var rumble: bool = true
 ## Opacity of the touch sticks, MIN_TOUCH_STICK_OPACITY to MAX_TOUCH_STICK_OPACITY.
 var touch_stick_opacity: float = DEFAULT_TOUCH_STICK_OPACITY
+## Developer mode (#116): shows the DEV button and lets backquote and gamepad
+## Select open the Developer console. Off by default.
+var developer_mode: bool = false
 
 
 ## A copy, so a holder can never change another holder's settings.
@@ -35,6 +38,7 @@ func copy() -> GameSettings:
 	other.tutorial_hints = tutorial_hints
 	other.rumble = rumble
 	other.touch_stick_opacity = touch_stick_opacity
+	other.developer_mode = developer_mode
 	return other
 
 
@@ -61,4 +65,5 @@ func equals(other: GameSettings) -> bool:
 		and tutorial_hints == other.tutorial_hints
 		and rumble == other.rumble
 		and is_equal_approx(touch_stick_opacity, other.touch_stick_opacity)
+		and developer_mode == other.developer_mode
 	)

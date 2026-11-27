@@ -11,13 +11,14 @@ Fixed tuning lives in `run_rules.gd` (`RunRules`); per-Level tuning lives in `le
 | Class | Job | Public API |
 |---|---|---|
 | `GameStateMachine` | The Game State: legal transitions only; Pause only during play; Paused resumes only to the phase it paused, or quits to Title. | `boot()`, `state()`, `paused_from()`, `can_transition(to)`, `request(to) -> bool` |
-| `LevelProgression` | Runs the Run: Level Intro (2.5 s), Skirmish, Boss Gauge to threshold, Boss Warning (3 s), Boss Fight, Level Clear, next Level, Victory after Level 6, Game Over after the last life. Losing a life keeps the gauge and the boss's health. | `tick(delta)`, `current_level()`, `level_number()`, `gauge()`, `is_run_active()`, `is_game_over_pending()` |
-| `RunLedger` | The Run's accounts: score table, combo (x1 to x8, 1.2 s, reset on damage), Armor 100 and damage by source, invulnerability (0.6 s after a hit, 2 s after a respawn), lives (3), the one-time bonus life at 100,000, boss score (5,000 x Level), Level Clear bonus (Armor x 50, plus 10,000 with no death), kills, accuracy and Run time (timed phases only). | `start_run()`, `start_level(n)`, `respawn()`, `award_boss()`, `close_level() -> LevelTally`, `summary(victory) -> RunSummary`, `tick(delta)`, `score()`, `lives()`, `armor()`, `multiplier()`, `is_down()`, `is_invulnerable()`, `run_time()` |
+| `LevelProgression` | Runs the Run: Level Intro (2.5 s), Skirmish, Boss Gauge to threshold, Boss Warning (3 s), Boss Fight, Level Clear, next Level, Victory after Level 6, Game Over after the last life. Losing a life keeps the gauge and the boss's health. | `tick(delta)`, `current_level()`, `level_number()`, `gauge()`, `is_run_active()`, `is_game_over_pending()`; developer commands (#116): `fill_boss_gauge() -> bool`, `skip_level() -> bool` |
+| `RunLedger` | The Run's accounts: score table, combo (x1 to x8, 1.2 s, reset on damage), Armor 100 and damage by source, invulnerability (0.6 s after a hit, 2 s after a respawn), lives (3), the one-time bonus life at 100,000, boss score (5,000 x Level), Level Clear bonus (Armor x 50, plus 10,000 with no death), kills, accuracy and Run time (timed phases only). | `start_run()`, `start_level(n)`, `respawn()`, `award_boss()`, `close_level() -> LevelTally`, `summary(victory) -> RunSummary`, `tick(delta)`, `score()`, `lives()`, `armor()`, `multiplier()`, `is_down()`, `is_invulnerable()`, `run_time()`; developer commands (#116): `toggle_dev_invulnerability() -> bool`, `mark_dev_assisted()`, `is_dev_assisted()`, `award_points(points)`, `restore_armor() -> bool`, `award_life()` |
 | `BossHealth` | The current boss's health and phases; announces each phase crossed and one defeat. | `arm(boss)`, `disarm()`, `is_armed()`, `health()`, `phase()` |
 | `SpawnDirector` | Seeded spawn decisions: the Skirmish trickle and waves (limit, buffer and aggression ramp with kills; roster kinds unlock by kill count), nothing during the Boss Warning, escorts in the Boss Fight, a pause while the player is destroyed, and Repair Kit drops (6% per shot kill, always from a boss). | `tick(delta)`, `live_count()`, `limit()`, `buffer()`, `aggression()`, `kills()` |
 | `LevelDefinition` | One parsed Level file, including `sky_theme` (one of `SKY_THEMES`: dawn, storm, sunset, night, stratosphere, orbit), which game/ uses to pick the environment; inner `RosterEntry`, `PlayerTuning`, `CameraTuning`, `SpawnTuning`. | `static parse(data, errors) -> LevelDefinition` (null on any error), `static parse_roster(...)` |
 | `BossDefinition` | A Level's boss: id, name, description, threshold, health, phases (inner `Phase`, `Attack`) and escorts. | `static parse(...)`, `phase_for(health) -> int` |
-| `Scoreboard` | Top 10 Runs, best first (ties keep the earlier entry). | `restore()`, `entries()`, `rank_for(score)`, `submit(entry) -> rank`, `static normalize_initials(raw)` |
+| `Scoreboard` | Top 10 Runs, best first (ties keep the earlier entry). A dev-assisted Run never places. | `restore()`, `entries()`, `rank_for(score)`, `submit(entry) -> rank`, `static normalize_initials(raw)` |
+| `DevCommands` | The Developer console's commands (#116), only while Developer mode is on, through the rule APIs below: `RunLedger.award_points/award_life/restore_armor/toggle_dev_invulnerability`, `LevelProgression.fill_boss_gauge/skip_level`, and `dev.enemies_purge_ordered` for game/. A command that changes a Run marks it dev-assisted. | `run_command(command) -> bool`, `is_enabled()` |
 | `Settings` | The player's `GameSettings`, clamped, with per-field fallback to defaults. | `restore()`, `current()`, `apply(settings)`, `reset()` |
 | `IntelCodex` | Intel unlocks on first encounter in play (not in the Title's attract mode), and what the codex lists. | `static catalog(levels)`, `static entries_for(levels)`, `restore()`, `is_unlocked(id)`, `unlocked()`, `unlock(id) -> bool` |
 | `TutorialProgress` | Which first-flight prompts are done, and whether the first Run was flown. No events: `TutorialCoach` decides when prompts show. | `restore()`, `is_done(prompt)`, `mark_done(prompt) -> bool`, `is_complete()`, `is_first_run_done()`, `mark_first_run_done()`, `reset()` |
@@ -27,7 +28,7 @@ Fixed tuning lives in `run_rules.gd` (`RunRules`); per-Level tuning lives in `le
 | `RunRules` | The fixed tuning constants of #73. | `static kill_points(kind)`, `static damage_for(source, attack_damage)`, `static boss_points(level)` |
 | `DataReader`, `Subscriptions` | Helpers: validating reads of JSON data; one check of a class's bus connections. | |
 
-Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `IntelEntry`, `InputDevice.Kind`, `UiCue.Cue`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry` and `GameSettings`.
+Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `IntelEntry`, `InputDevice.Kind`, `UiCue.Cue`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry`, `GameSettings` and `DevCommand.Command`.
 
 ### Wiring and ticking
 
@@ -128,6 +129,14 @@ Every `spawn_requested` must be answered by exactly one `enemy_spawned`; `SpawnD
 | `intel_changed` | `unlocked: Array[StringName]` | `IntelCodex` (restore) | Intel screen |
 | `intel_catalog_changed` | `entries: Array[IntelEntry]` | `IntelCodex` (restore) | Intel screen |
 
+### `Events.dev`
+
+| Event | Payload | Announced by | Heard by |
+|---|---|---|---|
+| `dev_command_requested` | `command: DevCommand.Command` | Developer console (*intent*) | `DevCommands` |
+| `dev_status_changed` | `invulnerable, dev_assisted: bool` | `DevCommands` (after a command, at Run start) | Developer console |
+| `enemies_purge_ordered` | | `DevCommands` (kill all enemies) | enemy field (destroys each enemy as a shot kill, reported as `enemy_destroyed`) |
+
 ## Decisions worth knowing
 
 - Only shot kills score, and only in the timed phases (Skirmish, Boss Warning, Boss Fight) while the player is not down. Hits are ignored while invulnerable, down, or outside those phases.
@@ -135,3 +144,4 @@ Every `spawn_requested` must be answered by exactly one `enemy_spawned`; `SpawnD
 - Defeating the boss scores it, closes the Level (adding the bonus, with no Armor bonus if the player is down at that moment) and announces the tally, then moves to Level Clear, or to Victory after Level 6. Once the last life is lost, a boss defeat no longer counts.
 - Quitting to Title from Pause abandons the Run: no `run_ended`, no Scoreboard entry.
 - Kills that happen while the player is down (between a lost life and the respawn) score nothing.
+- Developer commands (#116) take only the legal paths: Skip walks the Game State's legal transitions to the Boss Fight and clears the Level without the boss's score; "kill all enemies" goes through the enemy field's shot-kill path, so the ledger scores the kills. A command that changes a Run marks it dev-assisted, and a dev-assisted Run never asks for initials or places on the Scoreboard.

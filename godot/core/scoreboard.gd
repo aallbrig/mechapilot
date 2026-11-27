@@ -7,7 +7,8 @@ extends RefCounted
 ## when it places) and profile.initials_submitted (saves the remembered Run).
 ## Announces: profile.scoreboard_qualified, profile.scoreboard_saved and
 ## profile.scoreboard_changed (on restore() and after every save).
-## Ties keep the earlier entry first. A score of 0 never places.
+## Ties keep the earlier entry first. A score of 0 never places, and neither
+## does a dev-assisted Run (#116).
 
 const CAPACITY: int = 10
 const INITIALS_LENGTH: int = 3
@@ -87,7 +88,7 @@ static func normalize_initials(raw: String) -> String:
 
 
 func _on_run_ended(summary: RunSummary) -> void:
-	var rank: int = rank_for(summary.score)
+	var rank: int = -1 if summary.dev_assisted else rank_for(summary.score)
 	_pending = summary if rank >= 0 else null
 	if rank >= 0:
 		_events.profile.announce_scoreboard_qualified(rank)
