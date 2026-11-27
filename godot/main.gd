@@ -10,9 +10,11 @@ extends Node
 ## The screens (ui/) and the Title's attract mode (game/attract) are composed in
 ## main.tscn and hear only the Events bus; every UI sound plays through the
 ## FeedbackRig (flow.ui_cue_requested).
-## The boot marker lets the web smoke test see the bus round trip in the browser.
+## The boot marker lets the web smoke test see the bus round trip in the
+## browser, and the play marker that a Level's Skirmish began.
 
 const BOOT_OK_MARKER: String = "mechapilot: boot ok"
+const PLAY_MARKER: String = "mechapilot: level %d in play"
 
 var _machine: GameStateMachine
 var _ledger: RunLedger
@@ -62,6 +64,7 @@ func _ready() -> void:
 	_tutorial.restore()
 	_run.setup(Events, rng, levels, _stage.player(), _stage.shots(), _stage.camera_rig().camera())
 	_wire_mech_feedback()
+	_check(Events.run.level_intro_completed.connect(_on_level_in_play) as Error)
 	_machine.boot()
 	if _ui.visible_screens() == [&"Boot"]:
 		print(BOOT_OK_MARKER)
@@ -83,6 +86,10 @@ func _wire_feedback() -> void:
 	_check(_feedback.camera.trauma_requested.connect(rig.add_trauma) as Error)
 	_check(_feedback.camera.kick_requested.connect(rig.kick) as Error)
 	_check(_feedback.camera.fov_punch_requested.connect(rig.punch_fov) as Error)
+
+
+func _on_level_in_play(level_number: int) -> void:
+	print(PLAY_MARKER % level_number)
 
 
 func _wire_mech_feedback() -> void:

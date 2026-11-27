@@ -33,7 +33,7 @@ test_web_smoke_rejects_csp_violations() {
 
 test_web_smoke_reads_game_site_csp_from_infra() {
   scratch
-  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok");</script>\n' >"${d}/index.html"
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok"); document.addEventListener("keydown", () => console.log("mechapilot: level 1 in play"), { once: true });</script>\n' >"${d}/index.html"
   out="$(scripts/e2e-web "${d}" 2>&1)" || return 1
   case "${out}" in
   *"serving with CSP: default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval';"*"frame-ancestors 'none'"*) ;;
@@ -41,8 +41,14 @@ test_web_smoke_reads_game_site_csp_from_infra() {
   esac
 }
 
+test_web_smoke_rejects_page_that_boots_but_never_plays() {
+  scratch
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas>%s\n' '<script>console.log("mechapilot: boot ok");</script>' >"${d}/index.html"
+  ! E2E_PLAY_TIMEOUT_MS=3000 scripts/e2e-web "${d}"
+}
+
 test_web_smoke_accepts_clean_booting_page() {
   scratch
-  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok");</script>\n' >"${d}/index.html"
+  printf '<!doctype html><title>x</title><canvas id="canvas" width="8" height="8"></canvas><script>console.log("mechapilot: boot ok"); document.addEventListener("keydown", () => console.log("mechapilot: level 1 in play"), { once: true });</script>\n' >"${d}/index.html"
   scripts/e2e-web "${d}"
 }
