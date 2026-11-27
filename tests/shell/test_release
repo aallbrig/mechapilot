@@ -866,6 +866,37 @@ jobs: {}' || return 1
   rm -rf "${d}"
 }
 
+# The required ci job's timeout leaves headroom over the measured runtime,
+# stays bounded, and cannot hide behind a symlink (#118).
+test_workflow_permissions_bounds_ci_timeout() {
+  scripts/checks/workflow-permissions >/dev/null || return 1
+  grep -q '^    timeout-minutes: 60$' .github/workflows/ci.yml || return 1
+  d="$(mktemp -d)"
+  # ci_timeout <ci-sed>: exit 0 if the check passes with that ci.yml variant.
+  ci_timeout() {
+    rm -rf "${d}/w"
+    mkdir -p "${d}/w"
+    variant "${good_deploy}" "" >"${d}/w/deploy.yml"
+    variant "${good_release}" "" >"${d}/w/release.yml"
+    sed "$1" .github/workflows/ci.yml >"${d}/w/ci.yml"
+    scripts/checks/workflow-permissions "${d}/w" >/dev/null
+  }
+  t='^    timeout-minutes: 60$'
+  ci_timeout "" || return 1
+  ci_timeout "s/${t}/    timeout-minutes: 120/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 30/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 59/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 121/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 60.5/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: \"60\"/" || return 1
+  ! ci_timeout "/${t}/d" || return 1
+  ! ci_timeout 's/^  ci:$/  other:/' || return 1
+  rm -f "${d}/w/ci.yml"
+  ln -s "${PWD}/.github/workflows/ci.yml" "${d}/w/ci.yml"
+  ! scripts/checks/workflow-permissions "${d}/w" >/dev/null || return 1
+  rm -rf "${d}"
+}
+
 # Each site has its own rollback target, checked exactly once, from a fresh
 # work directory as on a new runner, including when the sites serve
 # different versions (a marketing-only release, then a full one).

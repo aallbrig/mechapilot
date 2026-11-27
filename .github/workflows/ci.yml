@@ -25,7 +25,10 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Successful runs took 23 to 29 minutes (about 9 of setup, then task ci) on
+    # 2026-11-27, so 30 cancelled every run; 60 leaves headroom (#118).
+    # scripts/checks/workflow-permissions keeps it from 60 to 120.
+    timeout-minutes: 60
     permissions:
       contents: read
       issues: read
