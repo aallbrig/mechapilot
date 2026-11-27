@@ -1,8 +1,12 @@
 name: ci
 
 on:
+  # No `edited`: a PR-body edit no longer re-runs CI (it cancelled a third of
+  # all runs). The evidence records the linked issues and a sha256 of each
+  # one's acceptance criteria as evaluated, and scripts/merge-gate refuses if
+  # either changed since; re-run CI to re-evaluate (#66).
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
@@ -65,10 +69,15 @@ jobs:
           fi
           # Record outside build/ so nothing the tests write can pre-seed it.
           record="${RUNNER_TEMP}/acceptance.tsv"
+          binding="${RUNNER_TEMP}/acceptance-binding.tsv"
           : >"${record}"
+          : >"${binding}"
           rc=0
-          for n in ${issues}; do ACCEPTANCE_RECORD="${record}" scripts/verify-acceptance "${n}" || rc=1; done
+          for n in ${issues}; do
+            ACCEPTANCE_RECORD="${record}" ACCEPTANCE_BINDING="${binding}" scripts/verify-acceptance "${n}" || rc=1
+          done
           cp "${record}" build/test-results/acceptance.tsv
+          cp "${binding}" build/test-results/acceptance-binding.tsv
           exit "${rc}"
 
       - name: Upload test results

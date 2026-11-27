@@ -5,6 +5,13 @@ set -eu
 # shellcheck source=../scripts/lib-toolchain
 . scripts/lib-toolchain
 
+# Time the whole hook (build/hook-timings.jsonl): run it again as a child of
+# scripts/hook-timing, which marks the child with HOOK_TIMING_CHILD.
+if [ -z "${HOOK_TIMING_CHILD:-}" ]; then
+  exec scripts/hook-timing pre-commit "lint" "$0" "$@"
+fi
+unset HOOK_TIMING_CHILD
+
 staged="$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR)"
 [ -n "${staged}" ] || exit 0
 

@@ -1,0 +1,200 @@
+#!/bin/sh
+# Tests for scripts/pr-refresh (task pr:refresh, #66). Local bare repositories
+# and a fake gh only: no network.
+
+# refresh_fixture: d, w (checkout on branch feature, one commit ahead of the
+# main it started from), main moved on by one commit in origin, a pre-push hook
+# that logs to ${d}/hook.log (exit status from ${d}/hook-rc), a fake gh.
+refresh_fixture() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  w="${d}/w"
+  git init -q --bare "${d}/origin.git"
+  git init -q "${w}"
+  for c in "${w}" "${d}/other"; do
+    git init -q "${c}"
+    git -C "${c}" config user.name test
+    git -C "${c}" config user.email test@invalid
+    git -C "${c}" config commit.gpgsign false
+    git -C "${c}" remote add origin "${d}/origin.git" 2>/dev/null || true
+  done
+  git -C "${w}" checkout -q -b main
+  printf 'base\n' >"${w}/base.txt"
+  git -C "${w}" add -A
+  git -C "${w}" commit -q -m base
+  git -C "${w}" push -q origin main
+  git -C "${w}" checkout -q -b feature
+  printf 'feature\n' >"${w}/feature.txt"
+  git -C "${w}" add -A
+  git -C "${w}" commit -q -m feature
+  git -C "${w}" push -q origin feature
+  old="$(git -C "${w}" rev-parse HEAD)"
+  # Someone else merges to main.
+  git -C "${d}/other" fetch -q origin
+  git -C "${d}/other" checkout -q -b main origin/main
+  printf 'main moved\n' >"${d}/other/main.txt"
+  git -C "${d}/other" add -A
+  git -C "${d}/other" commit -q -m "main moved"
+  git -C "${d}/other" push -q origin main
+  main_now="$(git -C "${d}/other" rev-parse HEAD)"
+
+  mkdir -p "${d}/hooks" "${d}/bin"
+  printf '0\n' >"${d}/hook-rc"
+  cat >"${d}/hooks/pre-push" <<EOF
+#!/bin/sh
+cat >>"${d}/hook.log"
+exit "\$(cat "${d}/hook-rc")"
+EOF
+  chmod +x "${d}/hooks/pre-push"
+  git -C "${w}" config core.hooksPath "${d}/hooks"
+  pr_json feature "${old}" false
+  cat >"${d}/bin/gh" <<EOF
+#!/bin/sh
+[ "\$1 \$2 \$3" = "pr view 5" ] || exit 9
+cat "${d}/pr.json"
+EOF
+  chmod +x "${d}/bin/gh"
+}
+
+# pr_json <branch> <head-sha> <cross-repo>
+pr_json() {
+  printf '{"headRefName":"%s","headRefOid":"%s","isCrossRepository":%s,"state":"OPEN","baseRefName":"main"}\n' \
+    "$1" "$2" "$3" >"${d}/pr.json"
+}
+
+refresh() {
+  (cd "${w}" && PATH="${d}/bin:${PATH}" "${root}/scripts/pr-refresh" 5) >"${d}/out" 2>&1
+}
+
+remote_feature() {
+  git --git-dir="${d}/origin.git" rev-parse refs/heads/feature
+}
+
+test_pr_refresh_rebases_behind_branch_and_pushes_with_lease() {
+  refresh_fixture
+  refresh || {
+    cat "${d}/out"
+    return 1
+  }
+  new="$(remote_feature)"
+  [ "${new}" != "${old}" ] || return 1
+  # The pushed head is the feature commit on top of the new main.
+  parent="$(git --git-dir="${d}/origin.git" rev-parse "${new}^")"
+  [ "${parent}" = "${main_now}" ] || return 1
+  local_head="$(git -C "${w}" rev-parse HEAD)"
+  [ "${local_head}" = "${new}" ] || return 1
+  grep -q "rebased onto origin/main: ${old} -> ${new}" "${d}/out" || return 1
+  # Already up to date: nothing is pushed the second time.
+  pr_json feature "${new}" false
+  : >"${d}/hook.log"
+  refresh || return 1
+  grep -q 'nothing to do' "${d}/out" || return 1
+  [ ! -s "${d}/hook.log" ]
+}
+
+test_pr_refresh_warns_review_verdicts_invalidated() {
+  refresh_fixture
+  refresh || return 1
+  new="$(remote_feature)"
+  grep -q "review verdicts for ${old} are invalidated by the new head; reviewers must review ${new} again" "${d}/out"
+}
+
+test_pr_refresh_refuses_fork_prs() {
+  refresh_fixture
+  pr_json feature "${old}" true
+  ! refresh || return 1
+  grep -q 'REFUSED: PR #5 is from a fork' "${d}/out" || return 1
+  now="$(remote_feature)"
+  [ "${now}" = "${old}" ]
+}
+
+test_pr_refresh_refuses_main_branch() {
+  refresh_fixture
+  git -C "${w}" checkout -q main
+  main_head="$(git -C "${w}" rev-parse HEAD)"
+  pr_json main "${main_head}" false
+  ! refresh || return 1
+  grep -q "REFUSED: will not rewrite the branch 'main'" "${d}/out" || return 1
+  # A branch name that git would read as an option, or not a branch at all.
+  for bad in -f "a..b" "refs/../x"; do
+    pr_json "${bad}" "${old}" false
+    ! refresh || return 1
+    grep -q 'REFUSED' "${d}/out" || return 1
+  done
+  # The PR must be checked out here: it never rebases another branch in place.
+  git -C "${w}" checkout -q feature
+  git -C "${w}" checkout -q -b elsewhere
+  pr_json feature "${old}" false
+  ! refresh || return 1
+  grep -q 'REFUSED: this checkout is on elsewhere; check out feature first' "${d}/out" || return 1
+  now="$(remote_feature)"
+  [ "${now}" = "${old}" ]
+}
+
+test_pr_refresh_refuses_when_branch_moved() {
+  refresh_fixture
+  # Someone pushes to the PR branch after GitHub reported its head.
+  git -C "${d}/other" fetch -q origin
+  git -C "${d}/other" checkout -q -b feature origin/feature
+  printf 'more\n' >"${d}/other/more.txt"
+  git -C "${d}/other" add -A
+  git -C "${d}/other" commit -q -m more
+  git -C "${d}/other" push -q origin feature
+  moved="$(git -C "${d}/other" rev-parse HEAD)"
+  ! refresh || return 1
+  grep -q "REFUSED: origin/feature is ${moved}, but GitHub reported ${old}" "${d}/out" || return 1
+  # It moves during the push (between the fetch and the update): the lease
+  # rejects the push, and the local branch goes back to where it was.
+  git -C "${d}/other" push -q -f origin "${old}:refs/heads/feature"
+  cat >"${d}/hooks/pre-push" <<EOF
+#!/bin/sh
+cat >/dev/null
+git --git-dir="${d}/origin.git" update-ref refs/heads/feature "${moved}"
+exit 0
+EOF
+  ! refresh || return 1
+  grep -q 'REFUSED: push failed' "${d}/out" || return 1
+  now="$(remote_feature)"
+  [ "${now}" = "${moved}" ] || return 1
+  local_head="$(git -C "${w}" rev-parse HEAD)"
+  [ "${local_head}" = "${old}" ]
+}
+
+test_pr_refresh_runs_pre_push_hook() {
+  refresh_fixture
+  refresh || return 1
+  new="$(remote_feature)"
+  # The hook saw exactly the ref update being pushed.
+  grep -q "^HEAD ${new} refs/heads/feature ${old}\$" "${d}/hook.log" || {
+    cat "${d}/hook.log"
+    return 1
+  }
+  # A failing hook stops the push (no --no-verify), and nothing changes.
+  refresh_fixture
+  printf '1\n' >"${d}/hook-rc"
+  ! refresh || return 1
+  now="$(remote_feature)"
+  [ "${now}" = "${old}" ] || return 1
+  local_head="$(git -C "${w}" rev-parse HEAD)"
+  [ "${local_head}" = "${old}" ] || return 1
+  # No command in the script skips hooks.
+  ! grep -v '^[[:space:]]*#' scripts/pr-refresh | grep -q -e '--no-verify' -e 'hooksPath'
+}
+
+test_pr_refresh_refuses_dirty_tree_and_conflicts() {
+  refresh_fixture
+  printf 'dirty\n' >>"${w}/feature.txt"
+  ! refresh || return 1
+  grep -q 'REFUSED: the working tree has uncommitted changes' "${d}/out" || return 1
+  git -C "${w}" checkout -q -- feature.txt
+  # A conflicting change on main: the rebase is aborted, nothing is pushed.
+  printf 'theirs\n' >"${d}/other/feature.txt"
+  git -C "${d}/other" add -A
+  git -C "${d}/other" commit -q -m conflict
+  git -C "${d}/other" push -q origin main
+  ! refresh || return 1
+  grep -q 'REFUSED: rebasing feature onto origin/main conflicts' "${d}/out" || return 1
+  now="$(remote_feature)"
+  [ "${now}" = "${old}" ] || return 1
+  [ ! -d "${w}/.git/rebase-merge" ] && [ ! -d "${w}/.git/rebase-apply" ]
+}
