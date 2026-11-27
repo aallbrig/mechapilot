@@ -1,7 +1,7 @@
 extends Node3D
 ## PROTOTYPE: throwaway LAN feel test for Mecha Fighter. Never merge to main.
-## Everything is built in code from primitive meshes. Play plane is XZ (y = 0),
-## the camera looks straight down, so screen-up is -Z and screen-right is +X.
+## Everything is built in code from primitive meshes. Play plane is XY (z = 0),
+## seen side-on by a camera looking along -Z. The mech itself lives in mech.gd.
 
 enum State { TITLE, PLAY, DEAD }
 
@@ -16,7 +16,8 @@ const BULLET_GRAVITY := 20.0
 const BULLET_INHERIT := 0.6
 const SPHERE_RADIUS := 40.0
 const SPAWN_DIST := 25.0
-const CAM_OFFSET := Vector3(0, 0, 22.0)
+const CAM_OFFSET := Vector3(0, 0, 18.0)
+const Mech := preload("res://mech.gd")
 const WAVE_INTERVAL := 14.0
 const COMBO_WINDOW := 1.6
 const CLOUD_SPAN := Vector2(150.0, 100.0)
@@ -26,7 +27,9 @@ const SKY_SHADER := preload("res://sky.gdshader")
 
 class Enemy:
 	var node: Node3D
+	var model: Node3D
 	var meshes: Array[MeshInstance3D] = []
+	var mats: Array[Material] = []
 	var vel := Vector3.ZERO
 	var speed := 8.0
 	var turn := 3.0
@@ -43,10 +46,7 @@ class Bullet:
 
 
 var state := State.TITLE
-var player: Node3D
-var body: Node3D
-var gun_pivot: Node3D
-var legs: Array[Node3D] = []
+var player: Mech
 var velocity := Vector3.ZERO
 var move_dir := Vector3(0, 1, 0)
 var aim_dir := Vector3(1, 0, 0)
@@ -201,7 +201,7 @@ func _build_world() -> void:
 	add_child(sky)
 
 	# Parallax cloud layers: perspective does the parallax, deeper = slower.
-	for i in 50:
+	for i in 40:
 		var c := MeshInstance3D.new()
 		var sp := SphereMesh.new()
 		sp.radius = 1.0
@@ -209,9 +209,9 @@ func _build_world() -> void:
 		sp.radial_segments = 14
 		sp.rings = 7
 		c.mesh = sp
-		var depth := randf_range(-55.0, -6.0)
-		var near := 1.0 - clampf((-depth - 6.0) / 49.0, 0.0, 1.0)
-		var alpha := lerpf(0.2, 0.5, near)
+		var depth := randf_range(-62.0, -12.0)
+		var near := 1.0 - clampf((-depth - 12.0) / 50.0, 0.0, 1.0)
+		var alpha := lerpf(0.45, 0.1, near)
 		c.material_override = _mat(Color(1, 1, 1, snappedf(alpha, 0.05)), 0.0, true)
 		var s := randf_range(2.0, 6.0) * lerpf(2.0, 1.0, near)
 		c.scale = Vector3(s * randf_range(1.6, 3.0), s * 0.45, s * 0.6)
@@ -231,34 +231,9 @@ func _build_world() -> void:
 
 
 func _build_player() -> void:
-	player = Node3D.new()
-	player.scale = Vector3.ONE * 1.5
+	player = Mech.new()
+	player.scale = Vector3.ONE * 1.9
 	add_child(player)
-	body = Node3D.new()
-	body.position.y = -1.0
-	body.rotation.y = -PI / 2.0
-	player.add_child(body)
-	var hull := _mat(Color(0.72, 0.78, 0.85))
-	var dark := _mat(Color(0.2, 0.24, 0.3))
-	var accent := _mat(Color(0.1, 0.9, 1.0), 3.0)
-	_box(body, Vector3(1.4, 1.0, 1.0), Vector3(0, 1.0, 0), hull)
-	_box(body, Vector3(0.7, 0.45, 0.6), Vector3(0, 1.7, -0.05), hull)
-	_box(body, Vector3(0.5, 0.15, 0.1), Vector3(0, 1.72, -0.38), accent)
-	_box(body, Vector3(0.5, 0.7, 0.5), Vector3(0, 1.1, 0.7), dark)
-	_box(body, Vector3(0.18, 0.18, 0.18), Vector3(0, 1.1, 1.0), _mat(Color(1, 0.5, 0.1), 4.0))
-	for side in [-1.0, 1.0]:
-		var leg := Node3D.new()
-		leg.position = Vector3(0.45 * side, 0.6, 0)
-		body.add_child(leg)
-		_box(leg, Vector3(0.35, 0.9, 0.45), Vector3(0, -0.45, 0), dark)
-		_box(leg, Vector3(0.45, 0.15, 0.7), Vector3(0, -0.85, -0.1), hull)
-		legs.append(leg)
-		_box(body, Vector3(0.35, 0.8, 0.35), Vector3(0.9 * side, 1.0, 0), hull)
-	gun_pivot = Node3D.new()
-	gun_pivot.position = Vector3(0, 0.25, 0.75)
-	player.add_child(gun_pivot)
-	_box(gun_pivot, Vector3(0.3, 0.3, 1.6), Vector3(0, 0, -0.6), dark)
-	_box(gun_pivot, Vector3(0.2, 0.2, 0.3), Vector3(0, 0, -1.45), accent)
 
 	muzzle_light = OmniLight3D.new()
 	muzzle_light.light_color = Color(1.0, 0.85, 0.3)
@@ -361,7 +336,7 @@ func _start_game() -> void:
 	slowmo = 0.0
 	Engine.time_scale = 1.0
 	player.position = Vector3.ZERO
-	player.visible = true
+	player.reset()
 	move_dir = Vector3(0, 1, 0)
 	aim_dir = Vector3(1, 0, 0)
 	facing = 1.0
@@ -383,7 +358,7 @@ func _game_over() -> void:
 	var p := player.global_position
 	_explode(p, Color(0.3, 0.9, 1.0), 90, 1.8)
 	_explode(p, Color(1.0, 0.6, 0.1), 60, 1.3)
-	player.visible = false
+	player.shatter(velocity)
 	trauma = 1.0
 	slowmo = 0.9
 	fov_punch = 14.0
@@ -477,6 +452,8 @@ func _read_move() -> Vector2:
 		- float(Input.is_joy_button_pressed(0, JOY_BUTTON_DPAD_UP))
 	)
 	v += touch_move_vec
+	if autotest:
+		v = Vector2(signf(sin(clock * 0.9)), cos(clock * 1.3) * 0.7)
 	return v.limit_length(1.0)
 
 
@@ -544,7 +521,8 @@ func _process(scaled_delta: float) -> void:
 		if autotest and dead_timer <= 0.0:
 			_start_game()
 	else:
-		body.rotation.y = -PI / 2.0 + sin(clock * 0.8) * 0.6
+		player.step(minf(real_dt, 0.05), Vector3.ZERO, facing)
+		player.body.rotation.y = -PI / 2.0 + sin(clock * 0.8) * 0.6
 
 	_update_effects(delta)
 	_update_camera(real_dt)
@@ -580,15 +558,6 @@ func _update_player(delta: float) -> void:
 
 	if absf(velocity.x) > 2.0 and fire_cd < -0.4:
 		facing = signf(velocity.x)
-	var yaw := -PI / 2.0 * facing
-	body.rotation.y = lerp_angle(body.rotation.y, yaw, 1.0 - exp(-12.0 * delta))
-	var pitch := clampf(velocity.y * 0.04 * facing, -0.5, 0.5)
-	body.rotation.x = lerpf(body.rotation.x, pitch, 1.0 - exp(-8.0 * delta))
-	var stride := clock * (6.0 + velocity.length())
-	var swing := clampf(velocity.length() / PLAYER_SPEED, 0.0, 1.0) * 0.7
-	legs[0].rotation.x = sin(stride) * swing
-	legs[1].rotation.x = -sin(stride) * swing
-	body.position.y = -1.0 + absf(sin(stride)) * swing * 0.15
 
 	fire_cd -= delta
 	var fire := _read_fire()
@@ -598,14 +567,17 @@ func _update_player(delta: float) -> void:
 			facing = signf(aim_dir.x)
 		if fire_cd <= 0.0:
 			_fire()
+	player.step(delta, velocity, facing)
 	var want := Basis.looking_at(aim_dir, Vector3.BACK)
-	gun_pivot.basis = gun_pivot.basis.slerp(want, 1.0 - exp(-30.0 * delta)).orthonormalized()
+	player.gun_pivot.basis = (
+		player.gun_pivot.basis.slerp(want, 1.0 - exp(-30.0 * delta)).orthonormalized()
+	)
 
 
 func _fire() -> void:
 	fire_cd = FIRE_INTERVAL
 	var dir := aim_dir.rotated(Vector3.BACK, randf_range(-0.04, 0.04))
-	var muzzle := gun_pivot.global_transform * Vector3(0, 0, -1.6)
+	var muzzle := player.gun_pivot.global_transform * Vector3(0, 0, -1.6)
 	var b := Bullet.new()
 	b.node = MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -619,6 +591,7 @@ func _fire() -> void:
 	bullets.append(b)
 
 	velocity -= dir * 1.6
+	player.impulse(-dir, facing)
 	cam_kick -= dir * 0.25
 	trauma = minf(trauma + 0.04, 1.0)
 	muzzle_light.position = muzzle
@@ -681,6 +654,9 @@ func _kill(e: Enemy, by_player: bool) -> void:
 	_explode(p, Color(1, 0.95, 0.6), 14, 0.6)
 	_ring(p, col, 3.5 if e.big else 2.4)
 	_float_text(p, "+%d" % points, col.lightened(0.3))
+	var away := player.position - p
+	if state == State.PLAY and away.length() < 10.0:
+		player.impulse(away.normalized() * (10.0 - away.length()) * 0.25, facing)
 	hitstop = maxf(hitstop, 0.09 if e.big else (0.05 if by_player else 0.03))
 	trauma = minf(trauma + (0.5 if e.big else 0.28), 1.0)
 	fov_punch = maxf(fov_punch, 2.0 + minf(combo, 8))
@@ -718,11 +694,18 @@ func _spawn_enemy(angle: float, big: bool) -> void:
 	var hull := _mat(col)
 	var glow := _mat(Color(1, 0.8, 0.2), 5.0)
 	var k := 1.6 if big else 1.0
-	e.meshes.append(_cyl(e.node, 0.4 * k, 2.2 * k, Vector3.ZERO, Vector3(PI / 2, 0, 0), hull))
-	e.meshes.append(
-		_cyl(e.node, 0.22 * k, 3.6 * k, Vector3(0, 0, 0.2 * k), Vector3(0, 0, PI / 2), hull)
-	)
-	e.meshes.append(_box(e.node, Vector3(0.3, 0.3, 0.3) * k, Vector3(0, 0, 1.15 * k), glow))
+	var dark := _mat(Color(0.15, 0.17, 0.25))
+	e.model = Node3D.new()
+	e.model.scale = Vector3.ONE * k
+	e.node.add_child(e.model)
+	# Forward is +Z, up is +Y (in the play plane), wings span X (edge-on to camera).
+	_add_part(e, _cyl(e.model, 0.36, 2.6, Vector3.ZERO, Vector3(PI / 2, 0, 0), hull))
+	_add_part(e, _box(e.model, Vector3(0.3, 0.3, 0.5), Vector3(0, 0, 1.45), hull))
+	_add_part(e, _box(e.model, Vector3(0.3, 0.28, 0.7), Vector3(0, 0.32, 0.45), dark))
+	_add_part(e, _box(e.model, Vector3(3.4, 0.1, 0.8), Vector3(0, -0.05, 0.1), hull))
+	_add_part(e, _box(e.model, Vector3(0.1, 0.9, 0.6), Vector3(0, 0.55, -1.05), hull))
+	_add_part(e, _box(e.model, Vector3(1.3, 0.08, 0.45), Vector3(0, 0.05, -1.05), hull))
+	_add_part(e, _box(e.model, Vector3(0.28, 0.28, 0.2), Vector3(0, 0, -1.35), glow))
 	e.hp = 4 if big else 1
 	e.radius = 1.6 if big else 1.1
 	e.speed = randf_range(5.0, 7.0) if big else randf_range(6.0, 12.0)
@@ -746,13 +729,19 @@ func _update_enemies(delta: float) -> void:
 		e.vel = e.vel.lerp(want, 1.0 - exp(-e.turn * delta))
 		e.node.position += e.vel * delta
 		if e.vel.length() > 0.1:
-			e.node.basis = Basis.looking_at(-e.vel.normalized(), Vector3.BACK)
+			var fwd := e.vel.normalized()
+			var up := Vector3.BACK.cross(fwd)
+			if up.y < 0.0:
+				up = -up
+			var face := Basis.looking_at(-fwd, up)
+			e.model.basis = e.model.basis.orthonormalized().slerp(face, 1.0 - exp(-10.0 * delta))
+			e.model.scale = Vector3.ONE * (1.6 if e.big else 1.0)
 		e.node.scale = e.node.scale.lerp(Vector3.ONE, 1.0 - exp(-12.0 * delta))
 		if e.flash > 0.0:
 			e.flash -= delta
 			if e.flash <= 0.0:
 				_restore_enemy_mats(e)
-		if to_p.length() < e.radius + 0.7:
+		if to_p.length() < e.radius + 1.0:
 			_kill(e, false)
 			_game_over()
 			return
@@ -760,9 +749,13 @@ func _update_enemies(delta: float) -> void:
 
 
 func _restore_enemy_mats(e: Enemy) -> void:
-	var col := Color(1.0, 0.45, 0.1) if e.big else Color(0.85, 0.15, 0.3)
 	for i in e.meshes.size():
-		e.meshes[i].material_override = (_mat(Color(1, 0.8, 0.2), 5.0) if i == 2 else _mat(col))
+		e.meshes[i].material_override = e.mats[i]
+
+
+func _add_part(e: Enemy, mi: MeshInstance3D) -> void:
+	e.meshes.append(mi)
+	e.mats.append(mi.material_override)
 
 
 func _enemy_collisions() -> void:
