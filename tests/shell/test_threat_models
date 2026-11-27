@@ -21,6 +21,11 @@ tm_model() {
   } >"${f}"
 }
 
+# tm_taskfile <repo> <checks cmd lines>: ci -> lint -> checks runs those lines.
+tm_taskfile() {
+  printf 'version: "3"\ntasks:\n  ci:\n    cmds:\n      - task: lint\n  lint:\n    cmds:\n      - task: checks\n  checks:\n    cmds:\n%s\n  other:\n    cmds:\n      - scripts/checks/only-in-other\n' "$2" >"$1/Taskfile.yml"
+}
+
 # A throwaway repository with every required model, one valid entry each, a
 # tracked shell test and a tracked, executable check. All of it staged.
 tm_repo() {
@@ -30,6 +35,7 @@ tm_repo() {
   printf 'test_real_one() {\n  true\n}\n' >"${r}/tests/shell/test_fixture"
   printf '#!/bin/sh\nexit 0\n' >"${r}/scripts/checks/real-check"
   chmod +x "${r}/scripts/checks/real-check"
+  tm_taskfile "${r}" '      - scripts/checks/real-check'
   bt="$(printf '\140')"
   tm_one "${r}" merge-gate MG-01 mitigated "${bt}test:test_real_one${bt}"
   tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:real-check${bt}"
@@ -50,7 +56,7 @@ tm_one() {
 # tm_fails <repo> <expected message fragment>: the check exits 1 and says so.
 tm_fails() {
   rc=0
-  out="$(scripts/checks/threat-models "$1" 2>&1)" || rc=$?
+  out="$(CI='' scripts/checks/threat-models "$1" 2>&1)" || rc=$?
   [ "${rc}" = 1 ] || {
     printf 'expected exit 1, got %s: %s\n' "${rc}" "${out}"
     return 1
@@ -62,7 +68,7 @@ tm_fails() {
 }
 
 tm_passes() {
-  scripts/checks/threat-models "$1" >/dev/null
+  CI='' scripts/checks/threat-models "$1" >/dev/null 2>&1
 }
 
 test_threat_models_passes_on_committed_tree() {
@@ -246,7 +252,7 @@ test_threat_models_rejects_identifiers() {
     esac
     tm_fails "${r}" 'identifiers are not allowed in a public threat model' || return 1
     # The value itself never reaches the (public) log.
-    out="$(scripts/checks/threat-models "${r}" 2>&1)" && return 1
+    out="$(CI='' scripts/checks/threat-models "${r}" 2>&1)" && return 1
     case "${out}" in *"${account}"* | *someone@*) return 1 ;; *) ;; esac
     rm -rf "${r}"
   done
@@ -256,7 +262,7 @@ test_agents_md_states_the_review_policy() {
   bt="$(printf '\140')"
   for needle in '## Review policy' "${bt}docs/threat-models/${bt}" \
     'A block requires a concrete reproduced failure or attack' \
-    'From round 3' 'only a demonstrated exploitable hole or a demonstrated correctness bug may block' \
+    'From round 3 per reviewer tag' 'only a demonstrated exploitable hole or a demonstrated correctness bug may block' \
     'Accepted residuals never block.' \
     'Every reproduced attack becomes a regression test plus a threat-model entry' \
     'red-team the change against the threat models' 'Threat models checked:'; do
@@ -292,4 +298,235 @@ test_agent_loop_skill_requires_the_review_policy() {
     printf '%s\n' "${out}" | grep -qF -- "missing: ${needle}" || return 1
   done
   rm -rf "${d}"
+}
+
+test_agent_loop_skill_requires_main_copy_residual_rule() {
+  skill=.claude/skills/agent-loop/SKILL.md
+  needle="Only rows in main's copy of docs/threat-models/ count as accepted or tracked."
+  for f in "${skill}" AGENTS.md docs/threat-models/README.md; do
+    grep -qF -- "${needle}" "${f}" || {
+      printf '%s is missing: %s\n' "${f}" "${needle}"
+      return 1
+    }
+  done
+  d="$(mktemp -d)"
+  grep -vF -- "${needle}" "${skill}" >"${d}/skill.md"
+  out="$(scripts/checks/agent-loop-skill "${d}/skill.md")" && return 1
+  printf '%s\n' "${out}" | grep -qF -- "missing: ${needle}" || return 1
+  rm -rf "${d}"
+}
+
+# A fixture repository whose staged tree is committed as origin/main, so the
+# branch under test starts from main's copy of the models.
+tm_based_repo() {
+  r="$(tm_repo)"
+  bt="$(printf '\140')"
+  row1="$(tm_row MG-01 mitigated "${bt}test:test_real_one${bt}")"
+  row2="$(tm_row MG-02 open '#36')"
+  row3="$(tm_row MG-03 residual '#35')"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+  git -C "${r}" add -A
+  tm_commit "${r}" 'base'
+  git -C "${r}" update-ref refs/remotes/origin/main HEAD
+  printf '%s' "${r}"
+}
+
+# tm_commit <repo> <message>: commit everything staged or changed.
+tm_commit() {
+  git -C "$1" add -A
+  git -C "$1" -c user.name=t -c user.email=t@example.invalid commit --quiet -m "$2"
+}
+
+test_threat_models_rejects_removed_row() {
+  r="$(tm_based_repo)"
+  tm_passes "${r}" || return 1
+  bt="$(printf '\140')"
+  row1="$(tm_row MG-01 mitigated "${bt}test:test_real_one${bt}")"
+  row3="$(tm_row MG-03 residual '#35')"
+  tm_model "${r}" merge-gate "${row1}" "${row3}"
+  tm_commit "${r}" 'drop a row'
+  tm_fails "${r}" "MG-02: removed; main's copy has it as open" || return 1
+  # A whole model removed from a non-required file is caught too.
+  r2="$(tm_based_repo)"
+  tm_one "${r2}" site SI-01 open '#60'
+  tm_commit "${r2}" 'site model'
+  git -C "${r2}" update-ref refs/remotes/origin/main HEAD
+  rm "${r2}/docs/threat-models/site.md"
+  tm_commit "${r2}" 'drop the site model'
+  tm_fails "${r2}" "SI-01: removed" || return 1
+  rm -rf "${r}" "${r2}"
+}
+
+test_threat_models_rejects_status_downgrade() {
+  bt="$(printf '\140')"
+  # mitigated -> open, mitigated -> residual, open -> residual.
+  for change in 'MG-01:open:#36' 'MG-01:residual:#35' 'MG-02:residual:#35'; do
+    r="$(tm_based_repo)"
+    id="${change%%:*}"
+    rest="${change#*:}"
+    st="${rest%%:*}"
+    pr="${rest#*:}"
+    row1="$(tm_row MG-01 mitigated "${bt}test:test_real_one${bt}")"
+    row2="$(tm_row MG-02 open '#36')"
+    row3="$(tm_row MG-03 residual '#35')"
+    case "${id}" in
+    MG-01) row1="$(tm_row MG-01 "${st}" "${pr}")" ;;
+    *) row2="$(tm_row MG-02 "${st}" "${pr}")" ;;
+    esac
+    tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+    tm_commit "${r}" 'relabel'
+    tm_fails "${r}" "${id}: status lowered" || return 1
+    rm -rf "${r}"
+  done
+  # Raising a status is fine: open -> mitigated, residual -> open.
+  r="$(tm_based_repo)"
+  row1="$(tm_row MG-01 mitigated "${bt}test:test_real_one${bt}")"
+  row2="$(tm_row MG-02 mitigated "${bt}test:test_real_one${bt}")"
+  row3="$(tm_row MG-03 open '#35')"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+  tm_commit "${r}" 'fix things'
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_rejects_new_residual_row() {
+  bt="$(printf '\140')"
+  r="$(tm_based_repo)"
+  row1="$(tm_row MG-01 mitigated "${bt}test:test_real_one${bt}")"
+  row2="$(tm_row MG-02 open '#36')"
+  row3="$(tm_row MG-03 residual '#35')"
+  row4="$(tm_row MG-04 residual '#35')"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}" "${row4}"
+  tm_commit "${r}" 'accept a new hole'
+  tm_fails "${r}" 'MG-04: a new row may not be born residual' || return 1
+  # A new open or mitigated row is fine.
+  row4="$(tm_row MG-04 open '#36')"
+  row5="$(tm_row MG-05 mitigated "${bt}test:test_real_one${bt}")"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}" "${row4}" "${row5}"
+  tm_commit "${r}" 'track a new hole'
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_accepts_downgrade_with_trailer() {
+  bt="$(printf '\140')"
+  row1="$(tm_row MG-01 residual '#35')"
+  row2="$(tm_row MG-02 open '#36')"
+  row3="$(tm_row MG-03 residual '#35')"
+  # The trailer for the right ID, with a reason, on a branch commit: accepted.
+  r="$(tm_based_repo)"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+  tm_commit "${r}" "$(printf 'accept MG-01\n\nthreat-model-downgrade: MG-01 the test moved to the gate job')"
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+  # No reason, another ID, or indented: still rejected.
+  for trailer in 'threat-model-downgrade: MG-01' 'threat-model-downgrade: MG-02 because' \
+    '  threat-model-downgrade: MG-01 because'; do
+    r="$(tm_based_repo)"
+    tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+    tm_commit "${r}" "$(printf 'accept MG-01\n\n%s' "${trailer}")"
+    tm_fails "${r}" 'MG-01: status lowered' || return 1
+    rm -rf "${r}"
+  done
+  # A trailer that is already on main (before the merge-base) does not count.
+  r="$(tm_based_repo)"
+  git -C "${r}" -c user.name=t -c user.email=t@example.invalid commit --quiet --allow-empty \
+    -m "$(printf 'old\n\nthreat-model-downgrade: MG-01 long ago')"
+  git -C "${r}" update-ref refs/remotes/origin/main HEAD
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+  tm_commit "${r}" 'accept MG-01'
+  tm_fails "${r}" 'MG-01: status lowered' || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_requires_a_base_in_ci() {
+  r="$(tm_repo)"
+  rc=0
+  out="$(CI=true scripts/checks/threat-models "${r}" 2>&1)" || rc=$?
+  [ "${rc}" = 1 ] || return 1
+  printf '%s\n' "${out}" | grep -qF 'no merge-base with origin/main' || return 1
+  # Locally the comparison is skipped with a note.
+  out="$(CI='' scripts/checks/threat-models "${r}" 2>&1)" || return 1
+  printf '%s\n' "${out}" | grep -qF 'rows are not compared against main' || return 1
+  # A missing explicit base also fails under CI.
+  r2="$(tm_based_repo)"
+  out="$(CI=true THREAT_MODELS_BASE=refs/remotes/origin/nope scripts/checks/threat-models "${r2}" 2>&1)" && return 1
+  CI=true scripts/checks/threat-models "${r2}" >/dev/null 2>&1 || return 1
+  rm -rf "${r}" "${r2}"
+}
+
+test_threat_models_rejects_hidden_second_table() {
+  bt="$(printf '\140')"
+  good="$(tm_row IN-01 mitigated "${bt}test:test_real_one${bt}")"
+  # A pipe-less table, a blockquoted table, and a bare delimiter row, after or
+  # before the real table: GitHub renders the first two as tables.
+  for extra in 'ID | Status\n--- | ---\nIN-09 | residual' '> | IN-09 | residual |\n> | --- | --- |' '--- | ---'; do
+    for where in after before; do
+      r="$(tm_repo)"
+      f="${r}/docs/threat-models/infra.md"
+      case "${where}" in
+      after)
+        tm_model "${r}" infra "${good}"
+        printf '\n%b\n' "${extra}" >>"${f}"
+        ;;
+      *)
+        printf '# Threat model\n\n%b\n\n' "${extra}" >"${f}"
+        printf '%s\n%s\n' "${tm_header}" "${good}" >>"${f}"
+        ;;
+      esac
+      tm_fails "${r}" 'a | outside the table is not allowed' || return 1
+      rm -rf "${r}"
+    done
+  done
+  # README.md may hold no table at all.
+  r="$(tm_repo)"
+  printf '| ID | Status |\n| --- | --- |\n| IN-09 | residual |\n' >>"${r}/docs/threat-models/README.md"
+  tm_fails "${r}" 'README.md may not hold a table' || return 1
+  rm -rf "${r}"
+  # Files the check would not read: nested, or not Markdown.
+  for p in docs/threat-models/sub/extra.md docs/threat-models/extra.markdown docs/threat-models/Extra.md; do
+    r="$(tm_repo)"
+    mkdir -p "${r}/${p%/*}"
+    printf '# x\n' >"${r}/${p}"
+    git -C "${r}" add -A
+    tm_fails "${r}" "${p}:" || return 1
+    rm -rf "${r}"
+  done
+}
+
+test_threat_models_rejects_check_not_run_by_ci() {
+  bt="$(printf '\140')"
+  for name in unwired only-in-other real-check-extra; do
+    r="$(tm_repo)"
+    printf '#!/bin/sh\nexit 0\n' >"${r}/scripts/checks/${name}"
+    chmod +x "${r}/scripts/checks/${name}"
+    tm_taskfile "${r}" '      - scripts/checks/real-check-extra-more'
+    git -C "${r}" add -A
+    tm_one "${r}" agent-loop AL-01 mitigated "${bt}check:${name}${bt}"
+    tm_fails "${r}" "check:${name} is not run by task ci" || return 1
+    rm -rf "${r}"
+  done
+  # Wired through ci, lint and checks, also inside a multi-line command.
+  r="$(tm_repo)"
+  tm_taskfile "${r}" '      - |
+        set -eu
+        scripts/checks/real-check --staged'
+  tm_passes "${r}" || return 1
+  rm -rf "${r}"
+}
+
+test_threat_models_defers_comparison_in_pre_commit() {
+  # pre-commit runs before the commit and its trailer exist.
+  grep -qxF 'THREAT_MODELS_PENDING_COMMIT=1 task lint' .githooks/pre-commit || return 1
+  r="$(tm_based_repo)"
+  row1="$(tm_row MG-01 residual '#35')"
+  row2="$(tm_row MG-02 open '#36')"
+  row3="$(tm_row MG-03 residual '#35')"
+  tm_model "${r}" merge-gate "${row1}" "${row2}" "${row3}"
+  out="$(CI='' THREAT_MODELS_PENDING_COMMIT=1 scripts/checks/threat-models "${r}" 2>&1)" || return 1
+  printf '%s\n' "${out}" | grep -qF 'note (needs a trailer on this commit): MG-01: status lowered' || return 1
+  # Without the hook's variable, or in CI, it still fails.
+  ! CI='' scripts/checks/threat-models "${r}" >/dev/null 2>&1 || return 1
+  ! CI=true THREAT_MODELS_PENDING_COMMIT=1 scripts/checks/threat-models "${r}" >/dev/null 2>&1 || return 1
+  rm -rf "${r}"
 }

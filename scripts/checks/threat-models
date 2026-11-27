@@ -20,6 +20,11 @@
 #            residual (accepted, never blocks) or open (known, not yet fixed on
 #            main, still blocks): #<n>, the tracking issue
 #
+# Against main's copy (THREAT_MODELS_BASE, default origin/main, from the
+# merge-base): no row may disappear, lose status or be born residual without a
+# "threat-model-downgrade: <ID> <reason>" commit trailer on the branch. Without
+# the base ref this is skipped locally, and fails under CI.
+#
 # The required models must all exist. Account IDs, ARNs, zone and distribution
 # IDs, access keys and email addresses are rejected (via infra-no-identifiers),
 # because this repository is public. Test source is read from git's index and
@@ -83,8 +88,50 @@ while IFS= read -r f; do
 done <"${work}/godot-files"
 sort -u -o "${work}/tests" "${work}/tests"
 
+# Checks that task ci actually runs: scripts/checks/<name> named in a command
+# of any task reachable from ci (Taskfile.yml is read as data, never run).
+: >"${work}/ci-checks"
+if [ -f "${root}/Taskfile.yml" ]; then
+  printf 'ci\n' >"${work}/todo"
+  : >"${work}/seen"
+  while [ -s "${work}/todo" ]; do
+    t="$(head -n 1 "${work}/todo")"
+    sed -i.bak '1d' "${work}/todo"
+    grep -qxF -- "${t}" "${work}/seen" && continue
+    printf '%s\n' "${t}" >>"${work}/seen"
+    T="${t}" yq -r '.tasks[strenv(T)].cmds[]? | select(tag == "!!map") | .task // ""' "${root}/Taskfile.yml" |
+      grep . >>"${work}/todo" || true
+    T="${t}" yq -r '.tasks[strenv(T)].cmds[]? | select(tag == "!!str")' "${root}/Taskfile.yml" >>"${work}/ci-cmds"
+  done
+  if [ -f "${work}/ci-cmds" ]; then
+    grep -oE '(^|[^A-Za-z0-9_./-])scripts/checks/[A-Za-z0-9_-]+([^A-Za-z0-9_./-]|$)' "${work}/ci-cmds" |
+      sed -E 's|.*scripts/checks/([A-Za-z0-9_-]+).*|\1|' | sort -u >"${work}/ci-checks" || true
+  fi
+fi
+
+# Only the models and README.md live here: anything else would render on
+# GitHub without being checked.
+git -C "${root}" -c core.quotePath=false ls-files -- docs/threat-models/ >"${work}/tracked-models"
+while IFS= read -r p; do
+  case "${p#docs/threat-models/}" in
+    README.md) ;;
+    */*) fail "${p}: only top-level files belong in docs/threat-models/" ;;
+    *.md)
+      name="${p#docs/threat-models/}"
+      case "${name%.md}" in *[!a-z-]* | '') fail "${p}: model names are lowercase letters and dashes" ;; *) ;; esac
+      ;;
+    *) fail "${p}: only .md files belong in docs/threat-models/" ;;
+  esac
+done <"${work}/tracked-models"
+# README.md holds no table at all, so nothing there can pose as entries.
+if [ -f "${dir}/README.md" ]; then
+  lines="$(grep -n '|' "${dir}/README.md" | cut -d: -f1 | tr '\n' ' ' || true)"
+  [ -z "${lines}" ] || fail "README.md: a | on line(s) ${lines% } (README.md may not hold a table)"
+fi
+
 : >"${work}/ids"
 : >"${work}/models"
+: >"${work}/current"
 for f in "${dir}"/*.md; do
   [ -f "${f}" ] || continue
   base="${f##*/}"
@@ -108,6 +155,9 @@ for f in "${dir}"/*.md; do
       last = NR
       next
     }
+    # GitHub renders a table without leading pipes, or inside a blockquote,
+    # so any other line with a pipe could hide a second table.
+    /\|/ { print file ":" NR ": a | outside the table is not allowed (it could render as a second table)"; bad = 1 }
     END {
       if (n == 0) { print file ": no table"; bad = 1 }
       else if (n < 3) { print file ": the table has no entries"; bad = 1 }
@@ -170,6 +220,7 @@ for f in "${dir}"/*.md; do
       fail "${where}: duplicate ID ${id}"
     fi
     printf '%s\n' "${id}" >>"${work}/ids"
+    printf '%s\t%s\n' "${id}" "${st}" >>"${work}/current"
 
     pr="$(printf '%s' "${found}" | sed -nE "s|^\\[#([0-9]+)\\]\\(${repo_re}([0-9]+)\\)\$|\1 \2|p")"
     if [ -z "${pr}" ] || [ "${pr% *}" != "${pr#* }" ]; then
@@ -189,6 +240,8 @@ for f in "${dir}"/*.md; do
             mode="$(git -C "${root}" ls-files -s -- "scripts/checks/${ref#check:}" | cut -d' ' -f1)"
             if [ "${mode}" != 100755 ] || [ ! -f "${root}/scripts/checks/${ref#check:}" ]; then
               fail "${where}: ${ref} is not a tracked, executable scripts/checks/${ref#check:}"
+            elif ! grep -qxF -- "${ref#check:}" "${work}/ci-checks"; then
+              fail "${where}: ${ref} is not run by task ci (no task reachable from ci calls scripts/checks/${ref#check:})"
             fi
             ;;
           *) fail "${where}: a mitigated entry's proof must be ${bt}test:<name>${bt} or ${bt}check:<name>${bt}" ;;
@@ -202,6 +255,87 @@ for f in "${dir}"/*.md; do
     esac
   done <"${work}/rows"
 done
+
+# Only main's copy is accepted or tracked (AGENTS.md, Review policy). Against
+# the merge-base with the base ref, a branch may not remove a row, lower a
+# row's status (mitigated > open > residual) or add a row that is born
+# residual, unless one of its commits carries the trailer
+#   threat-model-downgrade: <ID> <reason>
+# which reviewers then judge as a finding. In CI the base ref must exist.
+base_ref="${THREAT_MODELS_BASE:-origin/main}"
+rank() {
+  case "$1" in
+    mitigated) printf '2' ;;
+    open) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
+# The pre-commit hook sets THREAT_MODELS_PENDING_COMMIT: the commit (and its
+# trailer) doesn't exist yet, so a comparison finding is only a note there.
+# pre-push and CI see the commits and always enforce; CI ignores the variable.
+base_fail() {
+  if [ -n "${THREAT_MODELS_PENDING_COMMIT:-}" ] && [ -z "${CI:-}" ]; then
+    printf 'threat-models: note (needs a trailer on this commit): %s\n' "$*" >&2
+  else
+    fail "$@"
+  fi
+}
+merge_base=""
+if git -C "${root}" rev-parse --quiet --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
+  merge_base="$(git -C "${root}" merge-base "${base_ref}" HEAD 2>/dev/null || true)"
+fi
+if [ -z "${merge_base}" ]; then
+  if [ -n "${CI:-}" ]; then
+    fail "no merge-base with ${base_ref}: cannot compare against main's copy (fetch it, or set THREAT_MODELS_BASE)"
+  else
+    printf 'threat-models: note: no %s here, so rows are not compared against main\n' "${base_ref}" >&2
+  fi
+else
+  : >"${work}/base"
+  git -C "${root}" -c core.quotePath=false ls-tree --name-only "${merge_base}" -- docs/threat-models/ >"${work}/base-files"
+  while IFS= read -r p; do
+    name="${p##*/}"
+    case "${name}" in README.md) continue ;; *.md) ;; *) continue ;; esac
+    case "${name%.md}" in *[!a-z-]*) continue ;; *) ;; esac
+    git -C "${root}" show "${merge_base}:${p}" | awk '
+      /^[[:space:]]*\|/ {
+        n++
+        if (n <= 2) next
+        line = substr($0, 2, length($0) - 2)
+        count = split(line, cells, "|")
+        if (count != 7) next
+        id = cells[1]; st = cells[5]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", st)
+        print id "\t" st
+      }
+    ' >>"${work}/base"
+  done <"${work}/base-files"
+  # Downgrade markers from every commit on the branch.
+  git -C "${root}" log --format=%B "${merge_base}..HEAD" |
+    sed -n 's/^threat-model-downgrade:[[:space:]]*\([A-Z][A-Z]*-[0-9][0-9]\)[[:space:]][[:space:]]*[^[:space:]].*$/\1/p' |
+    sort -u >"${work}/allowed"
+  tab="$(printf '\t')"
+  while IFS="${tab}" read -r id was; do
+    grep -qxF -- "${id}" "${work}/allowed" && continue
+    now="$(awk -F '\t' -v id="${id}" '$1 == id { print $2; exit }' "${work}/current")"
+    if [ -z "${now}" ]; then
+      base_fail "${id}: removed; main's copy has it as ${was} (add a 'threat-model-downgrade: ${id} <reason>' commit trailer if this is deliberate)"
+    else
+      r_was="$(rank "${was}")"
+      r_now="$(rank "${now}")"
+      if [ "${r_now}" -lt "${r_was}" ]; then
+        base_fail "${id}: status lowered from ${was} to ${now} (add a 'threat-model-downgrade: ${id} <reason>' commit trailer if this is deliberate)"
+      fi
+    fi
+  done <"${work}/base"
+  while IFS="${tab}" read -r id now; do
+    [ "${now}" = residual ] || continue
+    grep -q "^${id}${tab}" "${work}/base" && continue
+    grep -qxF -- "${id}" "${work}/allowed" && continue
+    base_fail "${id}: a new row may not be born residual (add a 'threat-model-downgrade: ${id} <reason>' commit trailer if this is deliberate)"
+  done <"${work}/current"
+fi
 
 # Public repository: no account identifiers or email addresses, in any file
 # there (README.md included). infra-no-identifiers prints file, line and kind,

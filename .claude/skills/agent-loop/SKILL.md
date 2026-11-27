@@ -71,6 +71,7 @@ Follow AGENTS.md **Delivery** exactly; it is the contract the merge gate enforce
      - Block only on a concrete reproduced failure or attack, quoting the exact input and the observed result. Everything else is a follow-up.
      - From its third verdict on the PR, block only on a demonstrated exploitable hole or a demonstrated correctness bug.
      - Accepted residuals in `docs/threat-models/` never block.
+     - Only rows in main's copy of docs/threat-models/ count as accepted or tracked. A row the PR adds, changes or removes is under review: downgrading or removing one, or adding a residual or open row for a hole the PR introduces, is a finding.
    - A reviewer that needs its own checkout uses `git worktree add .agent-loop/review/<tag> <head SHA>`, which stays inside the sandbox.
    - Each reviewer posts one comment with `gh pr comment <pr> --body-file <file>`. Its last line is `review-verdict: pass sha=<40-char head SHA> reviewer=<tag>` or `review-verdict: block sha=<40-char head SHA> reviewer=<tag>`.
    - Fix every block with a regression test plus a threat-model entry, push, and review again: a push invalidates earlier passes.
