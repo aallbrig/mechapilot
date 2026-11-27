@@ -1,11 +1,14 @@
 extends Node
 ## The composition root: the only script that knows the concrete classes. It
-## builds the core/ rules on the Events bus, restores the persisted stores,
-## hands the player mech's mounts and motion to its feedback, attaches the touch
-## controls (shown only on a touch screen) to the player's input, boots the Game
-## State machine and ticks the rules on the fixed physics step.
-## The screens (ui/), the UI sounds (feedback/) and the Title's attract mode
-## (game/attract) are composed in main.tscn and hear only the Events bus.
+## builds the core/ rules on the Events bus, binds the juice and audio
+## (FeedbackRig) to the bus before the stores restore, so the restored Settings
+## reach it, connects the camera juice to the camera rig, hands the player
+## mech's mounts and motion to its feedback, attaches the touch controls (shown
+## only on a touch screen) to the player's input, boots the Game State machine
+## and ticks the rules on the fixed physics step.
+## The screens (ui/) and the Title's attract mode (game/attract) are composed in
+## main.tscn and hear only the Events bus; every UI sound plays through the
+## FeedbackRig (flow.ui_cue_requested).
 ## The boot marker lets the web smoke test see the bus round trip in the browser.
 
 const BOOT_OK_MARKER: String = "mechapilot: boot ok"
@@ -23,6 +26,7 @@ var _tutorial: TutorialProgress
 @onready var _stage: FlightStage = $FlightStage
 @onready var _mech_feedback: MechFeedback = $MechFeedback
 @onready var _touch: TouchControls = $TouchControls
+@onready var _feedback: FeedbackRig = $Feedback
 
 
 func _ready() -> void:
@@ -44,6 +48,7 @@ func _ready() -> void:
 	_tutorial = TutorialProgress.new(LocalDocumentStore.new(LocalDocumentStore.Slot.TUTORIAL))
 	# Before the stores restore, so the touch sticks hear the saved opacity.
 	_touch.attach(Events, _stage.player_input(), DisplayServer.is_touchscreen_available())
+	_wire_feedback()
 	_settings.restore()
 	_scoreboard.restore()
 	_intel.restore()
@@ -60,6 +65,15 @@ func _physics_process(delta: float) -> void:
 	_ledger.tick(delta)
 	_progression.tick(delta)
 	_director.tick(delta)
+
+
+func _wire_feedback() -> void:
+	_feedback.bind(Events)
+	_feedback.drive_engine()
+	var rig: CameraRig = _stage.camera_rig()
+	_check(_feedback.camera.trauma_requested.connect(rig.add_trauma) as Error)
+	_check(_feedback.camera.kick_requested.connect(rig.kick) as Error)
+	_check(_feedback.camera.fov_punch_requested.connect(rig.punch_fov) as Error)
 
 
 func _wire_mech_feedback() -> void:

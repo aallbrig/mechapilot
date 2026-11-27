@@ -60,6 +60,18 @@ _Avoid_: arena, play area, bounds
 The top 10 past Runs, each recorded with the player's three initials, score, Level reached and time. Local to the player's browser for now.
 _Avoid_: leaderboard (reserved for a future internet-accessible version), high scores
 
+**Juice**:
+The feedback that makes every action feel good: hit-stop, screen shake, flashes, particles, pop-ups, rumble, sound and music. It only reacts to Game Events and never changes the rules. Reduced motion turns off its shake, hit-stop and flashing.
+_Avoid_: polish, game feel (as a code name), effects
+
+**Hit-stop**:
+The brief near-freeze of game time (about 40 ms) when a kill lands, so the hit reads.
+_Avoid_: freeze frame, hit pause
+
+**Audio Unlock**:
+The player's first press (a key, a click, a touch or the Boot screen's tap). Browsers block audio until a user gesture, so no sound or music plays before it.
+_Avoid_: audio start, unmute
+
 ## Web presence
 
 **Game Site**:

@@ -50,6 +50,9 @@ Architecture (decided in #9; checked by `scripts/checks/godot-architecture`):
 - `game/` uses `core/`. `ui/` and `feedback/` see only `Events` and `types/`.
 - `ui/`: `ui_root.tscn` holds one screen per Game State (`ui/screens/`), shown from `flow.game_state_changed` alone, plus sub-screens (Settings, Credits) opened on top. Screens announce intents and UI sound cues, never call `core/`. One theme (`ui/theme/theme.tres`) with bundled OFL fonts; juice goes through `ui/juice/` (`TweenFx`, `ControlJuice`), which honours reduced motion. The UI is laid out on a 640x640 base (`project.godot`: `canvas_items` stretch, `expand` aspect), so the shorter side of any window is 640 UI pixels: 360 px phones to 4K.
 - `main.gd` is the composition root, the only place that constructs core classes.
+- `feedback/`: the Juice and audio (#26), composed by `feedback/feedback_rig.gd`. Each part subscribes to `Events` and decides on its own: hit-stop and slow-mo, camera shake (main.gd connects `CameraJuice` to the camera rig), pooled explosions, pop-ups, the screen overlay, rumble, SFX and music. `feedback/juice/juice_settings.gd` is the one place that reads reduced motion and the shake and rumble toggles.
+- Audio: the buses are `Master`, `Music`, `SFX` and `UI` (`default_bus_layout.tres`), with volumes from Settings. Every sound and song is synthesized at startup (`feedback/audio/`), so no audio file ships, and nothing plays before the Audio Unlock (the first key, click, touch or Boot tap), which keeps the browser console clean.
+- `CREDITS.md`: every asset and its licence, checked by `scripts/checks/asset-credits`.
 - `levels/*.json`: Level data, validated by `/schemas/level.schema.json`.
 - `tests/`: GdUnit4 suites (`test_*.gd`). GdUnit4 6.2.3 is vendored in `addons/gdUnit4` and is excluded from our warnings and lint.
 

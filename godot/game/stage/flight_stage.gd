@@ -2,19 +2,14 @@ class_name FlightStage
 extends Node3D
 ## The 3D world the player flies in, seen side-on: sky, light, clouds, the
 ## camera rig, the player mech, its input, shot pool and death ragdoll. It wires
-## these game nodes to each other (each reaches only what it is given) and adds
-## the camera's share of the juice for shots and hits. It links the mech to the
+## these game nodes to each other (each reaches only what it is given). The
+## camera's juice is decided by feedback/ (CameraJuice, which honours the shake
+## and reduced-motion settings) and main.gd connects it to camera_rig(). It
+## links the mech to the
 ## Events bus (PlayerBusLink) and spawns the Repair Kits the rules drop. It runs
 ## in play, Level Clear, Game Over and Victory; it holds still while Paused and
 ## behind the Title and Scoreboard.
 
-## Camera kick per shot (units, against the aim), and shake per shot and per hit.
-const SHOT_KICK: float = 0.25
-const SHOT_TRAUMA: float = 0.04
-const HIT_TRAUMA: float = 0.5
-const HIT_FOV_PUNCH: float = 4.0
-const DEATH_TRAUMA: float = 1.0
-const DEATH_FOV_PUNCH: float = 14.0
 const SKY_COLOR: Color = Color(0.0, 0.1, 0.3)
 const AMBIENT_COLOR: Color = Color(0.45, 0.5, 0.7)
 const AMBIENT_ENERGY: float = 0.6
@@ -62,8 +57,6 @@ func _init() -> void:
 	_player.view = _rig
 	_player.rng = rng
 	_rig.target = _player
-	_connect(_player.fired.connect(_on_fired) as Error)
-	_connect(_player.hit_taken.connect(_on_hit_taken) as Error)
 	_connect(_player.destroyed.connect(_on_destroyed) as Error)
 	_connect(_player.respawned.connect(_on_respawned) as Error)
 
@@ -133,19 +126,7 @@ func _on_game_state_changed(_from: GameState.Phase, to: GameState.Phase) -> void
 	_set_running(runs_in(to))
 
 
-func _on_fired(_origin: Vector3, direction: Vector3) -> void:
-	_rig.kick(-direction * SHOT_KICK)
-	_rig.add_trauma(SHOT_TRAUMA)
-
-
-func _on_hit_taken(_damage: int, _position: Vector3) -> void:
-	_rig.add_trauma(HIT_TRAUMA)
-	_rig.punch_fov(HIT_FOV_PUNCH)
-
-
 func _on_destroyed(_position: Vector3) -> void:
-	_rig.add_trauma(DEATH_TRAUMA)
-	_rig.punch_fov(DEATH_FOV_PUNCH)
 	_shots.clear()
 
 
