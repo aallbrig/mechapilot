@@ -49,10 +49,10 @@ extends Resource
 @export var mech_scale: float = 0.85
 ## Contact radius at scale 1 (units).
 @export var hit_radius: float = 0.47
-## Invulnerability after a hit (s), from #73.
-@export var hit_invulnerability: float = 0.6
+## Invulnerability after a hit (s): the RunLedger's window (#73), mirrored for the blink.
+@export var hit_invulnerability: float = RunRules.HIT_INVULNERABILITY
 ## Invulnerability after a respawn (s), from #73.
-@export var respawn_invulnerability: float = 2.0
+@export var respawn_invulnerability: float = RunRules.RESPAWN_INVULNERABILITY
 ## Blink frequency while invulnerable (Hz), and the hidden share of each blink.
 @export var blink_rate: float = 10.0
 @export var blink_hidden_share: float = 0.35

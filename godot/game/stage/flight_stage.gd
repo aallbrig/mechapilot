@@ -3,8 +3,10 @@ extends Node3D
 ## The 3D world the player flies in, seen side-on: sky, light, clouds, the
 ## camera rig, the player mech, its input, shot pool and death ragdoll. It wires
 ## these game nodes to each other (each reaches only what it is given) and adds
-## the camera's share of the juice for shots and hits. It runs only during the
-## Gameplay Game State; otherwise it holds still behind the screens.
+## the camera's share of the juice for shots and hits. It links the mech to the
+## Events bus (PlayerBusLink) and spawns the Repair Kits the rules drop. It runs
+## in play, Level Clear, Game Over and Victory; it holds still while Paused and
+## behind the Title and Scoreboard.
 
 ## Camera kick per shot (units, against the aim), and shake per shot and per hit.
 const SHOT_KICK: float = 0.25
@@ -35,6 +37,8 @@ var _shots: ShotPool = ShotPool.new()
 var _debris: MechDebris = MechDebris.new()
 var _rig: CameraRig = CameraRig.new()
 var _clouds: CloudField = CloudField.new()
+var _link: PlayerBusLink = PlayerBusLink.new()
+var _pickups: Node3D = Node3D.new()
 
 
 func _init() -> void:
@@ -47,6 +51,8 @@ func _init() -> void:
 	add_child(_input)
 	add_child(_shots)
 	add_child(_debris)
+	add_child(_pickups)
+	add_child(_link)
 	add_child(_player)
 	add_child(_rig)
 	_player.name = "Player"
@@ -64,7 +70,9 @@ func _init() -> void:
 
 func _ready() -> void:
 	_rig.snap_to(_player.position)
-	_connect(Events.game_state_changed.connect(_on_game_state_changed) as Error)
+	_link.link(Events, _player, _input)
+	_connect(Events.flow.game_state_changed.connect(_on_game_state_changed) as Error)
+	_connect(Events.player.repair_kit_dropped.connect(spawn_repair_kit) as Error)
 	_set_running(false)
 
 
@@ -88,13 +96,41 @@ func shots() -> ShotPool:
 	return _shots
 
 
+## The Repair Kits in the sky.
+func repair_kits() -> Array[RepairKit]:
+	var kits: Array[RepairKit] = []
+	for node: Node in _pickups.get_children():
+		var kit: RepairKit = node as RepairKit
+		if kit != null and not kit.is_spent():
+			kits.append(kit)
+	return kits
+
+
+## Drop a Repair Kit at `at` that only this stage's mech can collect.
+func spawn_repair_kit(at: Vector3) -> void:
+	var kit: RepairKit = RepairKit.new()
+	kit.position = Vector3(at.x, at.y, 0.0)
+	kit.collector = _player
+	_pickups.add_child(kit)
+
+
+## Whether the stage runs in `phase`.
+static func runs_in(phase: GameState.Phase) -> bool:
+	return (
+		GameState.is_play(phase)
+		or phase == GameState.Phase.LEVEL_CLEAR
+		or phase == GameState.Phase.GAME_OVER
+		or phase == GameState.Phase.VICTORY
+	)
+
+
 ## Run (Gameplay) or hold still (every other Game State).
 func _set_running(running: bool) -> void:
 	process_mode = Node.PROCESS_MODE_INHERIT if running else Node.PROCESS_MODE_DISABLED
 
 
 func _on_game_state_changed(_from: GameState.Phase, to: GameState.Phase) -> void:
-	_set_running(to == GameState.Phase.GAMEPLAY)
+	_set_running(runs_in(to))
 
 
 func _on_fired(_origin: Vector3, direction: Vector3) -> void:

@@ -20,20 +20,41 @@ func test_stage_wires_the_player_to_its_parts() -> void:
 	var _wired: GdUnitAssert = assert_bool(wired).is_true()
 
 
-func test_stage_runs_only_during_gameplay() -> void:
+func test_stage_runs_in_play_and_holds_still_when_paused() -> void:
 	var stage: FlightStage = FlightStage.new()
 	add_child(stage)
 	var idle: Node.ProcessMode = stage.process_mode
-	Events.announce_game_state_changed(GameState.Phase.MENU, GameState.Phase.GAMEPLAY)
+	Events.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.SKIRMISH)
 	var playing: Node.ProcessMode = stage.process_mode
-	Events.announce_game_state_changed(GameState.Phase.GAMEPLAY, GameState.Phase.GAME_OVER)
+	Events.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.PAUSED)
+	var paused: Node.ProcessMode = stage.process_mode
+	Events.flow.announce_game_state_changed(GameState.Phase.PAUSED, GameState.Phase.GAME_OVER)
 	var over: Node.ProcessMode = stage.process_mode
+	Events.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.TITLE)
+	var title: Node.ProcessMode = stage.process_mode
 	var input_mode: Node.ProcessMode = stage.player_input().process_mode
 	stage.free()
 	var _idle: GdUnitAssert = assert_int(idle).is_equal(Node.PROCESS_MODE_DISABLED)
 	var _playing: GdUnitAssert = assert_int(playing).is_equal(Node.PROCESS_MODE_INHERIT)
-	var _over: GdUnitAssert = assert_int(over).is_equal(Node.PROCESS_MODE_DISABLED)
+	var _paused: GdUnitAssert = assert_int(paused).is_equal(Node.PROCESS_MODE_DISABLED)
+	# The ragdoll settles behind the Game Over tally.
+	var _over: GdUnitAssert = assert_int(over).is_equal(Node.PROCESS_MODE_INHERIT)
+	var _title: GdUnitAssert = assert_int(title).is_equal(Node.PROCESS_MODE_DISABLED)
 	var _detects_always: GdUnitAssert = assert_int(input_mode).is_equal(Node.PROCESS_MODE_ALWAYS)
+
+
+func test_stage_spawns_dropped_repair_kits_for_its_mech() -> void:
+	var stage: FlightStage = FlightStage.new()
+	add_child(stage)
+	Events.player.announce_repair_kit_dropped(Vector3(4.0, 2.0, 1.0))
+	var kits: Array[RepairKit] = stage.repair_kits()
+	var count: int = kits.size()
+	var at: Vector3 = kits[0].position if count > 0 else Vector3.INF
+	var collector: bool = count > 0 and kits[0].collector == stage.player()
+	stage.free()
+	var _spawned: GdUnitAssert = assert_int(count).is_equal(1)
+	var _on_plane: GdUnitAssert = assert_vector(at).is_equal(Vector3(4.0, 2.0, 0.0))
+	var _for_the_mech: GdUnitAssert = assert_bool(collector).is_true()
 
 
 func test_firing_fills_the_stage_shot_pool() -> void:

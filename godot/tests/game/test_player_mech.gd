@@ -5,8 +5,8 @@ extends GdUnitTestSuite
 const TICK: float = 1.0 / 60.0
 
 var _fired: Array[Vector3] = []
-var _hits: Array[int] = []
-var _repairs: Array[int] = []
+var _hits: Array[DamageSource.Source] = []
+var _repairs: Array[Vector3] = []
 var _samples: int = 0
 
 
@@ -38,12 +38,12 @@ func _on_fired(_origin: Vector3, direction: Vector3) -> void:
 	_fired.append(direction)
 
 
-func _on_hit(damage: int, _position: Vector3) -> void:
-	_hits.append(damage)
+func _on_hit(source: DamageSource.Source, _position: Vector3, _attack_damage: int) -> void:
+	_hits.append(source)
 
 
-func _on_repaired(amount: int, _position: Vector3) -> void:
-	_repairs.append(amount)
+func _on_repaired(position: Vector3) -> void:
+	_repairs.append(position)
 
 
 func _on_sample(_sample: MechMotionSample) -> void:
@@ -125,13 +125,13 @@ func test_hit_reaction_guards_flashes_and_knocks_back() -> void:
 	var mech: PlayerMech = _mech()
 	var err: Error = mech.hit_taken.connect(_on_hit) as Error
 	mech.velocity = Vector3.ZERO
-	var first: bool = mech.take_hit(10, Vector3.LEFT)
+	var first: bool = mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	var flashed: bool = mech.model().is_flashing()
 	var knocked: float = mech.velocity.x
-	var second: bool = mech.take_hit(10, Vector3.LEFT)
+	var second: bool = mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	for _i: int in 40:
 		mech.tick(TICK, PilotIntent.new())
-	var third: bool = mech.take_hit(25, Vector3.RIGHT)
+	var third: bool = mech.take_hit(DamageSource.Source.ENEMY_COLLISION, Vector3.RIGHT)
 	mech.free()
 	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
 	var _lands: GdUnitAssert = assert_bool(first).is_true()
@@ -139,12 +139,14 @@ func test_hit_reaction_guards_flashes_and_knocks_back() -> void:
 	var _knockback: GdUnitAssert = assert_float(knocked).is_less(-1.0)
 	var _guarded: GdUnitAssert = assert_bool(second).is_false()
 	var _after_window: GdUnitAssert = assert_bool(third).is_true()
-	var _reported: GdUnitAssert = assert_array(_hits).is_equal([10, 25])
+	var _reported: GdUnitAssert = assert_array(_hits).is_equal(
+		[DamageSource.Source.ENEMY_BULLET, DamageSource.Source.ENEMY_COLLISION]
+	)
 
 
 func test_invulnerable_mech_blinks_then_shows_solid() -> void:
 	var mech: PlayerMech = _mech()
-	var _hit: bool = mech.take_hit(10, Vector3.LEFT)
+	var _hit: bool = mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	var hidden_frames: int = 0
 	for _i: int in 36:
 		mech.tick(TICK, PilotIntent.new())
@@ -161,13 +163,13 @@ func test_respawn_grants_two_seconds_of_invulnerability() -> void:
 	var mech: PlayerMech = _mech()
 	mech.destroy()
 	mech.respawn(Vector3(3.0, 4.0, 0.0))
-	var guarded: bool = mech.take_hit(10, Vector3.LEFT)
+	var guarded: bool = mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	for _i: int in 119:
 		mech.tick(TICK, PilotIntent.new())
 	var still: bool = mech.is_invulnerable()
 	for _i: int in 2:
 		mech.tick(TICK, PilotIntent.new())
-	var open: bool = mech.take_hit(10, Vector3.LEFT)
+	var open: bool = mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	mech.free()
 	var _guarded: GdUnitAssert = assert_bool(guarded).is_false()
 	var _still: GdUnitAssert = assert_bool(still).is_true()
@@ -177,10 +179,11 @@ func test_respawn_grants_two_seconds_of_invulnerability() -> void:
 func test_repair_kit_pickup_is_reported() -> void:
 	var mech: PlayerMech = _mech()
 	var err: Error = mech.repaired.connect(_on_repaired) as Error
-	mech.repair(30)
+	mech.position = Vector3(2.0, 1.0, 0.0)
+	mech.repair()
 	mech.free()
 	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
-	var _reported: GdUnitAssert = assert_array(_repairs).is_equal([30])
+	var _reported: GdUnitAssert = assert_array(_repairs).is_equal([Vector3(2.0, 1.0, 0.0)])
 
 
 func test_death_breaks_the_mech_into_a_falling_ragdoll() -> void:
@@ -198,7 +201,7 @@ func test_death_breaks_the_mech_into_a_falling_ragdoll() -> void:
 		debris.step(TICK)
 	var later: float = debris.mean_height()
 	var hidden: bool = not mech.model().visible
-	var inert: bool = not mech.take_hit(10, Vector3.LEFT)
+	var inert: bool = not mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
 	mech.free()
 	debris.free()
 	var _every_part: GdUnitAssert = assert_int(pieces).is_equal(parts)

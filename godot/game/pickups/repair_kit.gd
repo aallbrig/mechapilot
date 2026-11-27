@@ -7,7 +7,8 @@ extends Area3D
 ## Collected: the mech gets the armor (through PlayerMech.repair()).
 signal collected(amount: int)
 
-const AMOUNT: int = 30
+## The Armor a kit restores (the RunLedger applies it on repair_collected).
+const AMOUNT: int = RunRules.REPAIR_ARMOR
 const LIFETIME: float = 10.0
 ## Gentle fall: pickups drift instead of dropping like shots (units/s^2, units/s).
 const GRAVITY: float = 3.0 * Pace.GAME_SPEED * Pace.GAME_SPEED
@@ -84,7 +85,7 @@ func step(delta: float) -> void:
 		if gap.length() <= reach:
 			_spent = true
 			visible = false
-			collector.repair(AMOUNT)
+			collector.repair()
 			collected.emit(AMOUNT)
 
 

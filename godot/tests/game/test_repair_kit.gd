@@ -11,8 +11,8 @@ func before_test() -> void:
 	_repairs.clear()
 
 
-func _on_repaired(amount: int, _position: Vector3) -> void:
-	_repairs.append(amount)
+func _on_repaired(_position: Vector3) -> void:
+	_repairs.append(RepairKit.AMOUNT)
 
 
 func test_repair_kit_drifts_down_under_gravity() -> void:
@@ -61,7 +61,8 @@ func test_repair_kit_is_collected_by_flying_through() -> void:
 	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
 	var _not_from_afar: GdUnitAssert = assert_bool(missed).is_false()
 	var _collected: GdUnitAssert = assert_bool(taken).is_true()
-	var _thirty_once: GdUnitAssert = assert_array(_repairs).is_equal([30])
+	var _thirty: GdUnitAssert = assert_int(RepairKit.AMOUNT).is_equal(30)
+	var _once: GdUnitAssert = assert_array(_repairs).is_equal([30])
 
 
 func test_destroyed_mech_cannot_collect_repair_kits() -> void:
