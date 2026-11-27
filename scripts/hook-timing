@@ -1,0 +1,86 @@
+#!/bin/sh
+# Run a git hook's work and append its timing to build/hook-timings.jsonl (#66).
+#
+# Usage: scripts/hook-timing <hook> "<task> ..." <command> [args...]
+# Runs <command> as a child process (so its own `set -e` holds), with
+# HOOK_TIMING_CHILD=1 in its environment, then appends one JSON line
+# (schemas/hook-timing.schema.json) to build/hook-timings.jsonl at the top of
+# the working tree, and exits with the command's status. Recording never
+# changes that status: if the line can't be written safely (build/ or the log
+# is a symlink or not a regular file), it says so on stderr and skips it.
+set -eu
+# No globbing: the task list is split on spaces, never expanded.
+set -f
+LC_ALL=C
+export LC_ALL
+
+[ "$#" -ge 3 ] || {
+  printf 'usage: hook-timing <hook> "<task> ..." <command> [args...]\n' >&2
+  exit 64
+}
+hook="$1"
+tasks="$2"
+shift 2
+case "${hook}" in
+  pre-commit | pre-push | pre-merge-commit) ;;
+  *)
+    printf 'hook-timing: unknown hook: %s\n' "${hook}" >&2
+    exit 64
+    ;;
+esac
+
+start="$(date +%s)"
+rc=0
+HOOK_TIMING_CHILD=1 "$@" || rc=$?
+end="$(date +%s)"
+
+# Every failure below is reported and swallowed: recording never changes the
+# hook's status.
+skip() {
+  printf 'hook-timing: not recorded (%s)\n' "$1" >&2
+}
+
+record() {
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    skip "not in a git working tree"
+    return 0
+  }
+  dir="${top}/build"
+  log="${dir}/hook-timings.jsonl"
+  if [ -L "${dir}" ] || { [ -e "${dir}" ] && [ ! -d "${dir}" ]; }; then
+    skip "build/ is not a plain directory"
+    return 0
+  fi
+  mkdir -p "${dir}" || {
+    skip "cannot create build/"
+    return 0
+  }
+  if [ -L "${log}" ] || { [ -e "${log}" ] && [ ! -f "${log}" ]; }; then
+    skip "build/hook-timings.jsonl is not a plain file"
+    return 0
+  fi
+  # Every value is a fixed hook name, a task-name token or a number, so the
+  # line is built without a JSON tool (hooks may run before the toolchain).
+  list=""
+  for t in ${tasks}; do
+    case "${t}" in
+      "" | *[!a-z0-9:_-]* | [!a-z]*)
+        skip "bad task name"
+        return 0
+        ;;
+      *) ;;
+    esac
+    list="${list}${list:+,}\"${t}\""
+  done
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || {
+    skip "no date"
+    return 0
+  }
+  printf '{"hook":"%s","tasks":[%s],"duration_s":%d,"exit_status":%d,"timestamp":"%s"}\n' \
+    "${hook}" "${list}" "$((end - start))" "${rc}" "${stamp}" >>"${log}" ||
+    skip "cannot append to build/hook-timings.jsonl"
+  return 0
+}
+
+record
+exit "${rc}"

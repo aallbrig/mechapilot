@@ -1,0 +1,230 @@
+#!/bin/sh
+# Tests for scripts/pre-push-select (the affected-only pre-push, #66) and for
+# keeping pre-merge-commit and CI on the full gate.
+
+# select_fixture: d (root), w (checkout on branch feature, from main), with an
+# origin whose main carries this tree's verification guard.
+select_fixture() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  w="${d}/w"
+  git init -q --bare "${d}/origin.git"
+  git init -q "${w}"
+  git -C "${w}" config user.name test
+  git -C "${w}" config user.email test@invalid
+  git -C "${w}" config commit.gpgsign false
+  git -C "${w}" checkout -q -b main
+  mkdir -p "${w}/scripts/checks" "${w}/tests/shell" "${w}/godot" "${w}/site" "${w}/infra"
+  cp "${root}/scripts/checks/verification-guard" "${w}/scripts/checks/verification-guard"
+  printf 'seed\n' >"${w}/README.md"
+  printf 'test_a() {\n  true\n}\n' >"${w}/tests/shell/test_existing"
+  printf 'extends Node\n' >"${w}/godot/main.gd"
+  git -C "${w}" add -A
+  git -C "${w}" commit -q -m main
+  git -C "${w}" remote add origin "${d}/origin.git"
+  git -C "${w}" push -q origin main
+  git -C "${w}" fetch -q origin
+  git -C "${w}" checkout -q -b feature
+}
+
+# selects "<tasks>" [stdin-file]: the selection for the fixture's working
+# tree, on one line, is exactly <tasks>. Reasons land in ${d}/why.
+selects() {
+  (cd "${w}" && "${root}/scripts/pre-push-select" <"${2:-/dev/null}" >"${d}/selected" 2>"${d}/why") || return 1
+  got="$(tr '\n' ' ' <"${d}/selected" | sed 's/ $//')"
+  [ "${got}" = "$1" ] || {
+    printf 'want: %s\ngot:  %s\n' "$1" "${got}"
+    cat "${d}/why"
+    return 1
+  }
+}
+
+# commit_file <path> [content]: add or change a file on the feature branch.
+commit_file() {
+  mkdir -p "$(dirname "${w}/$1")"
+  printf '%s\n' "${2:-x}" >"${w}/$1"
+  git -C "${w}" add -A
+  git -C "${w}" commit -q -m "$1"
+}
+
+# fresh: back to a feature branch identical to main, nothing uncommitted.
+fresh() {
+  git -C "${w}" checkout -q -f -B feature main
+  git -C "${w}" clean -q -f -d
+}
+
+test_pre_push_selects_shell_checks_for_shell_test_change() {
+  select_fixture
+  commit_file tests/shell/test_new 'test_b() { true; }'
+  selects "checks test:shell" || return 1
+  # A shell script anywhere outside the verification stack: shellcheck, shfmt and the shell tests.
+  commit_file tests/fixtures/tool.sh '#!/bin/sh'
+  selects "checks lint:sh test:shell"
+}
+
+test_pre_push_maps_each_area_to_its_checks() {
+  select_fixture
+  commit_file godot/player.gd 'extends Node'
+  selects "checks lint:gd test" || return 1
+  fresh
+  commit_file site/content/_index.md 'hi'
+  selects "checks lint:yaml lint:schema site:static site:links" || return 1
+  fresh
+  commit_file infra/modules/site/main.tf '# x'
+  selects "checks infra:validate infra:lint infra:scan" || return 1
+  fresh
+  commit_file docs/notes.md 'hi'
+  selects "checks" || return 1
+  # The union of several areas, in a fixed order; `test` covers test:shell.
+  commit_file godot/enemy.gd 'extends Node'
+  commit_file tests/shell/test_more 'test_c() { true; }'
+  selects "checks lint:gd test" || return 1
+  # Nothing changed: only the hygiene checks.
+  fresh
+  selects "checks"
+}
+
+test_pre_push_falls_back_on_unmapped_file() {
+  select_fixture
+  commit_file docker/Dockerfile 'FROM scratch'
+  selects "ci:fast" || return 1
+  grep -q 'no mapping for docker/Dockerfile' "${d}/why" || return 1
+  fresh
+  commit_file Makefile 'all:'
+  selects "ci:fast" || return 1
+  # One unmapped file among mapped ones is enough.
+  fresh
+  commit_file site/content/a.md 'a'
+  commit_file package.json '{}'
+  selects "ci:fast" || return 1
+  # git quotes unusual bytes, and a quoted path never matches the table.
+  fresh
+  commit_file "docs/caf$(printf '\303\251').md" 'x'
+  selects "ci:fast" || return 1
+  # Deleting a mapped file is a change too, mapped like any other.
+  fresh
+  git -C "${w}" rm -q godot/main.gd
+  git -C "${w}" commit -q -m rm
+  selects "checks lint:gd test"
+}
+
+test_pre_push_falls_back_on_verification_stack_change() {
+  select_fixture
+  for f in .mise.toml mise.lock Taskfile.yml scripts/new-tool .githooks/pre-push .github/workflows/x.yml \
+    schemas/x.schema.json .claude/settings.json AGENTS.md godot/project.godot site/.htmlvalidate.json; do
+    fresh
+    commit_file "${f}" 'x'
+    selects "ci:fast" || return 1
+  done
+  # An existing test changed: mapped (tests/shell/test_*), but the guard flags it.
+  fresh
+  commit_file tests/shell/test_existing 'test_a() { false; }'
+  selects "ci:fast" || return 1
+  grep -q 'existing test changed or removed' "${d}/why" || return 1
+  # An inline suppression added to a mapped file.
+  fresh
+  commit_file site/layouts/x.html '<!-- html-validate-disable-next -->'
+  selects "ci:fast" || return 1
+  grep -q 'inline suppression' "${d}/why"
+}
+
+test_pre_push_counts_uncommitted_and_untracked_files() {
+  select_fixture
+  # Untracked (not ignored) files are linted, so they are part of the change.
+  mkdir -p "${w}/site/content"
+  printf 'x\n' >"${w}/site/content/new.md"
+  selects "checks lint:yaml lint:schema site:static site:links" || return 1
+  printf 'x\n' >"${w}/Makefile"
+  selects "ci:fast" || return 1
+  # Uncommitted edits to tracked files, staged or not.
+  fresh
+  printf 'extends Node2D\n' >"${w}/godot/main.gd"
+  selects "checks lint:gd test" || return 1
+  git -C "${w}" add godot/main.gd
+  selects "checks lint:gd test" || return 1
+  # An untracked verification-stack file falls back.
+  fresh
+  printf 'x\n' >"${w}/Taskfile.yml"
+  selects "ci:fast" || return 1
+  # Ignored files are not part of the change (nothing lints them).
+  fresh
+  printf 'build/\n' >"${w}/.git/info/exclude"
+  mkdir -p "${w}/build"
+  printf 'x\n' >"${w}/build/out.txt"
+  selects "checks" || return 1
+  # The real index and the stash are left alone.
+  stashes="$(git -C "${w}" stash list)"
+  [ -z "${stashes}" ] || return 1
+  staged="$(git -C "${w}" diff --cached --name-only)"
+  [ -z "${staged}" ]
+}
+
+test_pre_push_falls_back_without_merge_base() {
+  select_fixture
+  commit_file site/content/a.md 'a'
+  git -C "${w}" update-ref -d refs/remotes/origin/main
+  selects "ci:fast" || return 1
+  grep -q 'no origin/main' "${d}/why" || return 1
+  # Unrelated history: no merge-base at all.
+  git -C "${w}" fetch -q origin
+  git -C "${w}" checkout -q --orphan lonely
+  git -C "${w}" commit -q -m lonely
+  selects "ci:fast" || return 1
+  grep -q 'no merge-base' "${d}/why"
+}
+
+test_pre_push_falls_back_when_pushing_a_ref_other_than_head() {
+  select_fixture
+  commit_file site/content/a.md 'a'
+  other="$(git -C "${w}" rev-parse main)"
+  this="$(git -C "${w}" rev-parse HEAD)"
+  z=0000000000000000000000000000000000000000
+  printf 'refs/heads/feature %s refs/heads/feature %s\n' "${this}" "${z}" >"${d}/stdin"
+  selects "checks lint:yaml lint:schema site:static site:links" "${d}/stdin" || return 1
+  printf 'refs/heads/main %s refs/heads/main %s\n' "${other}" "${z}" >"${d}/stdin"
+  selects "ci:fast" "${d}/stdin" || return 1
+  # Deleting a remote branch pushes no commit.
+  printf '(delete) %s refs/heads/old %s\n' "${z}" "${other}" >"${d}/stdin"
+  selects "checks lint:yaml lint:schema site:static site:links" "${d}/stdin"
+}
+
+test_pre_push_uses_mains_verification_guard() {
+  select_fixture
+  # main moves on to a guard that flags everything; the branch still carries the old one.
+  printf '#!/bin/sh\necho "verification-guard: VERIFICATION CHANGE"\necho "stricter main guard"\nexit 3\n' \
+    >"${d}/strict-guard"
+  git -C "${w}" checkout -q main
+  cp "${d}/strict-guard" "${w}/scripts/checks/verification-guard"
+  git -C "${w}" commit -q -a -m "stricter guard"
+  git -C "${w}" push -q origin main
+  git -C "${w}" checkout -q feature
+  git -C "${w}" fetch -q origin
+  commit_file site/content/a.md 'a'
+  selects "ci:fast" || return 1
+  grep -q 'stricter main guard' "${d}/why" || return 1
+  # And a branch can't loosen the guard for itself: its own copy is never run.
+  printf '#!/bin/sh\nexit 0\n' >"${w}/scripts/checks/verification-guard"
+  selects "ci:fast" || return 1
+  # Without a guard on main there is nothing to trust: full gate.
+  git -C "${w}" checkout -q main
+  git -C "${w}" rm -q scripts/checks/verification-guard
+  git -C "${w}" commit -q -m "no guard"
+  git -C "${w}" push -q origin main
+  git -C "${w}" checkout -q -f feature
+  git -C "${w}" fetch -q origin
+  selects "ci:fast"
+}
+
+test_pre_merge_commit_and_ci_run_full_gate() {
+  hook=.githooks/pre-merge-commit
+  last="$(grep -v '^[[:space:]]*#' "${hook}" | grep -v '^[[:space:]]*$' | tail -n 1)"
+  [ "${last}" = "exec scripts/hook-timing pre-merge-commit ci task ci" ] || return 1
+  ! grep -q 'pre-push-select' "${hook}" || return 1
+  run="$(yq -r '.jobs.ci.steps[] | select(.name == "task ci") | .run' .github/workflows/ci.yml)"
+  [ "${run}" = "task ci" ] || return 1
+  # The full gate is a superset of the pre-push fallback.
+  ci="$(yq -r '.tasks.ci.cmds[].task' Taskfile.yml | tr '\n' ' ')"
+  [ "${ci}" = "ci:fast site secrets " ] || return 1
+  # The pre-push fallback is the gate the hook ran before #66.
+  grep -qx 'full=ci:fast' scripts/pre-push-select
+}

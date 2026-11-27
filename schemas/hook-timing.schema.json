@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aallbrig/mechapilot/schemas/hook-timing.schema.json",
+  "title": "Git hook timing record",
+  "description": "Authored here (#66). One line of build/hook-timings.jsonl, appended by scripts/hook-timing for every run of a git hook in .githooks/ and summarized by `task hooks:timings`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hook", "tasks", "duration_s", "exit_status", "timestamp"],
+  "properties": {
+    "hook": { "enum": ["pre-commit", "pre-push", "pre-merge-commit"] },
+    "tasks": {
+      "description": "What the hook ran (pre-push: the affected-only selection, or ci:fast for the full pre-push gate).",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9:_-]*$" }
+    },
+    "duration_s": { "description": "Wall-clock seconds the hook's work took.", "type": "integer", "minimum": 0 },
+    "exit_status": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "timestamp": {
+      "description": "When the hook finished, UTC.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

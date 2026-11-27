@@ -1,0 +1,101 @@
+#!/bin/sh
+# Choose the checks the pre-push hook runs (#66): only those mapped to the files
+# that differ from the merge-base with origin/main, or the full pre-push gate
+# (task ci:fast) whenever the change can't be mapped with certainty.
+#
+# Usage: scripts/pre-push-select < <git pre-push stdin>
+# Prints the task names to run, one per line. Reasons go to stderr.
+#
+# This only trims local work. pre-merge-commit and the `ci` check still run the
+# full `task ci`, and the merge gate judges only that, so nothing skipped here
+# is skipped where it counts.
+#
+# The change set is a snapshot of the working tree (tracked changes and
+# untracked files), because that is what the checks run on. It is diffed
+# against the merge-base, so commits already on main don't count. Falls back to
+# the full gate when:
+#   - origin/main or the merge-base is missing;
+#   - a ref other than HEAD is being pushed (the checks would not see it);
+#   - main's scripts/checks/verification-guard flags the change (the PR's own
+#     copy is never trusted to classify itself);
+#   - .mise.toml, mise.lock or Taskfile.yml changed;
+#   - any changed path is not in the table below. A quoted path (git quotes
+#     unusual bytes) never matches a pattern, so it falls back as well.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+full=ci:fast
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+full_gate() {
+  printf 'pre-push-select: full gate (%s)\n' "$1" >&2
+  printf '%s\n' "${full}"
+  exit 0
+}
+
+head="$(git rev-parse --verify -q 'HEAD^{commit}')" || full_gate "no HEAD commit"
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  case "${local_sha}" in
+    "" | "${zero}") ;;
+    "${head}") ;;
+    *) full_gate "pushing ${local_sha}, which is not HEAD" ;;
+  esac
+done
+
+git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null || full_gate "no origin/main"
+base="$(git merge-base refs/remotes/origin/main "${head}")" || full_gate "no merge-base with origin/main"
+
+# Snapshot the working tree as a commit object, without touching the real
+# index, the stash or any ref.
+index="$(git rev-parse --git-path index)"
+if [ -f "${index}" ]; then cp "${index}" "${work}/index"; fi
+GIT_INDEX_FILE="${work}/index" git add -A -- ":/" || full_gate "cannot snapshot the working tree"
+tree="$(GIT_INDEX_FILE="${work}/index" git write-tree)" || full_gate "cannot snapshot the working tree"
+snapshot="$(GIT_AUTHOR_NAME=pre-push GIT_AUTHOR_EMAIL=pre-push@invalid \
+  GIT_COMMITTER_NAME=pre-push GIT_COMMITTER_EMAIL=pre-push@invalid \
+  git commit-tree "${tree}" -p "${head}" -m pre-push-snapshot)" || full_gate "cannot snapshot the working tree"
+
+git show refs/remotes/origin/main:scripts/checks/verification-guard >"${work}/guard" 2>/dev/null ||
+  full_gate "origin/main has no scripts/checks/verification-guard"
+rc=0
+VERIFICATION_GUARD_BASE="${base}" VERIFICATION_GUARD_HEAD="${snapshot}" sh "${work}/guard" >"${work}/guard.out" 2>&1 || rc=$?
+case "${rc}" in
+  0) ;;
+  3)
+    reason="$(sed -n 2p "${work}/guard.out" | tr '\t' ' ' || true)"
+    full_gate "verification-stack change: ${reason}"
+    ;;
+  *) full_gate "verification guard errored (${rc})" ;;
+esac
+
+git -c core.quotePath=true diff --no-renames --name-only "${base}" "${snapshot}" >"${work}/paths"
+
+# The mapping table: path pattern -> tasks. `checks` (hygiene) always runs.
+: >"${work}/tasks"
+add() { printf '%s\n' "$@" >>"${work}/tasks"; }
+add checks
+while IFS= read -r path; do
+  case "${path}" in
+    .mise.toml | mise.lock | Taskfile.yml) full_gate "${path} changed" ;;
+    godot/*) add lint:gd test ;;
+    site/*) add lint:yaml lint:schema site:static site:links ;;
+    infra/*) add infra:validate infra:lint infra:scan ;;
+    *.sh) add lint:sh test:shell ;;
+    tests/shell/test_*) add test:shell ;;
+    tests/fixtures/*) add lint:schema test:shell ;;
+    docs/*.md | README.md | CREDITS.md | media/* | unity/*) ;;
+    *) full_gate "no mapping for ${path}" ;;
+  esac
+done <"${work}/paths"
+
+# Canonical order; `test` already runs the shell suite.
+for t in checks lint:sh lint:yaml lint:schema lint:gd infra:validate infra:lint infra:scan site:static site:links test:shell test; do
+  grep -qx "${t}" "${work}/tasks" || continue
+  if [ "${t}" = test:shell ] && grep -qx test "${work}/tasks"; then continue; fi
+  printf '%s\n' "${t}"
+done
+count="$(wc -l <"${work}/paths" | tr -d ' ' || true)"
+printf 'pre-push-select: %s changed file(s) since the merge-base with origin/main\n' "${count}" >&2

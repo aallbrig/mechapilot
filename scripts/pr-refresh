@@ -1,0 +1,88 @@
+#!/bin/sh
+# Bring a PR branch that is behind main up to date (#66): rebase it onto
+# origin/main and push with --force-with-lease, with hooks (never --no-verify).
+#
+# Usage: scripts/pr-refresh <pr-number>
+# Run it in a clean checkout of the PR's branch, at the PR's head. It refuses
+# PRs from forks, the main branch, PRs whose base is not main, and a branch that
+# moved since GitHub reported its head (the lease is that head). A rebase with
+# conflicts is aborted and nothing is pushed.
+#
+# The new head invalidates every review verdict (they name the old SHA) and
+# starts a fresh `ci` run; the merge gate needs both again.
+set -eu
+LC_ALL=C
+export LC_ALL
+# An inherited GIT_DIR (from a hook, say) must not redirect this at another repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
+
+refuse() {
+  printf 'pr:refresh: REFUSED: %s\n' "$*" >&2
+  exit 1
+}
+
+[ "$#" -eq 1 ] || {
+  printf 'usage: pr-refresh <pr-number>\n' >&2
+  exit 64
+}
+pr="$1"
+case "${pr}" in
+  "" | 0* | *[!0-9]*) refuse "not a PR number: ${pr}" ;;
+  *) ;;
+esac
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+gh pr view "${pr}" --json headRefName,headRefOid,isCrossRepository,state,baseRefName >"${work}/pr.json"
+branch="$(jq -r .headRefName "${work}/pr.json")"
+lease="$(jq -r .headRefOid "${work}/pr.json")"
+cross="$(jq -r .isCrossRepository "${work}/pr.json")"
+state="$(jq -r .state "${work}/pr.json")"
+base="$(jq -r .baseRefName "${work}/pr.json")"
+
+[ "${cross}" = false ] || refuse "PR #${pr} is from a fork; only same-repository branches are refreshed"
+[ "${state}" = OPEN ] || refuse "PR #${pr} is ${state}"
+[ "${base}" = main ] || refuse "PR #${pr} targets ${base}, not main"
+case "${branch}" in
+  main | HEAD | -* | "") refuse "will not rewrite the branch '${branch}'" ;;
+  *) ;;
+esac
+git check-ref-format "refs/heads/${branch}" || refuse "not a valid branch name: ${branch}"
+case "${lease}" in
+  *[!0-9a-f]*) refuse "bad head SHA from GitHub" ;;
+  *) ;;
+esac
+[ "${#lease}" -eq 40 ] || refuse "bad head SHA from GitHub"
+
+current="$(git symbolic-ref --quiet --short HEAD)" || refuse "HEAD is detached; check out ${branch} first"
+[ "${current}" = "${branch}" ] || refuse "this checkout is on ${current}; check out ${branch} first"
+dirty="$(git status --porcelain --untracked-files=no)"
+[ -z "${dirty}" ] || refuse "the working tree has uncommitted changes"
+
+git fetch --quiet origin "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+remote_head="$(git rev-parse "refs/remotes/origin/${branch}")"
+[ "${remote_head}" = "${lease}" ] || refuse "origin/${branch} is ${remote_head}, but GitHub reported ${lease}; try again"
+local_head="$(git rev-parse HEAD)"
+[ "${local_head}" = "${lease}" ] || refuse "local ${branch} is ${local_head}, not the PR head ${lease}; sync it first"
+
+if git merge-base --is-ancestor refs/remotes/origin/main HEAD; then
+  printf 'pr:refresh: PR #%s (%s) already contains origin/main; nothing to do\n' "${pr}" "${branch}"
+  exit 0
+fi
+
+if ! git rebase --quiet refs/remotes/origin/main; then
+  git rebase --abort || true
+  refuse "rebasing ${branch} onto origin/main conflicts; rebase it by hand"
+fi
+new_head="$(git rev-parse HEAD)"
+
+# The lease is the head GitHub reported: if anyone pushed since, this fails.
+if ! git push --force-with-lease="refs/heads/${branch}:${lease}" origin "HEAD:refs/heads/${branch}"; then
+  git reset --quiet --hard "${lease}"
+  refuse "push failed (the branch moved, or a hook failed); local ${branch} is back at ${lease}"
+fi
+
+printf 'pr:refresh: PR #%s (%s) rebased onto origin/main: %s -> %s\n' "${pr}" "${branch}" "${lease}" "${new_head}"
+printf 'pr:refresh: review verdicts for %s are invalidated by the new head; reviewers must review %s again, and ci re-runs on it\n' \
+  "${lease}" "${new_head}"

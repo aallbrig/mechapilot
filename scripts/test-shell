@@ -12,7 +12,7 @@ cases="$(mktemp)"
 staged_xml="$(mktemp)"
 trap 'rm -f "${cases}" "${staged_xml}"' EXIT
 # Tests must never write acceptance evidence.
-unset ACCEPTANCE_RECORD ACCEPTANCE_EVIDENCE
+unset ACCEPTANCE_RECORD ACCEPTANCE_EVIDENCE ACCEPTANCE_BINDING ACCEPTANCE_BINDING_EXPECT
 # Git hooks export GIT_DIR (and friends) pointing at the real repository. Tests
 # that run `git -C <tmpdir> init/config/commit` would then rewrite the real
 # repository's HEAD, index, refs and shared config, so drop them: every test

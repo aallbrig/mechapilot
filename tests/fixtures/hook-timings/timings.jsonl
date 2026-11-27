@@ -1,0 +1,6 @@
+{"hook":"pre-commit","tasks":["lint"],"duration_s":41,"exit_status":0,"timestamp":"2026-11-26T10:00:00Z"}
+{"hook":"pre-push","tasks":["checks","test:shell"],"duration_s":20,"exit_status":0,"timestamp":"2026-11-26T10:01:00Z"}
+{"hook":"pre-push","tasks":["ci:fast"],"duration_s":270,"exit_status":0,"timestamp":"2026-11-26T10:10:00Z"}
+{"hook":"pre-push","tasks":["checks"],"duration_s":5,"exit_status":0,"timestamp":"2026-11-26T10:12:00Z"}
+{"hook":"pre-push","tasks":["checks","lint:sh","test:shell"],"duration_s":30,"exit_status":1,"timestamp":"2026-11-26T10:13:00Z"}
+{"hook":"pre-merge-commit","tasks":["ci"],"duration_s":600,"exit_status":0,"timestamp":"2026-11-26T11:00:00Z"}

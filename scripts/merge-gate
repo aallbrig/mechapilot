@@ -80,11 +80,30 @@ else
     --jq '.[0] | select(.conclusion == "success") | .databaseId')"
   [ -n "${run_id}" ] || fail "the newest ci.yml run for ${head_sha} did not succeed"
   gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
+  # CI no longer re-runs on PR-body edits (#66), so the evidence is bound to
+  # what CI evaluated: the linked issues and the sha256 of each one's
+  # acceptance criteria as CI's verifier parsed them.
+  rerun="re-run CI so it evaluates the current text: gh run rerun ${run_id}, or push an empty commit"
+  binding="${gate}/evidence/acceptance-binding.tsv"
+  [ -f "${binding}" ] && [ ! -L "${binding}" ] || fail "the ci run recorded no acceptance binding (older ci.yml?); ${rerun}"
+  tab="$(printf '\t')"
+  if grep -Ev "^[1-9][0-9]*${tab}[0-9a-f]{64}\$" "${binding}" >/dev/null; then
+    fail "malformed acceptance binding in the ci evidence"
+  fi
+  ci_saw="$(cut -f 1 "${binding}" | sort -u | tr '\n' ' ')"
+  links_now="$(printf '%s\n' "${issues}" | sort -u | tr '\n' ' ')"
+  [ "${ci_saw}" = "${links_now}" ] ||
+    fail "linked issues changed since CI ran (CI evaluated: ${ci_saw:-none}; the PR now links: ${links_now}); ${rerun}"
   for n in ${issues}; do
     rc=0
     ACCEPTANCE_EVIDENCE="${gate}/evidence/acceptance.tsv" VERIFY_ACCEPTANCE_REF="${ref}" \
+      ACCEPTANCE_BINDING_EXPECT="${binding}" \
       "${gate}/main/scripts/verify-acceptance" "${n}" "${gate}/evidence" || rc=$?
-    [ "${rc}" -eq 0 ] || fail "acceptance criteria of #${n} not proven"
+    case "${rc}" in
+      0) ;;
+      4) fail "acceptance criteria of #${n} changed since CI evaluated them; ${rerun}" ;;
+      *) fail "acceptance criteria of #${n} not proven" ;;
+    esac
   done
 fi
 

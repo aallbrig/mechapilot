@@ -6,8 +6,8 @@
 # Every list item under "## Acceptance criteria" must end with exactly one
 # backticked check reference:
 #   `task:<target>`        `task <target>` exits 0 (setup, maintenance and
-#                          side-effecting targets such as dev, dev:stop and
-#                          autostart:* are rejected)
+#                          side-effecting targets such as dev, dev:stop,
+#                          pr:* and autostart:* are rejected)
 #   `check:<name>`         scripts/checks/<name> (tracked, executable) exits 0
 #   `test:[<suite>::]<name>` / `e2e:...`
 #                          exactly one JUnit <testcase> with that exact name (and
@@ -23,6 +23,18 @@
 #   ACCEPTANCE_EVIDENCE=<f>  nothing is executed: task:/check: refs are judged
 #                            from that recorded evidence (used by merge-gate).
 #   VERIFY_ACCEPTANCE_REF=<r> test source is read from git ref <r>, not the tree.
+#
+# Binding (#66, #36): the criteria are bound to the issue text CI evaluated.
+#   ACCEPTANCE_BINDING=<file>  append "<issue>\t<sha256>" for the acceptance
+#                            section exactly as parsed here, from this same read.
+#   ACCEPTANCE_BINDING_EXPECT=<file>
+#                            exit 4 unless <file> holds exactly one line for this
+#                            issue and its sha256 matches the section parsed here,
+#                            before anything is judged (used by merge-gate). The
+#                            check and the verdict use the same read of the body.
+# The section is every "## Acceptance criteria" heading and the lines under it
+# up to the next # or ## heading, after CR removal: the only part of the body
+# the verdict depends on. Any byte change there changes the hash.
 #
 # Only the test runners' own result files count: shell.xml and godot.xml.
 set -eu
@@ -44,12 +56,50 @@ else
   gh issue view "${issue}" --json body --jq .body | tr -d '\r' >"${work}/body"
 fi
 
-# Every list item (-, *, + or numbered) in the section counts as a criterion.
+# The acceptance section: each "## Acceptance criteria" heading and what follows
+# it, up to the next # or ## heading. Criteria are read only from this text.
 awk '
-  /^##[[:space:]]+Acceptance criteria[[:space:]]*$/ { inside = 1; next }
+  /^##[[:space:]]+Acceptance criteria[[:space:]]*$/ { inside = 1; print; next }
   /^#{1,2}[[:space:]]/ { inside = 0 }
-  inside && /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/ { print }
-' "${work}/body" >"${work}/criteria"
+  inside { print }
+' "${work}/body" >"${work}/section"
+# Every list item (-, *, + or numbered) in the section counts as a criterion.
+awk '/^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/ { print }' "${work}/section" >"${work}/criteria"
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum <"$1"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 <"$1"
+  else
+    openssl dgst -sha256 -r <"$1"
+  fi | cut -d ' ' -f 1
+}
+section_hash="$(sha256_of "${work}/section")"
+case "${section_hash}" in
+  *[!0-9a-f]*) section_hash="" ;;
+  *) ;;
+esac
+if [ "${#section_hash}" -ne 64 ]; then
+  printf 'verify-acceptance: cannot compute sha256 (need sha256sum, shasum or openssl)\n' >&2
+  exit 1
+fi
+if [ -n "${ACCEPTANCE_BINDING:-}" ]; then
+  printf '%s\t%s\n' "${issue}" "${section_hash}" >>"${ACCEPTANCE_BINDING}"
+fi
+if [ -n "${ACCEPTANCE_BINDING_EXPECT:-}" ]; then
+  # String comparison: "07" is not issue 7.
+  bound="$(awk -F '\t' -v n="${issue}" '($1 "") == (n "") { c++; h = $2 } END { if (c == 1) print h }' "${ACCEPTANCE_BINDING_EXPECT}" 2>/dev/null || true)"
+  if [ -z "${bound}" ]; then
+    printf 'verify-acceptance: issue #%s: CI recorded no single binding for its acceptance criteria\n' "${issue}" >&2
+    exit 4
+  fi
+  if [ "${bound}" != "${section_hash}" ]; then
+    printf 'verify-acceptance: issue #%s: acceptance criteria changed since CI evaluated them (CI saw sha256 %s, now %s)\n' \
+      "${issue}" "${bound}" "${section_hash}" >&2
+    exit 4
+  fi
+fi
 
 if [ ! -s "${work}/criteria" ]; then
   printf 'verify-acceptance: issue #%s has no "## Acceptance criteria" list\n' "${issue}" >&2
@@ -152,7 +202,7 @@ prove_task() {
   result=fail
   case "$1" in
     "" | *[!a-z0-9:-]* | [!a-z]*) return 0 ;;
-    default | setup | doctor | fmt | ci | ci:fast | verify:* | merge-gate | dev | dev:stop | autostart:*) return 0 ;;
+    default | setup | doctor | fmt | ci | ci:fast | verify:* | merge-gate | pr:* | dev | dev:stop | autostart:*) return 0 ;;
     *) ;;
   esac
   if [ -n "${ACCEPTANCE_EVIDENCE:-}" ]; then
@@ -161,7 +211,7 @@ prove_task() {
   fi
   rc=0
   (
-    unset ACCEPTANCE_RECORD
+    unset ACCEPTANCE_RECORD ACCEPTANCE_BINDING ACCEPTANCE_BINDING_EXPECT
     task "$1"
   ) >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass
@@ -184,7 +234,7 @@ prove_check() {
   [ "${tracked}" = "${script}" ] || return 0
   rc=0
   (
-    unset ACCEPTANCE_RECORD
+    unset ACCEPTANCE_RECORD ACCEPTANCE_BINDING ACCEPTANCE_BINDING_EXPECT
     "${script}"
   ) >"${work}/out" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && result=pass

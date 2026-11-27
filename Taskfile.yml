@@ -96,6 +96,14 @@ tasks:
         split -l 1 tests/fixtures/agent-loop/metrics.jsonl "${tmp}/event-"
         for f in "${tmp}"/event-*; do mv "${f}" "${f}.json"; done
         check-jsonschema --schemafile schemas/agent-loop-metrics-event.schema.json "${tmp}"/event-*.json
+      # Authored here: one line of build/hook-timings.jsonl (scripts/hook-timing)
+      - check-jsonschema --check-metaschema schemas/hook-timing.schema.json
+      - |
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "${tmp}"' EXIT
+        split -l 1 tests/fixtures/hook-timings/timings.jsonl "${tmp}/line-"
+        for f in "${tmp}"/line-*; do mv "${f}" "${f}.json"; done
+        check-jsonschema --schemafile schemas/hook-timing.schema.json "${tmp}"/line-*.json
       - check-jsonschema --check-metaschema schemas/tmuxinator.schema.json
       - scripts/checks/no-erb .tmuxinator.yml
       - check-jsonschema --schemafile schemas/tmuxinator.schema.json .tmuxinator.yml
@@ -199,6 +207,26 @@ tasks:
         if [ ! -d godot ]; then echo "test: no Godot project yet"; exit 0; fi
         task godot:test
       - scripts/checks/test-results-clean
+
+  test:shell:
+    desc: Run only the shell test suite (JUnit output in build/test-results/shell.xml)
+    cmds:
+      - rm -rf build/test-results
+      - mkdir -p build/test-results
+      - scripts/test-shell
+      - scripts/checks/test-results-clean
+
+  # ---- Dev loop (#66): hook timings and PR refresh ----
+
+  hooks:timings:
+    desc: Print p50/p90 run time per git hook from build/hook-timings.jsonl
+    cmds:
+      - scripts/hook-timings-report
+
+  pr:refresh:
+    desc: "Rebase a same-repo PR branch onto origin/main and push it with a lease (usage: task pr:refresh -- <pr>); invalidates its review verdicts"
+    cmds:
+      - scripts/pr-refresh {{.CLI_ARGS}}
 
   # ---- Marketing Site (site/, #30) ----
   # Hugo builds two environments into build/site/; Node tools come from

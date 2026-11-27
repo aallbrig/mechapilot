@@ -1,4 +1,8 @@
 #!/bin/sh
+# Runs only the checks the change can affect (scripts/pre-push-select), or the
+# full pre-push gate (task ci:fast) when it can't tell. This only saves local
+# time: pre-merge-commit and the `ci` check still run the full `task ci`.
+# Never bypass (--no-verify); fix the finding.
 set -eu
 # Run checks with the pinned toolchain, not whatever is on the login PATH.
 # The toolchain script is the one beside this hook, not the working tree's: in
@@ -9,5 +13,15 @@ set -eu
 # directory instead, so tests that build throwaway repos never touch this one.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
-printf 'pre-push: task ci:fast\n'
-task ci:fast
+unset HOOK_TIMING_CHILD
+# Git passes the refs being pushed on stdin.
+selected="$(scripts/pre-push-select)"
+set --
+while IFS= read -r t; do
+  [ -n "${t}" ] && set -- "$@" "${t}"
+done <<EOF
+${selected}
+EOF
+[ "$#" -gt 0 ] || set -- ci:fast
+printf 'pre-push: task %s\n' "$*"
+exec scripts/hook-timing pre-push "$*" task "$@"
