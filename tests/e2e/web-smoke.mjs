@@ -3,9 +3,10 @@
 // appears, the game prints its boot marker (the Events bus round trip ran in
 // the browser), a player can start a Run from the Boot and Title screens and
 // fly Level 1 (the game prints its play marker when the Skirmish begins; the
-// smoke then flies and fires for a while), and there are no console errors,
-// page errors or failed requests at any point, and no audio warning (audio
-// started before the first user gesture, #26).
+// smoke then flies and fires for a while, and the game must report that the
+// player fired and that the mech flew under the move input), and there are no
+// console errors, page errors or failed requests at any point, and no audio
+// warning (audio started before the first user gesture, #26).
 //
 // Usage: node tests/e2e/web-smoke.mjs <export-dir>
 import { chromium } from "playwright";
@@ -13,6 +14,8 @@ import { serveStatic } from "../../scripts/serve-static.mjs";
 
 const BOOT_MARKER = "mechapilot: boot ok";
 const PLAY_MARKER = "mechapilot: level 1 in play";
+// Printed once each by godot/game/run/play_markers.gd during the flight below.
+const FLIGHT_MARKERS = ["mechapilot: player fired", "mechapilot: player steered"];
 const BOOT_TIMEOUT_MS = Number(process.env.E2E_BOOT_TIMEOUT_MS ?? "90000");
 const SETTLE_MS = 2_000;
 // Chromium's notices for audio started before a user gesture (autoplay policy),
@@ -48,10 +51,12 @@ const browser = await chromium.launch({
 });
 let booted = false;
 let played = false;
+const seen = new Set();
 try {
   const page = await browser.newPage();
   page.on("console", (msg) => {
     const text = msg.text();
+    seen.add(text);
     console.log(`[console.${msg.type()}] ${text}`);
     if (msg.type() === "error") problems.push(`console error: ${text}`);
     if (AUDIO_WARNING.test(text)) problems.push(`audio warning (console.${msg.type()}): ${text}`);
@@ -91,6 +96,11 @@ try {
       for (const key of keys) await page.keyboard.down(key);
       await page.waitForTimeout(FLIGHT_HOLD_MS);
       for (const key of keys) await page.keyboard.up(key);
+    }
+    if (played) {
+      for (const marker of FLIGHT_MARKERS) {
+        if (!seen.has(marker)) problems.push(`no "${marker}" while flying Level 1`);
+      }
     }
   }
   await page.waitForTimeout(SETTLE_MS);

@@ -2,18 +2,54 @@ extends GdUnitTestSuite
 ## The assembled game in main.tscn (#84): the attract and flight cameras hand
 ## off with the Game State, the fight is wired to the stage's mech, and the
 ## rules' Repair Kit drops land in the sky. Driven through the Events autoload,
-## as the screens drive it.
+## as the screens and the game nodes drive it. Every store is in memory.
 
-var _main: Node
+## Fighter kills reported, at most, while filling the Boss Gauge.
+const KILL_LIMIT: int = 200
+## Game seconds the game may take to reach a Game State before the test gives up.
+## Every random decision in the game follows this seed.
+const SEED: int = 8484
+## Engine time runs this many times faster than the wall clock.
+const TIME_FACTOR: float = 8.0
+const STATE_LIMIT: float = 30.0
+
+var _main: Main
+var _phase: GameState.Phase = GameState.Phase.BOOT
+var _drops: int = 0
 
 
 func before_test() -> void:
-	_main = (load("res://main.tscn") as PackedScene).instantiate()
-	add_child(_main)
+	_main = (load("res://main.tscn") as PackedScene).instantiate() as Main
+	_main.memory_stores = true
+	_main.rng_seed = SEED
+	_phase = GameState.Phase.BOOT
+	_drops = 0
+	var subscribed: Array[int] = [
+		Events.flow.game_state_changed.connect(_on_state),
+		Events.player.repair_kit_dropped.connect(_on_drop),
+	]
+	var _ok: GdUnitAssert = assert_int(subscribed.count(OK)).is_equal(subscribed.size())
 
 
 func after_test() -> void:
+	Events.flow.game_state_changed.disconnect(_on_state)
+	Events.player.repair_kit_dropped.disconnect(_on_drop)
 	_main.free()
+
+
+func _on_state(_from: GameState.Phase, to: GameState.Phase) -> void:
+	_phase = to
+
+
+func _on_drop(_position: Vector3) -> void:
+	_drops += 1
+
+
+## Runs the game until the Game State is `phase` (or the time limit).
+func _reach(clock: TickClock, phase: GameState.Phase) -> void:
+	var start: float = clock.elapsed
+	while _phase != phase and clock.elapsed - start < STATE_LIMIT:
+		await clock.ticked
 
 
 func _stage() -> FlightStage:
@@ -38,6 +74,7 @@ func _only_current(camera: Camera3D, other: Camera3D) -> bool:
 
 
 func test_main_camera_hands_off_between_attract_and_flight() -> void:
+	add_child(_main)
 	var flight: Camera3D = _stage().camera_rig().camera()
 	var attract: Camera3D = _attract_camera()
 	var on_boot: bool = _only_current(attract, flight)
@@ -60,6 +97,7 @@ func test_main_camera_hands_off_between_attract_and_flight() -> void:
 
 
 func test_main_fights_the_stage_mech() -> void:
+	add_child(_main)
 	var player: PlayerMech = _stage().player()
 	_stage().player().position = Vector3(3.0, -2.0, 0.0)
 	var _target: GdUnitAssert = assert_vector(_run().target().position()).is_equal(
@@ -72,7 +110,27 @@ func test_main_fights_the_stage_mech() -> void:
 
 
 func test_main_drops_repair_kits_in_the_sky() -> void:
+	# The whole chain, from reported facts only: the gauge fills from shot
+	# kills, the rules summon the boss, a reported hit defeats it, and the
+	# spawn director's rule (a boss always drops a Repair Kit) puts one in the sky.
+	var runner: GdUnitSceneRunner = scene_runner(_main)
+	var _fast: GdUnitSceneRunner = runner.set_time_factor(TIME_FACTOR)
+	var clock: TickClock = TickClock.new()
+	add_child(clock)
 	Events.flow.announce_start_requested()
 	Events.flow.announce_play_requested()
-	Events.player.announce_repair_kit_dropped(Vector3(4.0, 1.0, 0.0))
-	var _one_kit: GdUnitAssert = assert_int(_stage().repair_kits().size()).is_equal(1)
+	await _reach(clock, GameState.Phase.SKIRMISH)
+	var kills: int = 0
+	while _phase == GameState.Phase.SKIRMISH and kills < KILL_LIMIT:
+		kills += 1
+		Events.enemy.announce_enemy_destroyed(
+			kills, EnemyKind.Kind.FIGHTER, Vector3.ZERO, DestroyCause.Cause.SHOT
+		)
+	await _reach(clock, GameState.Phase.BOSS_FIGHT)
+	var kits_before: int = _stage().repair_kits().size()
+	var drops_before: int = _drops
+	Events.boss.announce_boss_hit(RunRules.BOSS_ATTACK_DAMAGE_MAX * 1000, Vector3.ZERO)
+	var _cleared: GdUnitAssert = assert_int(_phase).is_equal(GameState.Phase.LEVEL_CLEAR)
+	var _decided: GdUnitAssert = assert_int(_drops - drops_before).is_equal(1)
+	clock.queue_free()
+	var _in_sky: GdUnitAssert = assert_int(_stage().repair_kits().size()).is_equal(kits_before + 1)

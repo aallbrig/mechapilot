@@ -15,6 +15,9 @@ const GAME_OVER_LIMIT: float = 300.0
 ## The Run scores at least one kill before the autopilot starts ramming, so
 ## the Game Over has a score to enter initials for.
 const KILLS_BEFORE_RAMMING: int = 3
+## Every random decision in the game (spawns) follows this seed. Frame timing
+## still varies with the machine, so the seed narrows a replay, not pins it.
+const SEED: int = 8484
 
 var _states: Array[GameState.Phase] = []
 var _intros: Array[int] = []
@@ -24,10 +27,9 @@ var _shot_kills: int = 0
 var _qualified: int = 0
 var _saved: int = 0
 var _ended: Array[RunSummary] = []
-## The Scoreboard on disk before the test: each playthrough starts from an
-## empty board (so a scoring Run always places) and puts the old one back.
-var _board: LocalDocumentStore = LocalDocumentStore.new(LocalDocumentStore.Slot.SCOREBOARD)
-var _saved_board: Dictionary = {}
+## The game under test, with every store in memory (an empty Scoreboard, so
+## a scoring Run always places; nothing under user:// is read or written).
+var _main: Main
 
 
 func before_test() -> void:
@@ -39,8 +41,9 @@ func before_test() -> void:
 	_shot_kills = 0
 	_qualified = 0
 	_saved = 0
-	_saved_board = _board.read_document()
-	var _emptied: bool = _board.write_document({})
+	_main = (load("res://main.tscn") as PackedScene).instantiate() as Main
+	_main.memory_stores = true
+	_main.rng_seed = SEED
 	var subscribed: Array[int] = [
 		Events.flow.game_state_changed.connect(_on_state),
 		Events.run.level_intro_started.connect(_on_intro),
@@ -55,7 +58,7 @@ func before_test() -> void:
 
 
 func after_test() -> void:
-	var _restored: bool = _board.write_document(_saved_board)
+	_main.free()
 	Events.flow.game_state_changed.disconnect(_on_state)
 	Events.run.level_intro_started.disconnect(_on_intro)
 	Events.run.level_cleared.disconnect(_on_cleared)
@@ -67,7 +70,7 @@ func after_test() -> void:
 
 
 func test_playthrough_clears_level_one() -> void:
-	var runner: GdUnitSceneRunner = scene_runner("res://main.tscn")
+	var runner: GdUnitSceneRunner = scene_runner(_main)
 	var _fast: GdUnitSceneRunner = runner.set_time_factor(TIME_FACTOR)
 	var pilot: Autopilot = Autopilot.new(runner.scene())
 	add_child(pilot)
@@ -101,7 +104,7 @@ func test_playthrough_clears_level_one() -> void:
 
 
 func test_playthrough_game_over_reaches_scoreboard() -> void:
-	var runner: GdUnitSceneRunner = scene_runner("res://main.tscn")
+	var runner: GdUnitSceneRunner = scene_runner(_main)
 	var _fast: GdUnitSceneRunner = runner.set_time_factor(TIME_FACTOR)
 	var pilot: Autopilot = Autopilot.new(runner.scene())
 	add_child(pilot)
@@ -120,7 +123,7 @@ func test_playthrough_game_over_reaches_scoreboard() -> void:
 	if _ended.size() == 1:
 		var _lost: GdUnitAssert = assert_bool(_ended[0].victory).is_false()
 		var _scored: GdUnitAssert = assert_int(_ended[0].score).is_greater(0)
-	# From an empty board the score places: initials are asked for and saved.
+	# From an empty in-memory board the score places: initials are asked for and saved.
 	var _asked: GdUnitAssert = assert_int(_qualified).is_equal(1)
 	var _initials: GdUnitAssert = assert_int(_saved).is_equal(1)
 

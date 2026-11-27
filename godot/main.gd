@@ -1,3 +1,4 @@
+class_name Main
 extends Node
 ## The composition root: the only script that knows the concrete classes. It
 ## builds the core/ rules on the Events bus, binds the juice and audio
@@ -10,11 +11,17 @@ extends Node
 ## The screens (ui/) and the Title's attract mode (game/attract) are composed in
 ## main.tscn and hear only the Events bus; every UI sound plays through the
 ## FeedbackRig (flow.ui_cue_requested).
-## The boot marker lets the web smoke test see the bus round trip in the
-## browser, and the play marker that a Level's Skirmish began.
+## The boot marker lets the web smoke test see the bus round trip in the browser.
 
 const BOOT_OK_MARKER: String = "mechapilot: boot ok"
-const PLAY_MARKER: String = "mechapilot: level %d in play"
+
+## True: every persisted store is kept in memory instead of user://. Tests
+## that play the whole game set it before the scene enters the tree, so a
+## playthrough never reads or writes a real Scoreboard, Settings or Intel.
+var memory_stores: bool = false
+## A seed for the rules' and the fight's random decisions (spawns, enemy speeds), or -1 for a random
+## one. Tests set it before the scene enters the tree, so a run can be replayed.
+var rng_seed: int = -1
 
 var _machine: GameStateMachine
 var _ledger: RunLedger
@@ -40,20 +47,23 @@ func _ready() -> void:
 	for problem: String in errors:
 		push_error("mechapilot: %s" % problem)
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
-	rng.randomize()
+	if rng_seed >= 0:
+		rng.seed = rng_seed
+	else:
+		rng.randomize()
 	_machine = GameStateMachine.new(Events)
 	_ledger = RunLedger.new(Events)
 	_progression = LevelProgression.new(Events, _machine, _ledger, BossHealth.new(Events), levels)
 	_director = SpawnDirector.new(Events, rng, levels)
-	_scoreboard = Scoreboard.new(Events, LocalDocumentStore.new(LocalDocumentStore.Slot.SCOREBOARD))
-	_settings = Settings.new(Events, LocalDocumentStore.new(LocalDocumentStore.Slot.SETTINGS))
+	_scoreboard = Scoreboard.new(Events, _store(LocalDocumentStore.Slot.SCOREBOARD))
+	_settings = Settings.new(Events, _store(LocalDocumentStore.Slot.SETTINGS))
 	_intel = IntelCodex.new(
 		Events,
-		LocalDocumentStore.new(LocalDocumentStore.Slot.INTEL),
+		_store(LocalDocumentStore.Slot.INTEL),
 		IntelCodex.catalog(levels),
 		IntelCodex.entries_for(levels)
 	)
-	_tutorial = TutorialProgress.new(LocalDocumentStore.new(LocalDocumentStore.Slot.TUTORIAL))
+	_tutorial = TutorialProgress.new(_store(LocalDocumentStore.Slot.TUTORIAL))
 	# Before the stores restore, so the touch sticks hear the saved opacity.
 	_touch.attach(Events, _stage.player_input(), DisplayServer.is_touchscreen_available())
 	_wire_feedback()
@@ -64,7 +74,6 @@ func _ready() -> void:
 	_tutorial.restore()
 	_run.setup(Events, rng, levels, _stage.player(), _stage.shots(), _stage.camera_rig().camera())
 	_wire_mech_feedback()
-	_check(Events.run.level_intro_completed.connect(_on_level_in_play) as Error)
 	_machine.boot()
 	if _ui.visible_screens() == [&"Boot"]:
 		print(BOOT_OK_MARKER)
@@ -88,8 +97,11 @@ func _wire_feedback() -> void:
 	_check(_feedback.camera.fov_punch_requested.connect(rig.punch_fov) as Error)
 
 
-func _on_level_in_play(level_number: int) -> void:
-	print(PLAY_MARKER % level_number)
+
+func _store(slot: LocalDocumentStore.Slot) -> DocumentStore:
+	if memory_stores:
+		return MemoryDocumentStore.new()
+	return LocalDocumentStore.new(slot)
 
 
 func _wire_mech_feedback() -> void:

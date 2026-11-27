@@ -126,3 +126,88 @@ func test_run_director_hides_indicators_outside_play() -> void:
 	var paused: bool = _h.director.indicators().is_visible_in_tree()
 	var _shown: GdUnitAssert = assert_bool(in_play).is_true()
 	var _hidden: GdUnitAssert = assert_bool(paused).is_false()
+
+
+## Strikes once a frame, from the current frame on, until a strike is counted by
+## the ledger. Returns [phantom hits (announced, armor unchanged), counted hits].
+func _strike_until_counted(seconds: float) -> Array[int]:
+	var target: CombatTarget = _h.director.target()
+	var phantom: int = 0
+	var counted: int = 0
+	for frame: int in roundi(seconds / STEP):
+		var armor_before: int = _h.run.ledger.armor()
+		var hits_before: int = _h.player_hits.size()
+		var _struck: bool = target.strike(DamageSource.Source.ENEMY_BULLET, 0, Vector3.LEFT)
+		if _h.player_hits.size() > hits_before:
+			if _h.run.ledger.armor() == armor_before:
+				phantom += 1
+			else:
+				counted += 1
+				break
+		_h.advance(STEP)
+	return [phantom, counted]
+
+
+func test_respawn_window_refuses_hits_until_the_ledger_window_ends() -> void:
+	# The mech's copy of a window must never close before the RunLedger's:
+	# otherwise strike() announces player_hit while the ledger ignores it.
+	_h.reach_skirmish()
+	var target: CombatTarget = _h.director.target()
+	var guard: int = 0
+	while not _h.run.ledger.is_down() and guard < 20:
+		var _crash: bool = target.strike(DamageSource.Source.ENEMY_COLLISION, 0, Vector3.LEFT)
+		_h.advance(RunRules.HIT_INVULNERABILITY + STEP)
+		guard += 1
+	while _h.run.ledger.is_down() and guard < 1000:
+		_h.advance(STEP)
+		guard += 1
+	var result: Array[int] = _strike_until_counted(RunRules.RESPAWN_INVULNERABILITY + 0.5)
+	var _respawned: GdUnitAssert = assert_bool(_h.mech.is_alive()).is_true()
+	var _no_phantom: GdUnitAssert = assert_int(result[0]).is_equal(0)
+	var _then_counted: GdUnitAssert = assert_int(result[1]).is_equal(1)
+
+
+func test_hit_window_refuses_hits_until_the_ledger_window_ends() -> void:
+	_h.reach_skirmish()
+	var _first: bool = _h.director.target().strike(
+		DamageSource.Source.ENEMY_BULLET, 0, Vector3.LEFT
+	)
+	_h.advance(STEP)
+	var result: Array[int] = _strike_until_counted(RunRules.HIT_INVULNERABILITY + 0.5)
+	var _no_phantom: GdUnitAssert = assert_int(result[0]).is_equal(0)
+	var _then_counted: GdUnitAssert = assert_int(result[1]).is_equal(1)
+
+
+func test_run_director_ticks_field_then_arena_then_referee() -> void:
+	_h.reach_skirmish()
+	# Field before referee: an enemy the field takes out of play this tick (it
+	# left the Play Sphere) must not take a shot sitting on it.
+	var leaving: Enemy = _h.order(
+		EnemyKind.Kind.HEAVY, PI, _h.run.levels[0].play_sphere_radius - 1.0
+	)
+	_h.mech.position = Vector3.RIGHT * 5.0
+	var _parked_shot: PlayerShot = _h.shots.fire(leaving.position, Vector3.ZERO, 1.0, 0.0)
+	var hits: Array[int] = []
+	var _heard: int = _h.bus.enemy.enemy_hit.connect(
+		func(enemy_id: int, _at: Vector3) -> void: hits.append(enemy_id)
+	)
+	_h.director.step(STEP)
+	var field_first: bool = not leaving.is_active() and hits.is_empty()
+	# Arena before referee: on the tick the boss ends its entry, a shot on its
+	# weak point already lands (an entering boss would deflect it).
+	_h.mech.position = Vector3.ZERO
+	_h.run.reach_boss_fight()
+	var boss: Boss = _h.director.arena().boss()
+	var damaged_on_entry_tick: bool = false
+	var entered: bool = false
+	var guard: int = 0
+	while not entered and guard < 1000:
+		var health_before: int = _h.run.boss_health.health()
+		var _probe: PlayerShot = _h.shots.fire(boss.weak_point(), Vector3.ZERO, STEP * 0.5, 0.0)
+		_h.director.step(STEP)
+		entered = boss.state() == Boss.State.FIGHTING
+		damaged_on_entry_tick = entered and _h.run.boss_health.health() < health_before
+		_h.shots.step(STEP)
+		guard += 1
+	var _field: GdUnitAssert = assert_bool(field_first).is_true()
+	var _arena: GdUnitAssert = assert_bool(damaged_on_entry_tick).is_true()

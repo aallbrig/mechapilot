@@ -12,6 +12,8 @@ extends Node3D
 ## The mech is seen through a PlayerTarget, so CombatTarget.strike() is the one
 ## place a hit becomes `player_hit`.
 ##
+## It also prints the PlayMarkers the web smoke test watches for.
+##
 ## Seams for the other 1.0 parts: field() and arena() carry the juice and sound
 ## hooks (enemy_burst, enemy_telegraphed, boss_entered, boss_burst), and each
 ## Enemy and Boss builds its own model, so the visual pass swaps models there.
@@ -25,6 +27,7 @@ var _field: EnemyField = EnemyField.new()
 var _arena: BossArena = BossArena.new()
 var _indicator_layer: CanvasLayer = CanvasLayer.new()
 var _indicators: OffscreenIndicators = OffscreenIndicators.new()
+var _markers: PlayMarkers = PlayMarkers.new()
 var _shots: ShotPool
 var _target: PlayerTarget
 var _phase: GameState.Phase = GameState.Phase.BOOT
@@ -43,6 +46,8 @@ func _init() -> void:
 	add_child(_arena)
 	_indicator_layer.add_child(_indicators)
 	add_child(_indicator_layer)
+	_markers.name = "PlayMarkers"
+	add_child(_markers)
 	_show_indicators(false)
 
 
@@ -62,6 +67,7 @@ func setup(
 	_arena.setup(events, levels, _field)
 	_indicators.field = _field
 	_indicators.projector = CameraProjector.new(camera)
+	_markers.setup(events, mech)
 	if events.flow.game_state_changed.connect(_on_game_state_changed) != OK:
 		push_error("RunDirector: could not hear game_state_changed")
 
