@@ -3,7 +3,7 @@ extends Node
 ## The Game Event bus, registered as the `Events` autoload. It holds no state
 ## and declares every Game Event as a typed signal, grouped into channels:
 ##
-##   Events.flow     intents from the screens and the Game State
+##   Events.flow     intents from the screens, the Game State and the input device
 ##   Events.run      the Run, its Levels, the Boss Gauge and scoring
 ##   Events.player   the player mech: shots, hits, Armor, lives, Repair Kits
 ##   Events.enemy    spawn decisions and enemy facts
@@ -52,6 +52,9 @@ class FlowChannel:
 	signal title_requested
 	## The Game State changed. At boot `from` equals `to` (the first state entered).
 	signal game_state_changed(from: GameState.Phase, to: GameState.Phase)
+	## Reported by game/: the player used a different kind of input device, so
+	## prompts and glyphs switch to it.
+	signal input_device_changed(device: InputDevice.Kind)
 
 	func announce_start_requested() -> void:
 		start_requested.emit()
@@ -79,6 +82,9 @@ class FlowChannel:
 
 	func announce_game_state_changed(from: GameState.Phase, to: GameState.Phase) -> void:
 		game_state_changed.emit(from, to)
+
+	func announce_input_device_changed(device: InputDevice.Kind) -> void:
+		input_device_changed.emit(device)
 
 
 ## The Run, its Levels, the Boss Gauge and scoring.

@@ -1,10 +1,18 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="Script" path="res://main.gd" id="1_main"]
 [ext_resource type="Script" path="res://ui/menu_screen.gd" id="2_menu"]
+[ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="3_stage"]
+[ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="4_mechfx"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_main")
+
+[node name="FlightStage" type="Node3D" parent="."]
+script = ExtResource("3_stage")
+
+[node name="MechFeedback" type="Node3D" parent="."]
+script = ExtResource("4_mechfx")
 
 [node name="MenuScreen" type="Control" parent="."]
 layout_mode = 3

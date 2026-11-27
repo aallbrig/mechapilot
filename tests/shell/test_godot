@@ -4,14 +4,16 @@
 # scripts/godot-editor (run by scripts/test-shell). Each test runs in its own
 # shell; the helpers remove their temp dirs when it exits.
 
-# A throwaway project with the real strict project.godot, Events bus and types; sets d.
+# A throwaway project with the real strict project.godot, main scene and every
+# code layer main.gd may name (so the real project compiles there); sets d.
 strict_project() {
   d="$(mktemp -d)"
   trap 'rm -rf "${d}"' EXIT
   cp godot/project.godot godot/main.gd godot/main.tscn "${d}/"
-  for dir in autoload types core game ui; do
-    mkdir -p "${d}/${dir}"
-    cp "godot/${dir}"/*.gd "${d}/${dir}/"
+  for dir in autoload types core game ui feedback; do
+    if [ -d "godot/${dir}" ]; then
+      cp -R "godot/${dir}" "${d}/${dir}"
+    fi
   done
   mkdir -p "${d}/levels"
   cp godot/levels/*.json "${d}/levels/"
