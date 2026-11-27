@@ -6,6 +6,10 @@ extends Node3D
 ## dogfight (#24) can replace the flight; the sky and camera stay. The flight
 ## re-origins every REORIGIN_DISTANCE, so coordinates stay small however long
 ## the title runs.
+## It is the Boot and Title view: main.gd shows it there (set_shown) and hides
+## the flight stage behind it. Its camera looks through the sky's own
+## Environment, so the title shows the dawn sky whichever WorldEnvironment the
+## world uses; hidden, it stops, and its camera hands the view back.
 
 ## Cruise speed of the whole flight (world units per second, along +X).
 const CRUISE_SPEED: float = 6.0
@@ -39,7 +43,28 @@ func _ready() -> void:
 		var flyer: Node3D = child as Node3D
 		if flyer != null:
 			_rest[flyer] = flyer.position
-	_sky.follow(_camera.position)
+	_camera.environment = _sky.environment()
+	set_shown(true)
+
+
+## Whether the backdrop is the view in a Game State: Boot and Title.
+static func shows_in(phase: GameState.Phase) -> bool:
+	return phase == GameState.Phase.BOOT or phase == GameState.Phase.TITLE
+
+
+## Show the backdrop and look through its camera, or hide it, stop it and let
+## another camera (the flight stage's) take the view.
+func set_shown(shown: bool) -> void:
+	visible = shown
+	process_mode = Node.PROCESS_MODE_INHERIT if shown else Node.PROCESS_MODE_DISABLED
+	_camera.current = shown
+	if shown:
+		_sky.follow(_camera.position)
+
+
+## Whether the backdrop is showing and its camera is the view.
+func is_shown() -> bool:
+	return visible and _camera.current
 
 
 ## Where the camera is (the flight moves with it).

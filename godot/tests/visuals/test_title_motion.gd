@@ -52,6 +52,24 @@ func test_title_flight_reorigins_so_coordinates_stay_bounded() -> void:
 	)
 
 
+func test_title_backdrop_owns_the_title_view_and_hands_it_back() -> void:
+	var main: Node = (load("res://main.tscn") as PackedScene).instantiate()
+	add_child(main)
+	var backdrop: TitleBackdrop = main.get_node(^"TitleBackdrop") as TitleBackdrop
+	var stage: FlightStage = main.get_node(^"FlightStage") as FlightStage
+	var title_view: bool = backdrop.is_shown() and not stage.visible
+	Events.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.LEVEL_INTRO)
+	var play_view: bool = not backdrop.is_shown() and stage.visible
+	var stopped: bool = backdrop.process_mode == Node.PROCESS_MODE_DISABLED
+	Events.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.TITLE)
+	var back_to_title: bool = backdrop.is_shown() and not stage.visible
+	main.free()
+	var _title: GdUnitAssert = assert_bool(title_view).is_true()
+	var _play: GdUnitAssert = assert_bool(play_view).is_true()
+	var _stopped: GdUnitAssert = assert_bool(stopped).is_true()
+	var _back: GdUnitAssert = assert_bool(back_to_title).is_true()
+
+
 func test_sky_shift_origin_is_seamless() -> void:
 	var sky: SkyEnvironment = SkyLibrary.instantiate(&"dawn")
 	add_child(sky)
