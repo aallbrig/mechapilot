@@ -38,6 +38,14 @@ func live_count() -> int:
 	return live
 
 
+func live_shots() -> Array[PlayerShot]:
+	var live: Array[PlayerShot] = []
+	for shot: PlayerShot in _shots:
+		if shot.is_live():
+			live.append(shot)
+	return live
+
+
 func pooled_count() -> int:
 	return _shots.size()
 
