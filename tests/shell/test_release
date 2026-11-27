@@ -959,14 +959,23 @@ test_deploy_summary_fits_the_outcome() {
 # steps from ci.yml's `Restore Godot` (restore the cache, `task
 # ci:toolchain`, save the cache) appear unchanged in release.yml, before the
 # step that runs Godot, with only actions (no run step) before them in either
-# workflow; ci:toolchain installs the pinned Godot and then the pinned
-# bubblewrap; and no other step installs either by itself.
+# workflow; ci:toolchain is defined once and has only a desc and exactly the
+# commands that install the pinned Godot and then the pinned bubblewrap (no
+# deps, platforms, status, preconditions, env or other key that could skip
+# the install or run something first); and no other step installs either by
+# itself.
 toolchain_like_ci() {
   ci_json="$(yq -o=json '.' "$1")" || return 1
   rel_json="$(yq -o=json '.' "$2")" || return 1
-  cmds="$(yq -o=json -I=0 '.tasks["ci:toolchain"].cmds' "$3")" || return 1
-  if [ "${cmds}" != '["scripts/install-godot","scripts/install-bubblewrap"]' ]; then
-    printf 'ci:toolchain runs %s\n' "${cmds}"
+  # Textually, so that a parser keeping only the last duplicate can't hide one.
+  defs="$(grep -c '^  ["'\'']\{0,1\}ci:toolchain["'\'']\{0,1\}[[:space:]]*:' "$3")" || return 1
+  if [ "${defs}" -ne 1 ]; then
+    printf 'ci:toolchain is defined %s times\n' "${defs}"
+    return 1
+  fi
+  task_def="$(yq -o=json -I=0 '.tasks["ci:toolchain"] | del(.desc)' "$3")" || return 1
+  if [ "${task_def}" != '{"cmds":["scripts/install-godot","scripts/install-bubblewrap"]}' ]; then
+    printf 'ci:toolchain is %s\n' "${task_def}"
     return 1
   fi
   printf '%s' "${ci_json}" | jq -e --argjson rel "${rel_json}" '
@@ -1070,6 +1079,21 @@ test_release_sets_up_godot_toolchain_like_ci() {
   refused task '/^      - scripts\/install-bubblewrap$/d' || return 1
   refused task '/^      - scripts\/install-bubblewrap$/a\
       - curl -o x https://example.invalid/x
+' || return 1
+  # Any other key on the task: project code first (deps), or a skipped
+  # install on Linux (platforms, status, preconditions), or a changed env.
+  for key in 'deps: [godot:import]' 'platforms: [darwin]' 'status: ["true"]' \
+    'preconditions: ["false"]' 'env: {MECHAPILOT_TOOLS: /tmp/x}' 'dir: godot' 'run: once'; do
+    refused task "/^  ci:toolchain:\$/a\\
+    ${key}
+" || return 1
+  done
+  # A second definition, which a YAML parser may silently prefer.
+  refused task '/^  godot:import:$/i\
+  ci:toolchain:\
+    cmds:\
+      - "true"\
+
 ' || return 1
   rm -rf "${d}"
 }
