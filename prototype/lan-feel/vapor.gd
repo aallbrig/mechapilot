@@ -4,8 +4,8 @@ extends Node3D
 ## thin wingtip ribbons that fade over TRAIL_LIFE. Both scale with lateral g.
 
 ## Lateral acceleration (units/s^2) where vapor starts, and where it is at full.
-const G_MIN := 22.0
-const G_FULL := 70.0
+const G_MIN := 16.5
+const G_FULL := 52.0
 const TRAIL_LIFE := 0.5
 const TRAIL_WIDTH := 0.06
 const CONE_SHADER := """

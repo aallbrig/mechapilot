@@ -6,13 +6,18 @@ extends Node3D
 
 enum State { ATTRACT, PLAY, RESPAWN, OVER }
 
-const PLAYER_SPEED := 11.0
-const DRIFT := 0.3
+## Global pace: speeds scale by this, accelerations by its square.
+const GAME_SPEED := 0.75
+const PLAYER_SPEED := 11.0 * GAME_SPEED
+## With no move input: gentle fall toward a terminal speed, and horizontal drag.
+const COAST_GRAVITY := 7.0
+const COAST_TERMINAL_FALL := 6.0
+const COAST_DRAG := 0.25
 const FIRE_INTERVAL := 0.1
-const BULLET_SPEED := 46.0
-const BULLET_LIFE := 1.4
+const BULLET_SPEED := 46.0 * GAME_SPEED
+const BULLET_LIFE := 1.4 / GAME_SPEED
 ## Downward pull on player shots, in units/s^2. 0 = laser-straight.
-const BULLET_GRAVITY := 20.0
+const BULLET_GRAVITY := 20.0 * GAME_SPEED * GAME_SPEED
 ## Share of the mech's velocity a shot inherits.
 const BULLET_INHERIT := 0.6
 const SPHERE_RADIUS := 40.0
@@ -26,6 +31,11 @@ const CAMERA_DEADZONE := 0.2
 const CAMERA_FOLLOW := 2.3
 ## Seconds of velocity the camera leads by.
 const CAMERA_LOOKAHEAD := 0.25
+## Seconds for the camera to settle the mech back to centre once its velocity is steady.
+const CAMERA_RECENTER := 1.2
+## Right-side touch: a tap is shorter and shorter-travelled than these.
+const TAP_TIME := 0.18
+const TAP_SLOP := 12.0
 const CAM_OFFSET := Vector3(0, 0, CAMERA_DISTANCE)
 const START_LIVES := 3
 const BONUS_LIFE_SCORE := 100000
@@ -43,6 +53,7 @@ const Hud := preload("res://hud.gd")
 const Menu := preload("res://menu.gd")
 const Fx := preload("res://fx.gd")
 const Vapor := preload("res://vapor.gd")
+const Bot := preload("res://bot.gd")
 const Scores := preload("res://scores.gd")
 const SKY_SHADER := preload("res://sky.gdshader")
 
@@ -107,6 +118,12 @@ var cam_vel := Vector3.ZERO
 var clock := 0.0
 var last_ticks := 0
 var mouse_aim := false
+var last_touch_time := -10.0
+var touch_aim_start := 0.0
+var touch_aim_holding := false
+var tap_shot := false
+var last_velocity := Vector3.ZERO
+var steady := 0.0
 var touch_move_id := -1
 var touch_move_origin := Vector2.ZERO
 var touch_move_vec := Vector2.ZERO
@@ -312,7 +329,7 @@ func _clear_world() -> void:
 	move_dir = Vector3(0, 1, 0)
 	aim_dir = Vector3(1, 0, 0)
 	facing = 1.0
-	velocity = move_dir * 5.0
+	velocity = Vector3(5.0 * GAME_SPEED, 0, 0)
 	cam_focus = Vector3.ZERO
 	cam_goal = Vector3.ZERO
 	cam_vel = Vector3.ZERO
@@ -386,7 +403,7 @@ func _respawn() -> void:
 	state = State.PLAY
 	player.reset()
 	player.visible = true
-	velocity = Vector3(0, 3, 0)
+	velocity = Vector3.ZERO
 	invuln = INVULN_TIME
 	hud.banner("%d LEFT" % lives if lives > 1 else "LAST LIFE", 0.8)
 
@@ -425,32 +442,65 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		menu.show_main()
 		return
+	if event is InputEventScreenTouch or event is InputEventScreenDrag:
+		last_touch_time = clock
+		mouse_aim = false
 	if event is InputEventScreenTouch:
-		var st := event as InputEventScreenTouch
-		if st.pressed:
-			if st.position.x < hud.size.x * 0.5 and touch_move_id < 0:
-				touch_move_id = st.index
-				touch_move_origin = st.position
-				touch_move_vec = Vector2.ZERO
-			elif touch_aim_id < 0:
-				touch_aim_id = st.index
-				touch_aim_origin = st.position
-				touch_aim_vec = Vector2.ZERO
-		else:
-			if st.index == touch_move_id:
-				touch_move_id = -1
-				touch_move_vec = Vector2.ZERO
-			if st.index == touch_aim_id:
-				touch_aim_id = -1
-				touch_aim_vec = Vector2.ZERO
+		_on_touch(event as InputEventScreenTouch)
 	elif event is InputEventScreenDrag:
 		var sd := event as InputEventScreenDrag
 		if sd.index == touch_move_id:
 			touch_move_vec = ((sd.position - touch_move_origin) / STICK_RANGE).limit_length(1.0)
 		elif sd.index == touch_aim_id:
 			touch_aim_vec = ((sd.position - touch_aim_origin) / STICK_RANGE).limit_length(1.0)
+			if sd.position.distance_to(touch_aim_origin) > TAP_SLOP:
+				touch_aim_holding = true
 	elif event is InputEventMouse and event.device != InputEvent.DEVICE_ID_EMULATION:
-		mouse_aim = true
+		# Browsers send compatibility mouse events after touches; ignore those.
+		if clock - last_touch_time > 1.0:
+			mouse_aim = true
+
+
+## Touches are tracked by index. Left half: move stick only, never fires.
+## Right half: a quick tap fires one shot at the tapped point; holding turns
+## into a stick anchored at the touch-down point.
+func _on_touch(st: InputEventScreenTouch) -> void:
+	if st.pressed:
+		if st.position.x < hud.size.x * 0.5:
+			if touch_move_id < 0:
+				touch_move_id = st.index
+				touch_move_origin = st.position
+				touch_move_vec = Vector2.ZERO
+		elif touch_aim_id < 0:
+			touch_aim_id = st.index
+			touch_aim_origin = st.position
+			touch_aim_vec = Vector2.ZERO
+			touch_aim_start = clock
+			touch_aim_holding = false
+		return
+	if st.index == touch_move_id:
+		touch_move_id = -1
+		touch_move_vec = Vector2.ZERO
+	elif st.index == touch_aim_id:
+		var quick := clock - touch_aim_start < TAP_TIME
+		if not touch_aim_holding and quick and st.position.distance_to(touch_aim_origin) < TAP_SLOP:
+			var hit := _screen_to_plane(st.position)
+			var to_tap := hit - player.position
+			to_tap.z = 0.0
+			if to_tap.length() > 0.3:
+				aim_dir = to_tap.normalized()
+				tap_shot = true
+		touch_aim_id = -1
+		touch_aim_vec = Vector2.ZERO
+		touch_aim_holding = false
+
+
+func _screen_to_plane(sp: Vector2) -> Vector3:
+	var ro := cam.project_ray_origin(sp)
+	var rn := cam.project_ray_normal(sp)
+	if absf(rn.z) < 0.01:
+		return player.position
+	return ro + rn * ((0.0 - ro.z) / rn.z)
 
 
 func _key_axis(neg: Key, pos: Key) -> float:
@@ -493,9 +543,11 @@ func _read_fire() -> Vector2:
 	if j.length() > 0.3:
 		mouse_aim = false
 		return j.normalized()
-	if touch_aim_id >= 0 and touch_aim_vec.length() > 0.15:
+	if touch_aim_id >= 0 and not touch_aim_holding and clock - touch_aim_start > TAP_TIME:
+		touch_aim_holding = true
+	if touch_aim_holding and touch_aim_vec.length() > 0.15:
 		return touch_aim_vec.normalized()
-	if mouse_aim:
+	if mouse_aim and touch_aim_id < 0 and clock - last_touch_time >= 1.0:
 		var mp := hud.get_viewport().get_mouse_position()
 		var ro := cam.project_ray_origin(mp)
 		var rn := cam.project_ray_normal(mp)
@@ -510,45 +562,6 @@ func _read_fire() -> Vector2:
 	if Input.is_physical_key_pressed(KEY_SPACE):
 		return Vector2(aim_dir.x, -aim_dir.y)
 	return Vector2.ZERO
-
-
-# ---------------------------------------------------------------- attract AI
-
-
-func _nearest_enemy() -> Enemy:
-	var best: Enemy = null
-	var best_d := INF
-	for e in enemies:
-		var d := e.node.position.distance_to(player.position)
-		if d < best_d:
-			best_d = d
-			best = e
-	return best
-
-
-## Circle-strafe the nearest enemy, or wander when the sky is empty.
-func _ai_move() -> Vector2:
-	var e := _nearest_enemy()
-	var goal := Vector3(sin(clock * 0.35) * 14.0, cos(clock * 0.27) * 9.0, 0)
-	if e != null:
-		var to_e := e.node.position - player.position
-		var side := Vector3(-to_e.y, to_e.x, 0).normalized() * 6.0
-		goal = e.node.position - to_e.normalized() * 10.0 + side * signf(sin(clock * 0.2))
-	var d := goal - player.position
-	return Vector2(d.x, -d.y).limit_length(1.0) if d.length() > 1.5 else Vector2.ZERO
-
-
-## Lead the target and aim above it to cancel the shot's gravity drop.
-func _ai_fire() -> Vector2:
-	var e := _nearest_enemy()
-	if e == null or sin(clock * 1.3) < -0.4:
-		return Vector2.ZERO
-	var to_e := e.node.position - player.position
-	if to_e.length() > 24.0:
-		return Vector2.ZERO
-	var t := to_e.length() / BULLET_SPEED
-	var aim := to_e + e.vel * t + Vector3(0, 0.5 * BULLET_GRAVITY * t * t, 0)
-	return Vector2(aim.x, -aim.y).normalized()
 
 
 # ---------------------------------------------------------------- loop
@@ -640,28 +653,36 @@ func _update_player(delta: float) -> void:
 	if invuln > 0.0:
 		invuln -= delta
 		player.visible = invuln <= 0.0 or fmod(invuln * 10.0, 1.0) > 0.35
-	var mv := _ai_move() if state == State.ATTRACT else _read_move()
+	var mv := Bot.move(self, clock) if state == State.ATTRACT else _read_move()
 	thrust = mv.length()
-	var target: Vector3
 	if mv.length() > 0.15:
 		move_dir = Vector3(mv.x, -mv.y, 0).normalized()
-		target = Vector3(mv.x, -mv.y, 0) * PLAYER_SPEED
+		var target := Vector3(mv.x, -mv.y, 0) * PLAYER_SPEED
+		velocity = velocity.lerp(target, 1.0 - exp(-10.0 * delta))
 	else:
-		target = move_dir * PLAYER_SPEED * DRIFT
-	velocity = velocity.lerp(target, 1.0 - exp(-10.0 * delta))
+		# Coasting: keep horizontal momentum, fall gently toward a terminal speed.
+		velocity.x *= exp(-COAST_DRAG * delta)
+		velocity.y = maxf(velocity.y - COAST_GRAVITY * delta, -COAST_TERMINAL_FALL)
 	player.position += velocity * delta
 
 	if absf(velocity.x) > 2.0 and fire_cd < -0.4:
 		facing = signf(velocity.x)
 
 	fire_cd -= delta
-	var fire := _ai_fire() if state == State.ATTRACT else _read_fire()
+	var fire := _read_fire()
+	if state == State.ATTRACT:
+		fire = Bot.fire(self, clock, BULLET_SPEED, BULLET_GRAVITY)
 	if fire.length() > 0.1:
 		aim_dir = Vector3(fire.x, -fire.y, 0).normalized()
 		if absf(aim_dir.x) > 0.2:
 			facing = signf(aim_dir.x)
 		if fire_cd <= 0.0:
 			_fire()
+	elif tap_shot:
+		if absf(aim_dir.x) > 0.2:
+			facing = signf(aim_dir.x)
+		_fire()
+	tap_shot = false
 	player.step(delta, velocity, facing, thrust)
 	vapor.update(
 		delta,
@@ -693,7 +714,7 @@ func _fire() -> void:
 	b.node.basis = Basis.looking_at(b.vel.normalized(), Vector3.BACK)
 	bullets.append(b)
 
-	velocity -= dir * 1.6
+	velocity -= dir * 1.6 * GAME_SPEED
 	player.impulse(-dir, facing)
 	cam_kick -= dir * 0.25
 	trauma = minf(trauma + 0.04, 1.0)
@@ -727,7 +748,7 @@ func _update_bullets(delta: float) -> void:
 
 func _damage(e: Enemy, dir: Vector3) -> void:
 	e.hp -= 1
-	e.vel += dir * 6.0
+	e.vel += dir * 6.0 * GAME_SPEED
 	if e.hp > 0:
 		e.flash = 0.07
 		for m in e.meshes:
@@ -819,8 +840,8 @@ func _spawn_enemy(angle: float, big: bool) -> void:
 	_add_part(e, _box(e.model, Vector3(0.28, 0.28, 0.2), Vector3(0, 0, -1.35), glow))
 	e.hp = 4 if big else 1
 	e.radius = 1.6 if big else 1.1
-	e.speed = randf_range(5.0, 7.0) if big else randf_range(6.0, 12.0)
-	e.turn = 1.5 if big else randf_range(2.0, 4.0)
+	e.speed = (randf_range(5.0, 7.0) if big else randf_range(6.0, 12.0)) * GAME_SPEED
+	e.turn = (1.5 if big else randf_range(2.0, 4.0)) * GAME_SPEED
 	e.vel = -off.normalized() * e.speed
 	e.node.scale = Vector3.ONE * 0.01
 	enemies.append(e)
@@ -914,6 +935,15 @@ func _update_camera(real_dt: float) -> void:
 		var desired := player.position + velocity * CAMERA_LOOKAHEAD
 		cam_goal.x += _deadzone_excess(desired.x - cam_goal.x, dz.x)
 		cam_goal.y += _deadzone_excess(desired.y - cam_goal.y, dz.y)
+		# Steady or slow velocity: ease the goal back so the mech returns to centre.
+		var smooth := last_velocity.lerp(velocity, 1.0 - exp(-5.0 * real_dt))
+		var accel := (smooth - last_velocity).length() / maxf(real_dt, 0.001)
+		last_velocity = smooth
+		var calm := 1.0 - clampf(accel / (20.0 * GAME_SPEED), 0.0, 1.0)
+		calm = maxf(calm, 1.0 - clampf(velocity.length() / 3.0, 0.0, 1.0))
+		steady = lerpf(steady, calm, 1.0 - exp(-4.0 * real_dt))
+		var rate := 3.0 / CAMERA_RECENTER
+		cam_goal = cam_goal.lerp(desired, (1.0 - exp(-rate * real_dt)) * steady)
 	if cam_lock:
 		cam_goal = player.position
 	var w := CAMERA_FOLLOW * (4.0 if cam_lock else 1.0)

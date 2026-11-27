@@ -135,7 +135,8 @@ func _draw() -> void:
 		for i in lives:
 			_draw_life_icon(Vector2(34 + i * 40, 34))
 	_draw_stick(game.touch_move_id, game.touch_move_origin, game.touch_move_vec)
-	_draw_stick(game.touch_aim_id, game.touch_aim_origin, game.touch_aim_vec)
+	var aim_id: int = game.touch_aim_id if game.touch_aim_holding else -1
+	_draw_stick(aim_id, game.touch_aim_origin, game.touch_aim_vec)
 
 
 func _draw_indicators(rect: Rect2) -> void:

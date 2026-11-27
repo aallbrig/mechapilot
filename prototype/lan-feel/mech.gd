@@ -346,7 +346,6 @@ func step(delta: float, velocity: Vector3, facing: float, thrust: float = 0.0) -
 	var pitch_goal := lerpf(coast_tilt, lean, fly)
 	var rate := lerpf(COAST_TILT_RATE, 9.0, fly)
 	body.rotation.x = lerpf(body.rotation.x, pitch_goal, 1.0 - exp(-rate * delta))
-	body.position.y = sin(_clock * 2.2) * 0.05 * (1.0 - fly)
 
 	var vel_lag := lerpf(COAST_VEL_LAG, THRUST_VEL_LAG, fly)
 	var acc_lag := lerpf(COAST_ACC_LAG, THRUST_ACC_LAG, fly)

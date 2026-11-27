@@ -280,8 +280,8 @@ func show_board(highlight: int = -1) -> void:
 		TweenFx.slide_in(board_rows[i], Vector2(0, 40), i * 0.04, 0.4)
 	if highlight >= 0:
 		var hl := board_rows[highlight]
-		var tw := hl.create_tween().set_ignore_time_scale(true).set_loops(3)
-		tw.tween_interval(0.5)
+		var tw := hl.create_tween().set_ignore_time_scale(true)
+		tw.tween_interval(0.45)
 		tw.tween_callback(func() -> void: TweenFx.punch_scale(hl, 0.25, 0.4))
 
 
