@@ -39,6 +39,11 @@ func _ready() -> void:
 	_on_device_changed()
 
 
+## The "MECHA FIGHTER" title treatment.
+func logo() -> TitleLogo:
+	return _logo
+
+
 func default_focus() -> Control:
 	return _play
 

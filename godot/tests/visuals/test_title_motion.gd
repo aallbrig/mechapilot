@@ -5,6 +5,10 @@ extends GdUnitTestSuite
 ## stays invisible.
 
 const LOGO: PackedScene = preload("res://ui/title/title_logo.tscn")
+## Frames to run while Boot hides the Title, and how long the Title's intro
+## takes to settle.
+const BOOT_FRAMES: int = 30
+const INTRO_SETTLE_MS: int = 1200
 ## Simulated title time: long enough to show nothing drifts.
 const LONG_RUN_SECONDS: int = 2000
 const STEP_SECONDS: float = 1.0
@@ -32,6 +36,32 @@ func test_title_logo_follows_the_reduced_motion_setting() -> void:
 	var _no_slam: GdUnitAssert = assert_bool(settled).is_true()
 	var _no_shine: GdUnitAssert = assert_bool(shine_off).is_true()
 	var _follows_back: GdUnitAssert = assert_bool(restored).is_true()
+
+
+func test_title_logo_lettering_stays_inside_its_box_after_boot() -> void:
+	var stray: Array[String] = []
+	for screen_size: Vector2 in [UiHarness.LANDSCAPE, UiHarness.PORTRAIT]:
+		# Motion on: the logo floats every frame, also while hidden behind Boot,
+		# when its box is still 0x0.
+		var h: UiHarness = UiHarness.new(screen_size, false)
+		add_child(h.host)
+		h.boot()
+		for _frame: int in BOOT_FRAMES:
+			await await_idle_frame()
+		h.bus.flow.announce_start_requested()
+		await await_millis(INTRO_SETTLE_MS)
+		var title: TitleScreen = h.screen(&"Title") as TitleScreen
+		var logo: TitleLogo = title.logo()
+		var lettering: Control = logo.get_node(^"Lettering") as Control
+		var letters: Rect2 = lettering.get_global_rect()
+		var box: Rect2 = logo.get_global_rect().grow(TitleLogo.FLOAT_AMPLITUDE + 1.0)
+		var play: Rect2 = title.default_focus().get_global_rect()
+		if not box.encloses(letters):
+			stray.append("%s: lettering %s outside its box %s" % [screen_size, letters, box])
+		if letters.end.y > play.position.y:
+			stray.append("%s: lettering %s overlaps PLAY %s" % [screen_size, letters, play])
+		h.dispose()
+	var _inside: GdUnitAssert = assert_array(stray).is_empty()
 
 
 func test_attract_flight_stays_bounded() -> void:
@@ -66,7 +96,10 @@ func test_attract_owns_the_title_view_and_hands_it_back() -> void:
 	var own_layer: bool = attract.view_layers() == 1 << (AttractDogfight.VISUAL_LAYER - 1)
 	var title_view: bool = attract.is_active() and attract.has_view()
 	Events.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.LEVEL_INTRO)
-	var handed_back: bool = not attract.is_active() and not attract.has_view()
+	var stage: FlightStage = main.get_node(^"FlightStage") as FlightStage
+	var handed_back: bool = (
+		not attract.is_active() and not attract.has_view() and stage.camera_rig().camera().current
+	)
 	Events.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.TITLE)
 	var back_to_title: bool = attract.is_active() and attract.has_view()
 	main.free()

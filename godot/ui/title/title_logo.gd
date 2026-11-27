@@ -78,7 +78,7 @@ func _apply_motion() -> void:
 			_intro.kill()
 		_lettering.scale = Vector2.ONE
 		_lettering.modulate.a = 1.0
-		_lettering.position.y = 0.0
+		_float_to(0.0)
 		_stripe.scale.x = 1.0
 	var shine: ShaderMaterial = _title.material as ShaderMaterial
 	if shine != null:
@@ -87,10 +87,22 @@ func _apply_motion() -> void:
 
 func _process(delta: float) -> void:
 	if reduced_motion:
-		_lettering.position.y = 0.0
+		_float_to(0.0)
 		return
 	_clock = fmod(_clock + delta, FLOAT_PERIOD)
-	_lettering.position.y = sin(_clock / FLOAT_PERIOD * TAU) * FLOAT_AMPLITUDE
+	_float_to(sin(_clock / FLOAT_PERIOD * TAU) * FLOAT_AMPLITUDE)
+
+
+## Float the lettering `rise` pixels down (negative: up) inside the logo's box.
+## The lettering is anchored to the whole box, so it moves through its offsets:
+## writing its position instead would turn the box's size at that moment into
+## offsets (a 0x0 box while hidden behind Boot left the lettering sliding under
+## the menu once the Title appeared).
+func _float_to(rise: float) -> void:
+	_lettering.offset_left = 0.0
+	_lettering.offset_right = 0.0
+	_lettering.offset_top = rise
+	_lettering.offset_bottom = rise
 
 
 ## Pop the title in: it grows from small and faded to its place, then the

@@ -215,7 +215,7 @@ func _fire() -> void:
 	shot.mesh = _shot_mesh
 	shot.material_override = _material(SHOT_COLOR)
 	shot.position = _mech.position
-	shot.layers = _layer_mask()
+	shot.layers = layer_mask()
 	add_child(shot)
 	_shots.append(shot)
 	# Aim a little high: the shots drop, like the player's.
@@ -253,7 +253,7 @@ func _destroy(i: int) -> void:
 	blast.mesh = SphereMesh.new()
 	blast.material_override = _material(BLAST_COLOR)
 	blast.position = _enemies[i].position
-	blast.layers = _layer_mask()
+	blast.layers = layer_mask()
 	add_child(blast)
 	var tween: Tween = blast.create_tween().set_parallel(true)
 	var _grow: PropertyTweener = tween.tween_property(
@@ -281,7 +281,7 @@ func _nearest_enemy() -> EnemyVisual:
 func _build_world() -> void:
 	_camera = Camera3D.new()
 	_camera.position = CAMERA_POSITION
-	_camera.cull_mask = _layer_mask()
+	_camera.cull_mask = layer_mask()
 	add_child(_camera)
 	_sky = SkyLibrary.instantiate(SKY_ID)
 	add_child(_sky)
@@ -289,19 +289,20 @@ func _build_world() -> void:
 	# dawn sky whichever WorldEnvironment the world uses, and the sky's sun
 	# lights only the attract scene.
 	_camera.environment = _sky.environment()
-	_sky.sun().light_cull_mask = _layer_mask()
+	_sky.sun().light_cull_mask = layer_mask()
 
 
 ## Move every visual node below `node` onto the attract scene's own layer.
 static func _put_on_layer(node: Node) -> void:
 	var visual: VisualInstance3D = node as VisualInstance3D
 	if visual != null:
-		visual.layers = _layer_mask()
+		visual.layers = layer_mask()
 	for child: Node in node.get_children():
 		_put_on_layer(child)
 
 
-static func _layer_mask() -> int:
+## The visual-layer bit of the attract scene (other lights leave it alone).
+static func layer_mask() -> int:
 	return 1 << (VISUAL_LAYER - 1)
 
 

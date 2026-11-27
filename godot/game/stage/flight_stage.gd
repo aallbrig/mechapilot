@@ -174,6 +174,8 @@ func _build_world() -> void:
 	sun.rotation_degrees = SUN_ANGLES
 	sun.light_color = SUN_COLOR
 	sun.light_energy = SUN_ENERGY
+	# The attract scene behind the Title lights itself; this sun leaves its layer.
+	sun.light_cull_mask = sun.light_cull_mask & ~AttractDogfight.layer_mask()
 	add_child(sun)
 
 
