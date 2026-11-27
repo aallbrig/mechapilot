@@ -48,6 +48,28 @@ jobs:
         with:
           cache: true
 
+      # The same three steps as ci.yml, unchanged and in the same place, right
+      # after mise and before any other repository script runs, so the cache is
+      # saved before project code runs (tests/shell/test_release checks it).
+      # The export then runs with the pinned Godot and templates under the
+      # pinned bubblewrap, exactly as CI tested it (#95).
+      - name: Restore Godot
+        id: godot-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mechapilot/godot
+          key: godot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.godot-version', '.godot-sha512sums', 'scripts/install-godot', 'scripts/lib-godot') }}
+
+      - name: Install the pinned Godot and bubblewrap
+        run: task ci:toolchain
+
+      - name: Save Godot
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mechapilot/godot
+          key: ${{ steps.godot-cache.outputs.cache-primary-key }}
+
       - name: Guard (a green ci push run on a main commit not yet released)
         id: guard
         env:

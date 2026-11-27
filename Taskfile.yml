@@ -229,6 +229,12 @@ tasks:
     cmds:
       - scripts/install-godot
 
+  ci:toolchain:
+    desc: "CI runners only: the pinned Godot and templates, then the pinned bubblewrap (ci.yml and release.yml both run this)"
+    cmds:
+      - scripts/install-godot
+      - scripts/install-bubblewrap
+
   godot:import:
     desc: Import the Godot project headless (fills godot/.godot on a fresh clone)
     cmds:

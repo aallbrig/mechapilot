@@ -1,0 +1,55 @@
+#!/bin/sh
+# Tests for scripts/install-bubblewrap (#95), with curl, sudo, uname and bwrap
+# stubbed on PATH: nothing is downloaded or installed.
+
+# stubs <dir> <deb-content>: curl writes <deb-content> to its -o file; sudo
+# and bwrap only log what they were asked to do.
+stubs() {
+  mkdir -p "$1/bin"
+  printf '%s' "$2" >"$1/deb"
+  cat >"$1/bin/curl" <<'STUB'
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) cp "${STUB_DIR}/deb" "$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+STUB
+  cat >"$1/bin/sudo" <<'STUB'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >>"${STUB_DIR}/log"
+STUB
+  cat >"$1/bin/bwrap" <<'STUB'
+#!/bin/sh
+printf 'bwrap %s\n' "$*" >>"${STUB_DIR}/log"
+STUB
+  cat >"$1/bin/uname" <<'STUB'
+#!/bin/sh
+case "$1" in
+  -s) echo Linux ;;
+  -m) echo x86_64 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$1/bin/curl" "$1/bin/sudo" "$1/bin/bwrap" "$1/bin/uname"
+  : >"$1/log"
+}
+
+test_install_bubblewrap_refuses_a_wrong_checksum() {
+  d="$(mktemp -d)"
+  stubs "${d}" "not the pinned deb"
+  ! env STUB_DIR="${d}" PATH="${d}/bin:${PATH}" GITHUB_ACTIONS=true scripts/install-bubblewrap 2>/dev/null || return 1
+  # Nothing was installed or run.
+  [ ! -s "${d}/log" ] || return 1
+  rm -rf "${d}"
+}
+
+test_install_bubblewrap_runs_only_on_github_actions() {
+  d="$(mktemp -d)"
+  stubs "${d}" "x"
+  ! env -u GITHUB_ACTIONS STUB_DIR="${d}" PATH="${d}/bin:${PATH}" scripts/install-bubblewrap 2>/dev/null || return 1
+  ! env STUB_DIR="${d}" PATH="${d}/bin:${PATH}" GITHUB_ACTIONS=1 scripts/install-bubblewrap 2>/dev/null || return 1
+  [ ! -s "${d}/log" ] || return 1
+  rm -rf "${d}"
+}
