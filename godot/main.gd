@@ -96,7 +96,10 @@ func _physics_process(delta: float) -> void:
 
 func _wire_feedback() -> void:
 	_feedback.bind(Events)
+	# Movie Maker renders at a fixed FPS: hit-stop and slow-mo count frames.
+	_feedback.time.fixed_frames = Engine.get_write_movie_path() != ""
 	_feedback.drive_engine()
+	_check(_run.field().enemy_telegraphed.connect(_feedback.sfx.play_charge) as Error)
 	var rig: CameraRig = _stage.camera_rig()
 	_check(_feedback.camera.trauma_requested.connect(rig.add_trauma) as Error)
 	_check(_feedback.camera.kick_requested.connect(rig.kick) as Error)

@@ -10,6 +10,9 @@ const LIVE_TICKS: int = 40
 ## A physics tick counts as frozen when its delta is below half a 60 Hz step.
 const FROZEN_DELTA: float = 0.5 / 60.0
 const LIVE_WAIT_MS: int = 2000
+## The frame rate of the fixed-FPS render (Movie Maker, --fixed-fps).
+const FIXED_FPS: float = 60.0
+const FRAME_LIMIT: int = 10000
 
 var _bus: EventBus
 var _time: TimeScaleDirector
@@ -128,4 +131,29 @@ func test_hitstop_outlasts_the_frame_it_starts_in() -> void:
 	killer.free()
 	var _ran: GdUnitAssert = assert_int(ticks).is_greater(LIVE_TICKS)
 	var _held: GdUnitAssert = assert_int(frozen).is_greater_equal(2)
+	var _restored: GdUnitAssert = assert_float(_time.time_scale()).is_equal(1.0)
+
+
+func test_hitstop_frame_length_correct_under_fixed_fps() -> void:
+	# Under a fixed-FPS render every frame is 1/FIXED_FPS of the video, however
+	# long it took to draw, so a kill's hit-stop must cover HITSTOP_SECONDS of
+	# frames. Emulates the engine: a frame's delta is 1/FIXED_FPS at the time
+	# scale in force when the frame began, and the kill lands mid-frame (from
+	# _physics_process), after that delta was fixed.
+	_time.fixed_frames = true
+	var frozen_frames: int = 0
+	var frames: int = 0
+	while frames < FRAME_LIMIT:
+		var scale_at_start: float = _time.time_scale()
+		if frames > 0 and scale_at_start >= 1.0:
+			break
+		if scale_at_start < 1.0:
+			frozen_frames += 1
+		if frames == 0:
+			_kill()
+		_time.frame(scale_at_start / FIXED_FPS)
+		frames += 1
+	var hitstop_frames: float = TimeScaleDirector.HITSTOP_SECONDS * FIXED_FPS
+	var _at_least: GdUnitAssert = assert_int(frozen_frames).is_greater_equal(floori(hitstop_frames))
+	var _at_most: GdUnitAssert = assert_int(frozen_frames).is_less_equal(ceili(hitstop_frames))
 	var _restored: GdUnitAssert = assert_float(_time.time_scale()).is_equal(1.0)

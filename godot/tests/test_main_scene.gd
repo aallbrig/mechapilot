@@ -14,6 +14,8 @@ const SEED: int = 8484
 ## Engine time runs this many times faster than the wall clock.
 const TIME_FACTOR: float = 8.0
 const STATE_LIMIT: float = 30.0
+## How far from the player the charging Heavy is ordered (units).
+const CHARGE_RANGE: float = 12.0
 ## Physics ticks that span at least two rendered frames at TIME_FACTOR (the
 ## engine runs up to 8 ticks a frame), so injected input is flushed and seen.
 const INPUT_TICKS: int = 24
@@ -340,3 +342,26 @@ func test_main_has_one_world_environment() -> void:
 	)
 	# The Title still shows its own sky, through the attract camera.
 	var _attract_sky: GdUnitAssert = assert_object(attract_view).is_not_null()
+
+
+func test_enemy_telegraph_plays_charge_sound() -> void:
+	# A real enemy of the assembled field charges its attack; the FeedbackRig
+	# must play the charge whine for it. Level 1's Fighters only ram, so the
+	# test orders a Heavy (it fires aimed shots) the way the spawn director does.
+	var clock: TickClock = await _start_skirmish()
+	var rig: FeedbackRig = _main.get_node("Feedback") as FeedbackRig
+	rig.unlock.unlock()
+	var telegraphs: Array[int] = [0]
+	var _heard: int = _run().field().enemy_telegraphed.connect(
+		func(_at: Vector3, _kind: EnemyKind.Kind) -> void: telegraphs[0] += 1
+	)
+	var _cleared: Array[SfxBank.Cue] = rig.sfx.take_played()
+	Events.enemy.announce_spawn_requested(
+		SpawnOrder.new(EnemyKind.Kind.HEAVY, 0.0, CHARGE_RANGE, 0.0, 1.0, 1.0, false)
+	)
+	var start: float = clock.elapsed
+	while telegraphs[0] == 0 and clock.elapsed - start < STATE_LIMIT:
+		await clock.ticked
+	var played: Array[SfxBank.Cue] = rig.sfx.take_played()
+	var _telegraphed: GdUnitAssert = assert_int(telegraphs[0]).is_greater(0)
+	var _charge: GdUnitAssert = assert_array(played).contains([SfxBank.Cue.CHARGE])

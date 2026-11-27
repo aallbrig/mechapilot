@@ -117,6 +117,12 @@ func play_blast(_at: Vector3, blast_size: float) -> void:
 	play(cue, maxf(MIN_BLAST_PITCH, 1.0 + BLAST_PITCH_PER_SIZE * (1.0 - blast_size)))
 
 
+## The charge whine of an enemy's attack telegraph (EnemyField.enemy_telegraphed,
+## which main.gd connects once it builds the field).
+func play_charge(_at: Vector3, _kind: EnemyKind.Kind) -> void:
+	play(SfxBank.Cue.CHARGE, 1.0)
+
+
 ## Run the warning beeps and the siren on by `real_delta` seconds.
 func advance(real_delta: float) -> void:
 	if _low_armor and GameState.is_play(_phase):

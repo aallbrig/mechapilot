@@ -9,6 +9,8 @@ extends Node
 ## effect counts from the moment it starts, even mid-frame (from a kill
 ## announced in _physics_process).
 ##
+## Rendering at a fixed FPS (Movie Maker, fixed_frames) it counts frames instead,
+## so a hit-stop spans HITSTOP_SECONDS of the output, not of render time.
 ## It writes Engine.time_scale only once drive_engine() is called (main.gd), so
 ## tests read time_scale() instead of the engine's.
 
@@ -27,12 +29,19 @@ const BOSS_SLOWMO_SECONDS: float = 1.6
 const BOSS_SLOWMO_SCALE: float = 0.25
 ## Real time per frame is never taken as longer than this (a stall).
 
+## Count frames instead of the wall clock: true while rendering at a fixed FPS
+## (main.gd sets it for Movie Maker; see frame()).
+var fixed_frames: bool = false
+
 var _clock: RealClock = RealClock.new()
 var _hitstop_left: float = 0.0
 var _slowmo_left: float = 0.0
 var _slowmo_length: float = 1.0
 var _slowmo_scale: float = 1.0
 var _scale: float = 1.0
+## The time scale the next frame's delta is scaled by (the one in force when
+## that frame begins).
+var _frame_scale: float = 1.0
 var _drives_engine: bool = false
 var _settings: GameSettings = GameSettings.new()
 
@@ -41,8 +50,21 @@ func _init() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
 
-func _process(_delta: float) -> void:
-	advance(_clock.step())
+func _process(delta: float) -> void:
+	frame(delta)
+
+
+## One rendered frame whose (scaled) process delta is `delta`. In normal play
+## the effects count real time (the wall clock). Rendering at a fixed FPS (Movie
+## Maker), a frame is 1/fps of the output however long it took to draw, so they
+## count frames instead: the delta unscaled by the time scale this frame began
+## with (the scale before any change made during it).
+func frame(delta: float) -> void:
+	if fixed_frames:
+		advance(delta / _frame_scale)
+	else:
+		advance(_clock.step())
+	_frame_scale = _scale
 
 
 ## Subscribe to `bus` (the Events autoload, or a test bus).
