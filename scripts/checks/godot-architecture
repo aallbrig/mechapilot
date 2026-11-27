@@ -9,8 +9,8 @@
 #              SceneTree, get_node, $Path, get_tree, add_child, ...), no engine
 #              or host access (Engine, OS, Input, Time, ClassDB), no global
 #              randomness (bare randi, randf, ..., and randomize, pick_random and
-#              shuffle in any form; inject a RandomNumberGenerator, whose methods
-#              `_rng.randf()` are allowed, so runs can be replayed), no runtime
+#              shuffle in any form; inject a RandomNumberGenerator: only its dotted
+#              method calls `_rng.randf()` are allowed, so runs can be replayed), no runtime
 #              load(), no autoload names
 #   imports    types/ <- autoload/ <- ui/, feedback/
 #              types/ <- core/ <- game/ <- main.gd
@@ -23,13 +23,15 @@
 #              "use" = a class_name declared in that layer, or a res:// path into it.
 #              core/ may name the bus's class (EventBus) for injection, never `Events`.
 #   wiring     only main.gd (and tests) construct core classes (`CoreClass.new(`)
-#   events     Game Events are emitted only through the bus's typed announce_* methods:
-#              outside autoload/events.gd, `Events.<...>.emit(` is rejected, and so is
-#              any use of a signal name declared in autoload/events.gd (its channels
-#              included) other than `<name>.connect(`, `.disconnect(` or `.is_connected(`,
-#              whatever the receiver, so an injected bus (`_events.run.x.emit(`) or an
-#              alias (`var s: Signal = ...x`) cannot skip the typed announcers; and
-#              `Signal(...)` built from a name. A local name never reuses a Game Event's.
+#   events     Game Events should be emitted only through the bus's typed announce_*
+#              methods. Outside autoload/events.gd this rejects `Events.<...>.emit(`,
+#              every occurrence of a signal name declared in autoload/events.gd (its
+#              channels included) that is not `<name>.connect(`, `.disconnect(` or
+#              `.is_connected(` (so `_events.run.x.emit(` and `var s: Signal = ...x` fail),
+#              and `Signal(...)`. It is a textual check by name, over code with comments
+#              and strings blanked: it cannot see a signal reached without its name
+#              (reflection, emit_signal and string names are rejected separately by
+#              godot-safe-api), and it forbids reusing a Game Event's name locally.
 #
 # Comments are ignored and strings are blanked before matching (scripts/lib-gdscript),
 # so neither can hide code or trip a rule.
@@ -137,9 +139,10 @@ while IFS= read -r f; do
       if grep -Ewn "${impure_words}" "${work}/code" >"${work}/hits"; then
         fail "${f}" "${layer}/ must stay pure and deterministic (no scene tree, engine, host, global RNG or load)" hit
       fi
-      # Strip member uses of the injected RNG (`_rng.randf(`, `_rng . seed =`) first,
-      # then any whole-word RNG name left is the global one (`return randf()` too).
-      sed -E "s/\\.[[:space:]]*${global_rng_words}([^A-Za-z0-9_]|\$)/.rng_member\\2/g" "${work}/code" |
+      # Only the dotted method call on the injected RNG (`_rng.randf(`) is allowed:
+      # strip those, then any whole-word RNG name left (a bare `return randf()`, a
+      # property such as `_rng.seed = 4`, a reference) is rejected.
+      sed -E "s/\\.[[:space:]]*${global_rng_words}[[:space:]]*\\(/.rng_call(/g" "${work}/code" |
         grep -Ewn "${global_rng_words}" >"${work}/hits" || true
       if [ -s "${work}/hits" ]; then
         fail "${f}" "${layer}/ must use the injected RandomNumberGenerator, not the global RNG" hit

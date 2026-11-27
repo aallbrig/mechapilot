@@ -81,7 +81,7 @@ func test_scoreboard_keeps_top_10_only() -> void:
 	for i: int in 12:
 		var _rank: int = board.submit(ScoreEntry.new("AAA", (i + 1) * 100, 1, 10.0))
 	var too_low: int = board.submit(ScoreEntry.new("AAA", 150, 1, 10.0))
-	var _ten: GdUnitAssert = assert_int(board.entries().size()).is_equal(Scoreboard.CAPACITY)
+	var _ten: GdUnitAssert = assert_int(board.entries().size()).is_equal(10)
 	var _lowest_kept: GdUnitAssert = assert_int(board.entries()[9].score).is_equal(300)
 	var _rejected: GdUnitAssert = assert_int(too_low).is_equal(-1)
 	var _zero: GdUnitAssert = assert_int(board.rank_for(0)).is_equal(-1)
