@@ -178,3 +178,87 @@ test_asset_credits_covers_every_importable_extension() {
     return 1
   }
 }
+
+test_asset_credits_rejects_an_svg_embedded_as_a_dpi_texture() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf '%s\n' '[gd_resource type="DPITexture" format=3]' '' '[resource]' \
+    '_source = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"' >"${d}/art/logo.tres"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/logo.tres: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  rm "${d}/art/logo.tres"
+  printf '%s\n' '[gd_scene format=3]' '' '[sub_resource type="DPITexture" id="1"]' \
+    '_source = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"' '' \
+    '[node name="Logo" type="Sprite2D"]' 'texture = SubResource("1")' >"${d}/art/logo.tscn"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/logo.tscn: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  d2="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |' '| @art/logo.tscn@ Logo | Kenney | CC0 1.0 |')"
+  cp "${d}/art/logo.tscn" "${d2}/art/logo.tscn"
+  scripts/checks/asset-credits "${d2}"
+}
+
+# Every Godot class deriving from Texture, AudioStream, Font, Mesh or Image
+# (including the bases), one per line.
+godot_media_classes() {
+  p="$(mktemp -d)"
+  printf 'config_version=5\n' >"${p}/project.godot"
+  printf '%s\n' 'extends SceneTree' '' '' 'func _initialize() -> void:' \
+    '	var seen: Dictionary = {}' \
+    '	for base: String in ["Texture", "AudioStream", "Font", "Mesh", "Image"]:' \
+    '		seen[base] = true' \
+    '		for c: String in ClassDB.get_inheriters_from_class(base):' \
+    '			seen[c] = true' \
+    '	print("TYPES:" + ",".join(PackedStringArray(seen.keys())))' \
+    '	quit()' >"${p}/types.gd"
+  out="$(scripts/godot --headless --editor --path "${p}" -s types.gd 2>/dev/null)" || true
+  rm -rf "${p}"
+  printf '%s\n' "${out}" | sed -n 's/^TYPES://p' | tr ',' '\n' | sort -u
+}
+
+test_asset_credits_classifies_every_media_class() {
+  classes="$(godot_media_classes)"
+  count="$(printf '%s\n' "${classes}" | grep -c .)" || true
+  # Guard against a Godot that failed to start and listed nothing.
+  [ "${count}" -ge 60 ] || {
+    printf 'only %s classes listed\n' "${count}"
+    return 1
+  }
+  listed="$(scripts/checks/asset-credits --list-types)"
+  media="$(printf '%s\n' "${listed}" | sed -n 's/^media //p' | sort)"
+  procedural="$(printf '%s\n' "${listed}" | sed -n 's/^procedural //p' | sort)"
+  both="$(printf '%s\n%s\n' "${media}" "${procedural}" | sort | uniq -d)"
+  [ -z "${both}" ] || {
+    printf 'listed as both media and procedural: %s\n' "${both}"
+    return 1
+  }
+  unclassified=""
+  for c in ${classes}; do
+    printf '%s\n%s\n' "${media}" "${procedural}" | grep -Fqx "${c}" || unclassified="${unclassified} ${c}"
+  done
+  [ -z "${unclassified}" ] || {
+    printf 'not classified as media or procedural:%s\n' "${unclassified}"
+    return 1
+  }
+  # Every media class embedded in a text resource is an asset.
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  for t in ${media}; do
+    printf '[gd_resource type="%s" format=3]\n\n[resource]\n' "${t}" >"${d}/art/embedded-${t}.tres"
+  done
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  missed=""
+  for t in ${media}; do
+    case "${out}" in
+    *"art/embedded-${t}.tres: not credited"*) ;;
+    *) missed="${missed} ${t}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'embedded media not treated as assets:%s\n' "${missed}"
+    return 1
+  }
+}

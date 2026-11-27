@@ -1,0 +1,9 @@
+# Threat model: asset credits
+
+Covers `scripts/checks/asset-credits` and `godot/CREDITS.md` (#27). The attacker is a change that ships a third-party image, sound, font, model or texture in the game without a credit row naming its source and licence, while `check:asset-credits` still passes.
+
+| ID | Attack class | Description | Found | Status | Mitigation | Proof |
+| --- | --- | --- | --- | --- | --- | --- |
+| AC-01 | Folder credit covers later files | An original-work row credited whole folders, so a third-party file added to one later passed with no row of its own. | [#91](https://github.com/aallbrig/mechapilot/pull/91) | mitigated | Only third-party rows may credit a directory; original work is credited file by file, or with no path when it ships no asset file. | `test:test_asset_credits_rejects_a_new_asset_under_an_original_work_directory` |
+| AC-02 | Unlisted media extension | Fonts and video Godot imports (`.ttc`, `.otc`, `.pfb`, `.pfm`, `.font`, `.ogv`) were not treated as assets. | [#91](https://github.com/aallbrig/mechapilot/pull/91) | mitigated | Every extension the pinned Godot can import or load is an asset, except a short list of text formats; the test asks Godot for its list. | `test:test_asset_credits_covers_every_importable_extension` |
+| AC-03 | Media embedded as an unlisted class | An SVG embedded as a `DPITexture` in a `.tres` or `.tscn` passed, because only some media classes were recognised inside text resources. | [#91](https://github.com/aallbrig/mechapilot/pull/91) | mitigated | Every Godot subclass of Texture, AudioStream, Font, Mesh and Image is classified as media or procedural; a new class fails the test until classified. | `test:test_asset_credits_classifies_every_media_class` |

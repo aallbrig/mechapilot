@@ -63,6 +63,7 @@ prefix_for() {
     infra) printf 'IN' ;;
     site) printf 'SI' ;;
     release) printf 'RD' ;;
+    asset-credits) printf 'AC' ;;
     *) printf '' ;;
   esac
 }
