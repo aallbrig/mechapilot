@@ -173,8 +173,17 @@ func test_ui_root_passes_gameplay_touches_through() -> void:
 	var skirmish: GameState.Phase = _h.run.machine.state()
 	var hud_shown: bool = _h.ui.visible_screens().has(&"Hud")
 	var play: PilotIntent = await _steer(viewport, Vector2(300.0, 500.0))
+	_h.run.fill_gauge()
+	var warning: GameState.Phase = _h.run.machine.state()
+	var banner_shown: bool = _h.ui.visible_screens().has(&"BossWarning")
+	var boss_warning: PilotIntent = await _steer(viewport, Vector2(250.0, 450.0))
 	var _in_skirmish: GdUnitAssert = assert_int(skirmish).is_equal(GameState.Phase.SKIRMISH)
 	var _with_hud: GdUnitAssert = assert_bool(hud_shown).is_true()
+	var _in_warning: GdUnitAssert = assert_int(warning).is_equal(GameState.Phase.BOSS_WARNING)
+	var _with_banner: GdUnitAssert = assert_bool(banner_shown).is_true()
+	var _warning_steers: GdUnitAssert = assert_vector(boss_warning.move).is_equal_approx(
+		Vector2.RIGHT, Vector2(0.01, 0.01)
+	)
 	var _intro_steers: GdUnitAssert = assert_vector(intro.move).is_equal_approx(
 		Vector2.RIGHT, Vector2(0.01, 0.01)
 	)
