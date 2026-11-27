@@ -127,7 +127,7 @@ static func _build() -> void:
 	drone.contact = DamageSource.Source.MISSILE
 	drone.look_scale = 0.6
 
-	var bomber: EnemyProfile = _profile(EnemyKind.Kind.BOMBER, Behaviour.CROSS, 3, 1.8)
+	var bomber: EnemyProfile = _profile(EnemyKind.Kind.BOMBER, Behaviour.CROSS, 4, 1.8)
 	bomber.speed_min = 6.0 * gs
 	bomber.speed_max = 7.0 * gs
 	bomber.turn = 1.2 * gs
