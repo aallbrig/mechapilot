@@ -1,8 +1,13 @@
 name: ci
 
 on:
+  # No `edited`: a PR-body edit (or a retarget) no longer re-runs CI (it
+  # cancelled a third of all runs). The evidence records the base it tested,
+  # the linked issues and a sha256 of each one's acceptance criteria as
+  # evaluated, and scripts/merge-gate refuses if the base is not main or
+  # anything changed since; re-run CI to re-evaluate (#66).
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
@@ -51,7 +56,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # The base this run tested (checkout merges the head into it). A
+          # retarget no longer re-runs CI, so merge-gate refuses evidence
+          # from any base but main (#66). Recorded first, for every PR, and
+          # outside build/: `task:test` criteria delete build/test-results.
+          base_rec="${RUNNER_TEMP}/acceptance-base.tsv"
+          printf '%s\t%s\n' "${BASE_REF}" "${BASE_SHA}" >"${base_rec}"
           repo_url="https://github.com/${GITHUB_REPOSITORY}/issues/"
           gh pr view "${PR_NUMBER}" --json closingIssuesReferences >"${RUNNER_TEMP}/links.json"
           foreign="$(jq -r --arg url "${repo_url}" '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${RUNNER_TEMP}/links.json")"
@@ -59,16 +72,29 @@ jobs:
           issues="$(jq -r '.closingIssuesReferences[].number' "${RUNNER_TEMP}/links.json")"
           if [ -z "${issues}" ]; then
             case "${PR_AUTHOR}" in
-              "dependabot[bot]") echo "Dependabot PR: no linked issue required."; exit 0 ;;
+              "dependabot[bot]")
+                echo "Dependabot PR: no linked issue required."
+                mkdir -p build/test-results
+                cp "${base_rec}" build/test-results/acceptance-base.tsv
+                exit 0
+                ;;
               *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
             esac
           fi
           # Record outside build/ so nothing the tests write can pre-seed it.
           record="${RUNNER_TEMP}/acceptance.tsv"
+          binding="${RUNNER_TEMP}/acceptance-binding.tsv"
           : >"${record}"
+          : >"${binding}"
           rc=0
-          for n in ${issues}; do ACCEPTANCE_RECORD="${record}" scripts/verify-acceptance "${n}" || rc=1; done
+          for n in ${issues}; do
+            ACCEPTANCE_RECORD="${record}" ACCEPTANCE_BINDING="${binding}" scripts/verify-acceptance "${n}" || rc=1
+          done
+          # Copied in last: criteria may have rebuilt build/test-results.
+          mkdir -p build/test-results
           cp "${record}" build/test-results/acceptance.tsv
+          cp "${binding}" build/test-results/acceptance-binding.tsv
+          cp "${base_rec}" build/test-results/acceptance-base.tsv
           exit "${rc}"
 
       - name: Upload test results

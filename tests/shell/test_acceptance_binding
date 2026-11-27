@@ -1,0 +1,427 @@
+#!/bin/sh
+# Tests for binding acceptance evidence to what CI evaluated (#66, #36):
+# scripts/verify-acceptance (ACCEPTANCE_BINDING / ACCEPTANCE_BINDING_EXPECT),
+# scripts/merge-gate and the ci workflow.
+
+bt="$(printf '\140')"
+
+# body <line>...: an issue body file.
+body() {
+  f="$(mktemp)"
+  printf '%s\n' "$@" >"${f}"
+  printf '%s' "${f}"
+}
+
+# Evidence that proves `check:forbidden-paths` without running anything.
+evidence_dir() {
+  e="$(mktemp -d)"
+  printf 'check\tforbidden-paths\tpass\n' >"${e}/acceptance.tsv"
+  printf '%s' "${e}"
+}
+
+# bind <issue> <body-file> <binding-file>: record as CI does (evidence mode, so
+# nothing runs); the binding line is written from the same read.
+bind() {
+  e="$(evidence_dir)"
+  ACCEPTANCE_EVIDENCE="${e}/acceptance.tsv" ACCEPTANCE_BINDING="$3" VERIFY_ACCEPTANCE_BODY_FILE="$2" \
+    scripts/verify-acceptance "$1" "${e}" >/dev/null
+}
+
+# judge <want-status> <issue> <body-file> <binding-file>: the merge gate's
+# check; succeeds when the verifier exits with <want-status>.
+judge() {
+  e="$(evidence_dir)"
+  rc=0
+  ACCEPTANCE_EVIDENCE="${e}/acceptance.tsv" ACCEPTANCE_BINDING_EXPECT="$4" VERIFY_ACCEPTANCE_BODY_FILE="$3" \
+    scripts/verify-acceptance "$2" "${e}" >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq "$1" ]
+}
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d ' ' -f 1
+}
+
+crit="- [ ] no forbidden files ${bt}check:forbidden-paths${bt}"
+
+test_verify_acceptance_records_hash_of_criteria_it_evaluated() {
+  b="$(body "# Title" "intro" "## Acceptance criteria" "" "${crit}" "prose under it" "## Notes" "- not a criterion")"
+  binding="$(mktemp)"
+  bind 7 "${b}" "${binding}" || return 1
+  # The section exactly as parsed: heading through the line before the next # or ## heading.
+  want="$(printf '%s\n' "## Acceptance criteria" "" "${crit}" "prose under it" | sha256)"
+  got="$(cat "${binding}")"
+  [ "${got}" = "$(printf '7\t%s' "${want}")" ] || return 1
+  judge 0 7 "${b}" "${binding}" || return 1
+  # Recording also happens when the criteria fail, so CI's record is complete.
+  bad="$(body "## Acceptance criteria" "- [ ] nothing proves this")"
+  ! ACCEPTANCE_BINDING="${binding}" VERIFY_ACCEPTANCE_BODY_FILE="${bad}" scripts/verify-acceptance 8 >/dev/null || return 1
+  eights="$(grep -c '^8	' "${binding}")"
+  [ "${eights}" -eq 1 ]
+}
+
+test_binding_refuses_whitespace_only_criteria_edit() {
+  b="$(body "## Acceptance criteria" "${crit}")"
+  binding="$(mktemp)"
+  bind 7 "${b}" "${binding}" || return 1
+  for edited in "${crit} " " ${crit}" "${crit}	"; do
+    e="$(body "## Acceptance criteria" "${edited}")"
+    judge 4 7 "${e}" "${binding}" || return 1
+  done
+  # A blank line added inside the section also changes what is bound.
+  e="$(body "## Acceptance criteria" "" "${crit}")"
+  judge 4 7 "${e}" "${binding}" || return 1
+  # CRs are stripped before anything is parsed, so a CRLF-only edit cannot
+  # change the verdict; it stays bound (documented, not a gap).
+  crlf="$(mktemp)"
+  printf '## Acceptance criteria\r\n%s\r\n' "${crit}" >"${crlf}"
+  judge 0 7 "${crlf}" "${binding}"
+}
+
+test_binding_refuses_heading_change_that_extends_the_section() {
+  b="$(body "## Acceptance criteria" "${crit}" "## Notes" "- [ ] extra ${bt}check:forbidden-paths${bt}")"
+  binding="$(mktemp)"
+  bind 7 "${b}" "${binding}" || return 1
+  # Demoting the next heading pulls its list into the criteria.
+  e="$(body "## Acceptance criteria" "${crit}" "### Notes" "- [ ] extra ${bt}check:forbidden-paths${bt}")"
+  judge 4 7 "${e}" "${binding}" || return 1
+  # A second acceptance section anywhere in the body is part of what is parsed.
+  e="$(body "## Acceptance criteria" "${crit}" "## Notes" "- [ ] extra ${bt}check:forbidden-paths${bt}" "## Acceptance criteria" "${crit}")"
+  judge 4 7 "${e}" "${binding}" || return 1
+  # Renaming the heading drops the section.
+  e="$(body "## Acceptance Criteria" "${crit}" "## Notes" "- [ ] extra ${bt}check:forbidden-paths${bt}")"
+  ! judge 0 7 "${e}" "${binding}" || return 1
+  # An edit inside another section cannot change the verdict, so it stays bound.
+  e="$(body "## Acceptance criteria" "${crit}" "## Notes" "- [ ] different ${bt}check:forbidden-paths${bt}")"
+  judge 0 7 "${e}" "${binding}"
+}
+
+test_binding_requires_exactly_one_entry_per_issue() {
+  b="$(body "## Acceptance criteria" "${crit}")"
+  binding="$(mktemp)"
+  bind 7 "${b}" "${binding}" || return 1
+  bind 8 "${b}" "${binding}" || return 1
+  # Several linked issues: each is checked against its own line.
+  judge 0 7 "${b}" "${binding}" || return 1
+  judge 0 8 "${b}" "${binding}" || return 1
+  # No line for the issue.
+  judge 4 9 "${b}" "${binding}" || return 1
+  # Two lines for one issue (even identical) are ambiguous.
+  dup="$(mktemp)"
+  cat "${binding}" "${binding}" >"${dup}"
+  judge 4 7 "${b}" "${dup}" || return 1
+  # Another issue's hash does not count for this one.
+  other="$(mktemp)"
+  sed 's/^8	/9	/' "${binding}" | grep '^9	' >"${other}"
+  judge 0 9 "${b}" "${other}" || return 1
+  # Issue numbers compare as strings: a line for "07" is not one for 7.
+  padded="$(mktemp)"
+  sed 's/^7	/07	/' "${binding}" | grep '^07	' >"${padded}"
+  judge 4 7 "${b}" "${padded}" || return 1
+  # A missing binding file.
+  none="$(mktemp -d)"
+  judge 4 7 "${b}" "${none}/none.tsv"
+}
+
+test_verify_acceptance_rejects_side_effecting_pr_tasks() {
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s/ran"\n' "${d}" >"${d}/bin/task"
+  chmod +x "${d}/bin/task"
+  b="$(body "## Acceptance criteria" "- [ ] refresh ${bt}task:pr:refresh${bt}")"
+  ! PATH="${d}/bin:${PATH}" VERIFY_ACCEPTANCE_BODY_FILE="${b}" scripts/verify-acceptance 0 >/dev/null || return 1
+  [ ! -e "${d}/ran" ]
+}
+
+test_acceptance_tasks_do_not_see_the_binding_path() {
+  # Code run by a task: or check: criterion must not be able to rewrite the binding.
+  d="$(mktemp -d)"
+  mkdir -p "${d}/bin"
+  cat >"${d}/bin/task" <<STUB
+#!/bin/sh
+printf '%s|%s\n' "\${ACCEPTANCE_BINDING:-unset}" "\${ACCEPTANCE_BINDING_EXPECT:-unset}" >"${d}/seen"
+STUB
+  chmod +x "${d}/bin/task"
+  b="$(body "## Acceptance criteria" "- [ ] lint ${bt}task:lint${bt}")"
+  PATH="${d}/bin:${PATH}" ACCEPTANCE_BINDING="${d}/binding.tsv" VERIFY_ACCEPTANCE_BODY_FILE="${b}" \
+    scripts/verify-acceptance 3 >/dev/null || return 1
+  seen="$(cat "${d}/seen")"
+  [ "${seen}" = "unset|unset" ] || return 1
+  lines="$(wc -l <"${d}/binding.tsv")"
+  [ "${lines}" -eq 1 ]
+}
+
+test_ci_workflow_does_not_rerun_on_pr_body_edits() {
+  wf=.github/workflows/ci.yml
+  types="$(yq -r '.on.pull_request.types[]' "${wf}")"
+  printf '%s\n' "${types}" | grep -qx synchronize || return 1
+  ! printf '%s\n' "${types}" | grep -qx edited || return 1
+  # The evidence step binds what it evaluated and ships the binding.
+  step="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .run' "${wf}")"
+  printf '%s\n' "${step}" | grep -qF "ACCEPTANCE_BINDING=\"\${binding}\" scripts/verify-acceptance" || return 1
+  printf '%s\n' "${step}" | grep -qF "cp \"\${binding}\" build/test-results/acceptance-binding.tsv" || return 1
+  # And the base it tested, from the event, before any early exit.
+  base_ref="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .env.BASE_REF' "${wf}")"
+  [ "${base_ref}" = "\${{ github.event.pull_request.base.ref }}" ] || return 1
+  base_sha="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .env.BASE_SHA' "${wf}")"
+  [ "${base_sha}" = "\${{ github.event.pull_request.base.sha }}" ] || return 1
+  # Recorded outside build/ (criteria may delete build/test-results), before any exit.
+  record_line="$(printf '%s\n' "${step}" | grep -nF ">\"\${base_rec}\"" | head -n 1 | cut -d: -f1)"
+  printf '%s\n' "${step}" | grep -qF "base_rec=\"\${RUNNER_TEMP}/acceptance-base.tsv\"" || return 1
+  first_exit="$(printf '%s\n' "${step}" | grep -n 'exit' | head -n 1 | cut -d: -f1)"
+  [ -n "${record_line}" ] && [ "${record_line}" -lt "${first_exit}" ]
+}
+
+# run_evidence_step <dir> <links-json> <author>: run ci.yml's real "Acceptance
+# evidence" script in <dir>, with a fake gh and a fake `task` whose targets
+# rebuild build/test-results as `task test` does. Sets rc.
+run_evidence_step() {
+  step="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .run' .github/workflows/ci.yml)"
+  mkdir -p "$1/scripts" "$1/bin" "$1/tmp" "$1/build/test-results"
+  cp scripts/verify-acceptance scripts/lib-tests "$1/scripts/"
+  printf '%s\n' "$2" >"$1/links.json"
+  printf '## Acceptance criteria\n- [ ] all suites %stask:test%s\n' "${bt}" "${bt}" >"$1/issue-7.md"
+  cat >"$1/bin/gh" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+  "pr view") cat "$1/links.json" ;;
+  "issue view") cat "$1/issue-\$3.md" ;;
+  *) exit 9 ;;
+esac
+EOF
+  cat >"$1/bin/task" <<'EOF'
+#!/bin/sh
+rm -rf build/test-results
+mkdir -p build/test-results
+printf '<testsuite name="shell" tests="0" failures="0">\n</testsuite>\n' >build/test-results/shell.xml
+EOF
+  chmod +x "$1/bin/gh" "$1/bin/task"
+  rc=0
+  (cd "$1" && PATH="$1/bin:${PATH}" GITHUB_REPOSITORY=owner/repo RUNNER_TEMP="$1/tmp" PR_NUMBER=1 \
+    PR_AUTHOR="$3" BASE_REF=main BASE_SHA="${A40}" sh -e -c "${step}") >"$1/out" 2>&1 || rc=$?
+}
+
+A40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+test_ci_evidence_step_keeps_base_record_through_task_test() {
+  d="$(mktemp -d)"
+  run_evidence_step "${d}" '{"closingIssuesReferences":[{"number":7,"url":"https://github.com/owner/repo/issues/7"}]}' someone
+  [ "${rc}" -eq 0 ] || {
+    cat "${d}/out"
+    return 1
+  }
+  # The criterion's `task test` deleted build/test-results mid-step; every
+  # record is still in the evidence, copied in at the end.
+  got="$(cat "${d}/build/test-results/acceptance-base.tsv")"
+  [ "${got}" = "$(printf 'main\t%s' "${A40}")" ] || return 1
+  grep -qx "task	test	pass" "${d}/build/test-results/acceptance.tsv" || return 1
+  grep -q '^7	[0-9a-f]\{64\}$' "${d}/build/test-results/acceptance-binding.tsv" || return 1
+  # Dependabot PRs, with no linked issue, record the base too.
+  d="$(mktemp -d)"
+  run_evidence_step "${d}" '{"closingIssuesReferences":[]}' 'dependabot[bot]'
+  [ "${rc}" -eq 0 ] || return 1
+  got="$(cat "${d}/build/test-results/acceptance-base.tsv")"
+  [ "${got}" = "$(printf 'main\t%s' "${A40}")" ]
+}
+
+# ---- scripts/merge-gate, end to end with a local origin and a fake gh ----
+
+# gate_fixture: sets d (fixture root), w (main checkout) and head (PR head sha).
+# The PR adds one ordinary file; issue 7 is proven by recorded evidence.
+gate_fixture() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  w="${d}/w"
+  git init -q --bare "${d}/origin.git"
+  git init -q "${w}"
+  git -C "${w}" config user.name test
+  git -C "${w}" config user.email test@invalid
+  git -C "${w}" config commit.gpgsign false
+  git -C "${w}" checkout -q -b main
+  for s in scripts/merge-gate scripts/verify-acceptance scripts/ci-verdict scripts/lib-tests \
+    scripts/checks/verification-guard scripts/review-verdicts; do
+    mkdir -p "${w}/$(dirname "${s}")"
+    cp "${root}/${s}" "${w}/${s}"
+  done
+  git -C "${w}" add -A
+  git -C "${w}" commit -q -m main
+  git -C "${w}" remote add origin "${d}/origin.git"
+  git -C "${w}" push -q origin main
+  main_sha="$(git -C "${w}" rev-parse HEAD)"
+  git -C "${w}" checkout -q -b feature
+  printf 'feature\n' >"${w}/feature.txt"
+  git -C "${w}" add feature.txt
+  git -C "${w}" commit -q -m feature
+  head="$(git -C "${w}" rev-parse HEAD)"
+  git -C "${w}" push -q origin "HEAD:refs/pull/1/head"
+  git -C "${w}" checkout -q main
+
+  s="${d}/gh"
+  mkdir -p "${s}/evidence" "${d}/bin"
+  printf '## Acceptance criteria\n%s\n' "${crit}" >"${s}/issue-7.md"
+  printf '## Acceptance criteria\n%s\n' "${crit}" >"${s}/issue-8.md"
+  printf 'check\tforbidden-paths\tpass\n' >"${s}/evidence/acceptance.tsv"
+  # The base CI tested: main, at a commit on origin/main.
+  printf 'main\t%s\n' "${main_sha}" >"${s}/evidence/acceptance-base.tsv"
+  live_base=main
+  # CI's binding, recorded by the real verifier from issue 7's body.
+  ACCEPTANCE_EVIDENCE="${s}/evidence/acceptance.tsv" ACCEPTANCE_BINDING="${s}/evidence/acceptance-binding.tsv" \
+    VERIFY_ACCEPTANCE_BODY_FILE="${s}/issue-7.md" scripts/verify-acceptance 7 "${s}/evidence" >/dev/null
+  links 7
+  printf '[{"total_count":1,"check_runs":[{"id":1,"name":"ci","app":{"slug":"github-actions"},"status":"completed","conclusion":"success","started_at":"2026-11-26T00:00:00Z"}]}]\n' >"${s}/check-runs.json"
+  cat >"${d}/bin/gh" <<EOF
+#!/bin/sh
+s="${s}"
+EOF
+  cat >>"${d}/bin/gh" <<'EOF'
+case "$1" in
+  repo) case "$*" in *owner.login*) echo owner ;; *) echo owner/repo ;; esac ;;
+  pr) cat "${s}/pr.json" ;;
+  api) cat "${s}/check-runs.json" ;;
+  issue)
+    case "$*" in
+      *"--json state"*) echo OPEN ;;
+      *"--json labels"*) echo ready-for-agent ;;
+      *"--json body"*) cat "${s}/issue-$3.md" ;;
+      *) exit 9 ;;
+    esac
+    ;;
+  run)
+    case "$2" in
+      list) echo 99 ;;
+      download)
+        dir=""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = --dir ]; then dir="$2"; fi
+          shift
+        done
+        mkdir -p "${dir}"
+        cp -R "${s}/evidence/." "${dir}/"
+        if [ -f "${s}/unreadable" ]; then chmod 000 "${dir}/acceptance-binding.tsv"; fi
+        ;;
+      *) exit 9 ;;
+    esac
+    ;;
+  *) exit 9 ;;
+esac
+EOF
+  chmod +x "${d}/bin/gh"
+}
+
+# links <issue>...: the PR's current closing references (and one passing review).
+links() {
+  refs=""
+  for n in "$@"; do
+    refs="${refs}${refs:+,}{\"number\":${n},\"url\":\"https://github.com/owner/repo/issues/${n}\"}"
+  done
+  printf '{"headRefOid":"%s","baseRefName":"%s","state":"OPEN","isDraft":false,"isCrossRepository":false,"author":{"login":"someone"},"closingIssuesReferences":[%s],"comments":[{"author":{"login":"owner"},"body":"ok\\nreview-verdict: pass sha=%s reviewer=correctness"}]}\n' \
+    "${head}" "${live_base}" "${refs}" "${head}" >"${d}/gh/pr.json"
+}
+
+run_gate() {
+  (cd "${w}" && PATH="${d}/bin:${PATH}" sh scripts/merge-gate 1) >"${d}/out" 2>&1
+}
+
+test_merge_gate_passes_when_issue_and_links_unchanged() {
+  gate_fixture
+  run_gate || {
+    cat "${d}/out"
+    return 1
+  }
+  grep -q "merge-gate: PASS: PR #1 at ${head}" "${d}/out"
+}
+
+test_merge_gate_refuses_issue_body_edited_after_ci() {
+  gate_fixture
+  # The criteria are edited after CI: a criterion is reworded.
+  printf '## Acceptance criteria\n- [ ] weaker %scheck:forbidden-paths%s\n' "${bt}" "${bt}" >"${d}/gh/issue-7.md"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: acceptance criteria of #7 changed since CI evaluated them' "${d}/out" || return 1
+  grep -q 'gh run rerun 99, or push an empty commit' "${d}/out" || return 1
+  # Restoring the exact text CI saw passes again.
+  printf '## Acceptance criteria\n%s\n' "${crit}" >"${d}/gh/issue-7.md"
+  run_gate
+}
+
+test_merge_gate_refuses_pr_links_changed_after_ci() {
+  gate_fixture
+  # Another issue is linked after CI.
+  links 7 8
+  ! run_gate || return 1
+  grep -q 'BLOCKED: linked issues changed since CI ran (CI evaluated: 7 ; the PR now links: 7 8 )' "${d}/out" || return 1
+  grep -q 'gh run rerun 99' "${d}/out" || return 1
+  # The link is swapped for a different issue.
+  links 8
+  ! run_gate || return 1
+  grep -q 'BLOCKED: linked issues changed since CI ran' "${d}/out" || return 1
+  # The PR links nothing any more.
+  links
+  ! run_gate || return 1
+  grep -q 'BLOCKED: no linked issue' "${d}/out"
+}
+
+test_merge_gate_refuses_ci_evidence_from_a_non_main_base() {
+  gate_fixture
+  base="${d}/gh/evidence/acceptance-base.tsv"
+  # A side branch that carries what main lacks (the implementation, say).
+  git -C "${w}" checkout -q -b side main
+  printf 'impl\n' >"${w}/impl.txt"
+  git -C "${w}" add impl.txt
+  git -C "${w}" commit -q -m impl
+  git -C "${w}" push -q origin side
+  side_sha="$(git -C "${w}" rev-parse HEAD)"
+  git -C "${w}" checkout -q main
+  # CI ran with the PR based on the side branch; it was then retarget to main.
+  printf 'side\t%s\n' "${side_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q "BLOCKED: the ci run tested against base 'side', not main" "${d}/out" || return 1
+  # Recorded as main, but at a commit that is not on origin/main.
+  printf 'main\t%s\n' "${side_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q "BLOCKED: the ci run's base ${side_sha} is not on origin/main" "${d}/out" || return 1
+  grep -q 'gh run rerun 99' "${d}/out" || return 1
+  # A SHA that does not exist here at all.
+  printf 'main\t%040d\n' 0 >"${base}"
+  ! run_gate || return 1
+  grep -q 'is not on origin/main' "${d}/out" || return 1
+  # No base record (a run from an older ci.yml), or a malformed one.
+  rm "${base}"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: the ci run recorded no base' "${d}/out" || return 1
+  printf 'main\t%s\nmain\t%s\n' "${main_sha}" "${main_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: malformed base record' "${d}/out" || return 1
+  # The evidence is fine but the PR itself now targets another branch.
+  printf 'main\t%s\n' "${main_sha}" >"${base}"
+  live_base=side
+  links 7
+  ! run_gate || return 1
+  grep -q 'BLOCKED: PR targets side, not main' "${d}/out" || return 1
+  # Back to main on both sides: passes.
+  live_base=main
+  links 7
+  run_gate
+}
+
+test_merge_gate_refuses_evidence_without_binding() {
+  gate_fixture
+  rm "${d}/gh/evidence/acceptance-binding.tsv"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: the ci run recorded no acceptance binding' "${d}/out" || return 1
+  # A malformed binding is refused too.
+  printf '7\tnot-a-hash\n' >"${d}/gh/evidence/acceptance-binding.tsv"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: malformed acceptance binding' "${d}/out" || return 1
+  # So is one grep cannot read (exit 2), never taken as well-formed.
+  printf '7\t%064d\n' 0 >"${d}/gh/evidence/acceptance-binding.tsv"
+  : >"${d}/gh/unreadable"
+  ! run_gate || return 1
+  rm "${d}/gh/unreadable"
+  grep -q 'BLOCKED: malformed acceptance binding' "${d}/out" || return 1
+  # So is a binding that is a symlink.
+  printf '7\t%064d\n' 0 >"${d}/real.tsv"
+  ln -s "${d}/real.tsv" "${d}/gh/evidence/acceptance-binding.tsv.link"
+  rm "${d}/gh/evidence/acceptance-binding.tsv"
+  mv "${d}/gh/evidence/acceptance-binding.tsv.link" "${d}/gh/evidence/acceptance-binding.tsv"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: the ci run recorded no acceptance binding' "${d}/out"
+}

@@ -1,0 +1,184 @@
+#!/bin/sh
+# Tests for scripts/hook-timing, the hooks that use it and scripts/hook-timings-report (#66).
+
+# timing_repo: d, a throwaway git repository to run hook-timing in.
+timing_repo() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  git init -q "${d}"
+}
+
+# timed <hook> <tasks> <command>...: run hook-timing in ${d}; sets rc.
+timed() {
+  rc=0
+  (cd "${d}" && "${root}/scripts/hook-timing" "$@") >"${d}.out" 2>&1 || rc=$?
+}
+
+test_hook_timing_appends_schema_valid_line() {
+  timing_repo
+  timed pre-push "checks test:shell" true
+  [ "${rc}" -eq 0 ] || return 1
+  timed pre-commit lint true
+  log="${d}/build/hook-timings.jsonl"
+  lines="$(wc -l <"${log}")"
+  [ "${lines}" -eq 2 ] || return 1
+  first="$(head -n 1 "${log}")"
+  printf '%s\n' "${first}" >"${d}/line.json"
+  check-jsonschema --schemafile schemas/hook-timing.schema.json "${d}/line.json" >/dev/null || return 1
+  printf '%s\n' "${first}" | jq -e '.hook == "pre-push" and .tasks == ["checks", "test:shell"]
+    and .exit_status == 0 and (.duration_s | type) == "number"' >/dev/null || return 1
+  # The schema rejects what the hook must never write.
+  printf '{"hook":"post-commit","tasks":[],"duration_s":1,"exit_status":0,"timestamp":"2026-11-26T00:00:00Z"}\n' >"${d}/bad.json"
+  ! check-jsonschema --schemafile schemas/hook-timing.schema.json "${d}/bad.json" >/dev/null 2>&1 || return 1
+  # Unknown hooks and task names that are not plain tokens are not recorded.
+  timed post-commit lint true
+  [ "${rc}" -eq 64 ] || return 1
+  timed pre-push 'x"y' true
+  [ "${rc}" -eq 0 ] || return 1
+  lines="$(wc -l <"${log}")"
+  [ "${lines}" -eq 2 ]
+}
+
+test_hook_timing_preserves_exit_status() {
+  timing_repo
+  timed pre-push checks sh -c 'exit 7'
+  [ "${rc}" -eq 7 ] || return 1
+  jq -e '.exit_status == 7' "${d}/build/hook-timings.jsonl" >/dev/null || return 1
+  # The child keeps its own set -e: a failing step stops it.
+  timed pre-push checks sh -c 'set -e; false; echo reached'
+  [ "${rc}" -ne 0 ] || return 1
+  ! grep -q reached "${d}.out" || return 1
+  # The child is told it runs under hook-timing (pre-commit re-runs itself this way).
+  cat >"${d}/probe" <<'EOF'
+#!/bin/sh
+[ "${HOOK_TIMING_CHILD:-}" = 1 ]
+EOF
+  timed pre-commit lint sh "${d}/probe"
+  [ "${rc}" -eq 0 ] || return 1
+  # A failure to record never turns a failing hook into a passing one, or the reverse.
+  rm -rf "${d}/build"
+  printf 'not a dir\n' >"${d}/build"
+  timed pre-push checks sh -c 'exit 3'
+  [ "${rc}" -eq 3 ] || return 1
+  timed pre-push checks true
+  [ "${rc}" -eq 0 ] || return 1
+  grep -q 'not recorded' "${d}.out"
+}
+
+test_hook_timing_refuses_symlinked_log() {
+  timing_repo
+  outside="$(mktemp)"
+  printf 'precious\n' >"${outside}"
+  mkdir -p "${d}/build"
+  ln -s "${outside}" "${d}/build/hook-timings.jsonl"
+  timed pre-push checks sh -c 'exit 5'
+  [ "${rc}" -eq 5 ] || return 1
+  kept="$(cat "${outside}")"
+  [ "${kept}" = precious ] || return 1
+  grep -q 'hook-timing: not recorded' "${d}.out" || return 1
+  # A symlinked build/ directory is refused too.
+  rm -rf "${d}/build"
+  elsewhere="$(mktemp -d)"
+  ln -s "${elsewhere}" "${d}/build"
+  timed pre-push checks true
+  [ "${rc}" -eq 0 ] || return 1
+  [ ! -e "${elsewhere}/hook-timings.jsonl" ] || return 1
+  # So is a log that is a directory.
+  rm "${d}/build"
+  mkdir -p "${d}/build/hook-timings.jsonl"
+  timed pre-push checks true
+  [ "${rc}" -eq 0 ] && grep -q 'not a plain file' "${d}.out"
+}
+
+# hook_repo: d (repository with this tree's hooks and the scripts they call),
+# and fake task/gitleaks/mise in ${d}.bin that log to ${d}.calls.
+hook_repo() {
+  root="$(pwd)"
+  d="$(mktemp -d)"
+  git init -q "${d}/w"
+  git -C "${d}/w" config user.name test
+  git -C "${d}/w" config user.email test@invalid
+  git -C "${d}/w" config commit.gpgsign false
+  git -C "${d}/w" checkout -q -b main
+  mkdir -p "${d}/w/.githooks" "${d}/w/scripts/checks"
+  for f in .githooks/pre-commit .githooks/pre-push .githooks/pre-merge-commit scripts/lib-toolchain \
+    scripts/hook-timing scripts/pre-push-select scripts/pre-push-run scripts/checks/verification-guard scripts/lib-paths \
+    scripts/checks/safe-filenames scripts/checks/forbidden-paths scripts/checks/large-files; do
+    cp "${root}/${f}" "${d}/w/${f}"
+  done
+  printf 'build/\n' >"${d}/w/.gitignore"
+  mkdir -p "${d}/bin"
+  for tool in task gitleaks; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >>"%s/calls"\n' "${tool}" "${d}" >"${d}/bin/${tool}"
+    chmod +x "${d}/bin/${tool}"
+  done
+  # A mise that adds nothing, so the fakes stay first on PATH.
+  printf '#!/bin/sh\nexit 0\n' >"${d}/bin/mise"
+  chmod +x "${d}/bin/mise"
+}
+
+# run_hook <hook> [args]: run one of the copied hooks in ${d}/w, output in ${d}/hook.out.
+run_hook() {
+  h="$1"
+  shift
+  (cd "${d}/w" && unset HOOK_TIMING_CHILD && PATH="${d}/bin:${PATH}" ".githooks/${h}" "$@" </dev/null) >"${d}/hook.out" 2>&1 || {
+    cat "${d}/hook.out"
+    return 1
+  }
+}
+
+test_every_hook_records_timings() {
+  hook_repo
+  w="${d}/w"
+  printf 'x\n' >"${w}/README.md"
+  git -C "${w}" add -A
+  run_hook pre-commit || return 1
+  run_hook pre-push origin url || return 1
+  run_hook pre-merge-commit || return 1
+  hooks="$(jq -r .hook "${w}/build/hook-timings.jsonl" | tr '\n' ' ')"
+  [ "${hooks}" = "pre-commit pre-push pre-merge-commit " ] || return 1
+  # What each hook ran: the commit lint, the pre-push selection (no origin/main
+  # here, so the full pre-push gate) and the full gate before a merge commit.
+  grep -qx 'task lint' "${d}/calls" || return 1
+  grep -qx 'task ci:fast' "${d}/calls" || return 1
+  grep -qx 'task ci' "${d}/calls" || return 1
+  tasks="$(jq -c .tasks "${w}/build/hook-timings.jsonl" | tr '\n' ' ')"
+  [ "${tasks}" = '["lint"] ["ci:fast"] ["ci"] ' ] || return 1
+  # A failing check fails the hook, and the failure is recorded.
+  printf '#!/bin/sh\nexit 2\n' >"${d}/bin/task"
+  ! run_hook pre-merge-commit || return 1
+  last="$(tail -n 1 "${w}/build/hook-timings.jsonl")"
+  printf '%s\n' "${last}" | jq -e '.hook == "pre-merge-commit" and .exit_status == 2' >/dev/null || return 1
+  # Every line conforms to the schema.
+  split -l 1 "${w}/build/hook-timings.jsonl" "${d}/line-"
+  for f in "${d}"/line-*; do mv "${f}" "${f}.json"; done
+  check-jsonschema --schemafile schemas/hook-timing.schema.json "${d}"/line-*.json >/dev/null
+}
+
+test_hooks_timings_reports_p50_p90_per_hook() {
+  out="$(scripts/hook-timings-report tests/fixtures/hook-timings/timings.jsonl)"
+  tab="$(printf '\t')"
+  want="$(printf 'pre-commit%sruns=1%sp50=41s%sp90=41s%sfailed=0\npre-merge-commit%sruns=1%sp50=600s%sp90=600s%sfailed=0\npre-push%sruns=4%sp50=20s%sp90=270s%sfailed=1' \
+    "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}" "${tab}")"
+  [ "${out}" = "${want}" ] || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  # Malformed lines are skipped and counted, never fatal.
+  d="$(mktemp -d)"
+  printf 'garbage\n{"hook":"pre-push","duration_s":1.5}\n{"hook":"pre-push","tasks":[],"duration_s":3,"exit_status":0}\n' >"${d}/t.jsonl"
+  out="$(scripts/hook-timings-report "${d}/t.jsonl")"
+  printf '%s\n' "${out}" | grep -q "^pre-push${tab}runs=1${tab}p50=3s${tab}p90=3s" || return 1
+  printf '%s\n' "${out}" | grep -qx 'skipped 2 malformed line(s)' || return 1
+  # No log yet.
+  scripts/hook-timings-report "${d}/none.jsonl" | grep -q 'no timings yet' || return 1
+  cmd="$(yq -r '.tasks["hooks:timings"].cmds[0]' Taskfile.yml)"
+  [ "${cmd}" = scripts/hook-timings-report ]
+}
+
+test_hook_timings_log_is_gitignored() {
+  git check-ignore -q build/hook-timings.jsonl || return 1
+  # And it is never tracked.
+  tracked="$(git ls-files -- build/)"
+  [ -z "${tracked}" ]
+}

@@ -9,8 +9,8 @@
 #
 # Only check-runs named ci from the github-actions app count, every attempt
 # included. The newest of them must have succeeded. Older cancelled runs are
-# ignored (a PR-body edit re-runs CI and cancels the in-flight run on the same
-# commit); any other older conclusion must also be success. If the pages hold
+# ignored (a re-run, or another event's run on the same commit, cancels the
+# in-flight one); any other older conclusion must also be success. If the pages hold
 # fewer runs than total_count, the answer is incomplete (fail closed).
 set -eu
 LC_ALL=C

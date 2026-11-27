@@ -1,0 +1,50 @@
+#!/bin/sh
+# Run what scripts/pre-push-select chose (#66).
+#
+# Usage: scripts/pre-push-run "<selection>"
+#   <selection>: pre-push-select's output, one entry per line: task names,
+#   then `shell-test:<file>` lines.
+# Runs `task <task>...`, then only the listed new shell test files, with their
+# JUnit output in build/pre-push-results. That output is outside
+# build/test-results, so it can never be mistaken for evidence.
+set -eu
+
+[ "$#" -eq 1 ] || {
+  printf 'usage: pre-push-run "<selection>"\n' >&2
+  exit 64
+}
+selection="$1"
+
+# The task lines, run by one `task` call (validated: they become its arguments).
+run_tasks() {
+  set --
+  while IFS= read -r line; do
+    case "${line}" in
+      "" | shell-test:*) ;;
+      *[!a-z0-9:_-]* | [!a-z]*)
+        printf 'pre-push-run: not a task name: %s\n' "${line}" >&2
+        exit 64
+        ;;
+      *) set -- "$@" "${line}" ;;
+    esac
+  done <<EOF
+${selection}
+EOF
+  [ "$#" -eq 0 ] || task "$@"
+}
+
+run_new_tests() {
+  set --
+  while IFS= read -r line; do
+    case "${line}" in
+      shell-test:*) set -- "$@" "${line#shell-test:}" ;;
+      *) ;;
+    esac
+  done <<EOF
+${selection}
+EOF
+  [ "$#" -eq 0 ] || scripts/test-shell build/pre-push-results "$@"
+}
+
+run_tasks
+run_new_tests

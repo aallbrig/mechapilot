@@ -1,0 +1,33 @@
+#!/bin/sh
+# Summarize build/hook-timings.jsonl (scripts/hook-timing): runs, p50 and p90
+# of duration_s per hook (nearest-rank), and how many runs failed.
+#
+# Usage: scripts/hook-timings-report [timings.jsonl]
+# Lines that are not JSON objects with a hook and an integer duration_s are
+# skipped and counted.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+file="${1:-build/hook-timings.jsonl}"
+if [ ! -s "${file}" ]; then
+  printf 'hooks:timings: no timings yet (%s)\n' "${file}"
+  exit 0
+fi
+
+jq -R -r -n '
+  def rank($q): (length) as $n | sort | .[((($n * $q) | ceil) - 1)];
+  [inputs | (fromjson? // null)] as $all
+  | [$all[] | select(type == "object" and (.hook | type) == "string"
+                     and (.duration_s | type) == "number" and .duration_s >= 0
+                     and .duration_s == (.duration_s | floor))] as $ok
+  | ($ok | group_by(.hook)
+     | .[]
+     | [.[0].hook, (length | tostring),
+        ("p50=" + (map(.duration_s) | rank(0.5) | tostring) + "s"),
+        ("p90=" + (map(.duration_s) | rank(0.9) | tostring) + "s"),
+        ("failed=" + (map(select(.exit_status != 0)) | length | tostring))]
+     | "\(.[0])\truns=\(.[1])\t\(.[2])\t\(.[3])\t\(.[4])"),
+    (($all | length) - ($ok | length)) as $bad
+    | if $bad > 0 then "skipped \($bad) malformed line(s)" else empty end
+' "${file}"
