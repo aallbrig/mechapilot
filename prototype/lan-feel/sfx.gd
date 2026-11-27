@@ -41,6 +41,9 @@ func _ready() -> void:
 	Events.player_died.connect(_on_player_died)
 	Events.wave_started.connect(_on_wave)
 	Events.game_started.connect(_on_game_started)
+	Events.extra_life.connect(_on_extra_life)
+	Events.ui_focus.connect(_on_ui_focus)
+	Events.ui_confirm.connect(_on_ui_confirm)
 
 
 func play(
@@ -108,3 +111,17 @@ func _on_wave(_number: int) -> void:
 
 func _on_game_started() -> void:
 	play(0.3, 220.0, 880.0, 0.4, 0.0, 0.15, 1.0)
+
+
+func _on_extra_life(_lives: int) -> void:
+	for i in 4:
+		var f := 523.0 * pow(1.26, float(i))
+		play(0.12 + i * 0.08, f, f * 1.02, 0.35, 0.0, 0.14, 1.0)
+
+
+func _on_ui_focus() -> void:
+	play(0.04, 1400.0, 1700.0, 0.3, 0.0, 0.06, 1.0)
+
+
+func _on_ui_confirm() -> void:
+	play(0.12, 600.0, 1500.0, 0.35, 0.1, 0.12, 0.8)
