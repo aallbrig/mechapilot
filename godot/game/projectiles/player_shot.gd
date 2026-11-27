@@ -32,6 +32,7 @@ func _init() -> void:
 	shape.shape = sphere
 	add_child(shape)
 	var bolt: MeshInstance3D = MeshInstance3D.new()
+	bolt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	bolt.mesh = _shared_mesh()
 	bolt.material_override = _shared_material()
 	add_child(bolt)

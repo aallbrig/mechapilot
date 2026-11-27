@@ -40,14 +40,13 @@ func burst(
 	parts: Array[MeshInstance3D], centre: Vector3, velocity: Vector3, rng: RandomNumberGenerator
 ) -> void:
 	for part: MeshInstance3D in parts:
-		var source: StandardMaterial3D = part.material_override as StandardMaterial3D
-		if source == null:
+		if part.mesh == null:
 			continue
 		var piece: Piece = Piece.new()
 		piece.node = MeshInstance3D.new()
 		piece.node.mesh = part.mesh
-		piece.material = source.duplicate() as StandardMaterial3D
-		piece.material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		piece.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		piece.material = _fading_copy(part.material_override)
 		piece.node.material_override = piece.material
 		add_child(piece.node)
 		piece.node.global_transform = part.global_transform
@@ -71,6 +70,21 @@ func burst(
 		piece.spin = rng.randf_range(SPIN.x, SPIN.y)
 		piece.life = LIFE * rng.randf_range(LIFE_SPREAD.x, LIFE_SPREAD.y)
 		_pieces.append(piece)
+
+
+## A fading material for a piece drawn with `source`: a copy of a standard
+## material, or, for a baked model piece (the shared hull shader), one that
+## takes its colours from the mesh's vertex colours as the hull does.
+static func _fading_copy(source: Material) -> StandardMaterial3D:
+	var standard: StandardMaterial3D = source as StandardMaterial3D
+	var out: StandardMaterial3D = null
+	if standard != null:
+		out = standard.duplicate() as StandardMaterial3D
+	else:
+		out = StandardMaterial3D.new()
+		out.vertex_color_use_as_albedo = true
+	out.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	return out
 
 
 func step(delta: float) -> void:

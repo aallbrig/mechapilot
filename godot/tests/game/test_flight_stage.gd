@@ -83,3 +83,28 @@ func test_main_mounts_the_mech_juice_on_the_player() -> void:
 	var _flames: GdUnitAssert = assert_int(flames).is_equal(4)
 	var _trails: GdUnitAssert = assert_int(trails).is_equal(3)
 	var _driven: GdUnitAssert = assert_float(power).is_greater(0.0)
+
+
+func test_stage_flies_under_each_levels_sky() -> void:
+	var stage: FlightStage = FlightStage.new()
+	add_child(stage)
+	var errors: PackedStringArray = PackedStringArray()
+	var levels: Array[LevelDefinition] = LevelLibrary.all_levels(errors)
+	stage.use_levels(levels)
+	var before_any: StringName = stage.sky().sky_id
+	var shown: Array[StringName] = []
+	var wanted: Array[StringName] = []
+	var lit_attract: bool = false
+	for level_number: int in range(1, levels.size() + 1):
+		Events.run.announce_level_intro_started(level_number, "", "", 0.0)
+		shown.append(stage.sky().sky_id)
+		wanted.append(levels[level_number - 1].sky_theme)
+		var sun_mask: int = stage.sky().sun().light_cull_mask
+		lit_attract = lit_attract or (sun_mask & AttractDogfight.layer_mask()) != 0
+	stage.free()
+	var _loaded: GdUnitAssert = assert_array(errors).is_empty()
+	var _default: GdUnitAssert = assert_str(String(before_any)).is_equal(
+		String(FlightStage.DEFAULT_SKY)
+	)
+	var _each_level: GdUnitAssert = assert_array(shown).is_equal(wanted)
+	var _sun_leaves_attract: GdUnitAssert = assert_bool(lit_attract).is_false()

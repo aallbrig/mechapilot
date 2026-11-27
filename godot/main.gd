@@ -22,6 +22,9 @@ var memory_stores: bool = false
 ## A seed for the rules' and the fight's random decisions (spawns, enemy speeds), or -1 for a random
 ## one. Tests set it before the scene enters the tree, so a run can be replayed.
 var rng_seed: int = -1
+## True: attach the touch controls as on a touch screen, whatever the display
+## reports (a headless test has none). Tests set it before the scene enters the tree.
+var touch_screen: bool = false
 
 var _machine: GameStateMachine
 var _ledger: RunLedger
@@ -65,13 +68,16 @@ func _ready() -> void:
 	)
 	_tutorial = TutorialProgress.new(_store(LocalDocumentStore.Slot.TUTORIAL))
 	# Before the stores restore, so the touch sticks hear the saved opacity.
-	_touch.attach(Events, _stage.player_input(), DisplayServer.is_touchscreen_available())
+	_touch.attach(
+		Events, _stage.player_input(), touch_screen or DisplayServer.is_touchscreen_available()
+	)
 	_wire_feedback()
 	_coach = TutorialCoach.new(Events, _tutorial)
 	_settings.restore()
 	_scoreboard.restore()
 	_intel.restore()
 	_tutorial.restore()
+	_stage.use_levels(levels)
 	_run.setup(Events, rng, levels, _stage.player(), _stage.shots(), _stage.camera_rig().camera())
 	_wire_mech_feedback()
 	_machine.boot()

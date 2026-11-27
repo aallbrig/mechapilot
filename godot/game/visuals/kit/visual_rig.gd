@@ -45,7 +45,8 @@ func _ready() -> void:
 		if marker(marker_name) == null:
 			push_error("%s: missing required marker %%%s" % [name, marker_name])
 	if phase_count > 0:
-		set_phase(1)
+		# A phase set before the rig entered the tree is kept.
+		set_phase(maxi(_phase, 1))
 	_spinners.clear()
 	for pivot_name: StringName in spin_rates:
 		var pivot: Node3D = marker(pivot_name)
@@ -82,6 +83,32 @@ func marker(marker_name: StringName) -> Node3D:
 	return get_node_or_null(NodePath("%" + String(marker_name))) as Node3D
 
 
+## The box around every mesh of the rig, in the rig's own space (its scale
+## ignored). It holds before and after the bake (parts, then baked pieces), so
+## logic can size a model to its hit geometry before it enters the tree.
+func bounds() -> AABB:
+	var box: AABB = AABB()
+	var found: bool = false
+	var meshes: Dictionary[MeshInstance3D, Transform3D] = {}
+	_meshes_below(self, Transform3D.IDENTITY, meshes)
+	for mesh_node: MeshInstance3D in meshes:
+		if mesh_node.mesh == null:
+			continue
+		var part: AABB = meshes[mesh_node] * mesh_node.mesh.get_aabb()
+		box = part if not found else box.merge(part)
+		found = true
+	return box
+
+
+## A node's transform in the rig's own space (its scale ignored), from the
+## local transforms alone, so it holds before the rig enters the tree.
+## Identity if the node is not below the rig.
+func to_rig(node: Node3D) -> Transform3D:
+	var found: Array[Transform3D] = []
+	_find_below(self, node, Transform3D.IDENTITY, found)
+	return found[0] if not found.is_empty() else Transform3D.IDENTITY
+
+
 ## Every baked piece of the rig (each is one draw call while visible).
 func pieces() -> Array[VisualPiece]:
 	return _pieces.duplicate()
@@ -116,6 +143,37 @@ static func phase_name(phase: int) -> StringName:
 ## The name of the i-th (1-based) marker in a numbered family, e.g. Turret2.
 static func indexed_name(prefix: String, index: int) -> StringName:
 	return StringName("%s%d" % [prefix, index])
+
+
+## Every mesh below `node`, with its transform from `node`'s space (`into`).
+static func _meshes_below(
+	node: Node, into: Transform3D, out: Dictionary[MeshInstance3D, Transform3D]
+) -> void:
+	for child: Node in node.get_children():
+		var at: Transform3D = into
+		var spatial: Node3D = child as Node3D
+		if spatial != null:
+			at = into * spatial.transform
+		var mesh_node: MeshInstance3D = child as MeshInstance3D
+		if mesh_node != null:
+			out[mesh_node] = at
+		_meshes_below(child, at, out)
+
+
+static func _find_below(
+	node: Node, target: Node3D, into: Transform3D, found: Array[Transform3D]
+) -> void:
+	for child: Node in node.get_children():
+		if not found.is_empty():
+			return
+		var at: Transform3D = into
+		var spatial: Node3D = child as Node3D
+		if spatial != null:
+			at = into * spatial.transform
+		if child == target:
+			found.append(at)
+			return
+		_find_below(child, target, at, found)
 
 
 static func _collect_pieces(node: Node, out: Array[VisualPiece]) -> void:

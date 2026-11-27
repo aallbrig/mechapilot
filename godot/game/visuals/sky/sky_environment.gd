@@ -44,6 +44,7 @@ var _next_strike: float = 0.0
 var _second_flash_in: float = -1.0
 var _sun_energy: float = 1.0
 var _world_offset: Vector2 = Vector2.ZERO
+var _released_environment: Environment
 
 
 func _ready() -> void:
@@ -119,8 +120,23 @@ func flash_amount() -> float:
 	return _flash
 
 
+## The world's WorldEnvironment, or null once release_world_environment() ran.
 func world_environment() -> WorldEnvironment:
-	return get_node(WORLD_ENVIRONMENT) as WorldEnvironment
+	return get_node_or_null(WORLD_ENVIRONMENT) as WorldEnvironment
+
+
+## Give up the WorldEnvironment node and keep only its Environment, for a
+## camera to look through (Camera3D.environment). A scene holds one
+## WorldEnvironment, the world's own sky's: a second sky shown by its own
+## camera (the attract scene's) releases its node. Returns the Environment.
+func release_world_environment() -> Environment:
+	var node: WorldEnvironment = world_environment()
+	if node == null:
+		return _released_environment
+	_released_environment = node.environment
+	remove_child(node)
+	node.free()
+	return _released_environment
 
 
 func sun() -> DirectionalLight3D:
@@ -128,7 +144,8 @@ func sun() -> DirectionalLight3D:
 
 
 func environment() -> Environment:
-	return world_environment().environment
+	var node: WorldEnvironment = world_environment()
+	return node.environment if node != null else _released_environment
 
 
 ## The theme's sky shader material (the Environment's background).

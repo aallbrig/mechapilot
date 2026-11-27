@@ -34,6 +34,7 @@ var _body: MeshInstance3D = MeshInstance3D.new()
 
 
 func _init() -> void:
+	_body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_body)
 	park()
 
