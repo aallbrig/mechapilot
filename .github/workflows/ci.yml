@@ -61,9 +61,10 @@ jobs:
         run: |
           # The base this run tested (checkout merges the head into it). A
           # retarget no longer re-runs CI, so merge-gate refuses evidence
-          # from any base but main (#66). Written first, for every PR.
-          rm -f build/test-results/acceptance-base.tsv
-          printf '%s\t%s\n' "${BASE_REF}" "${BASE_SHA}" >build/test-results/acceptance-base.tsv
+          # from any base but main (#66). Recorded first, for every PR, and
+          # outside build/: `task:test` criteria delete build/test-results.
+          base_rec="${RUNNER_TEMP}/acceptance-base.tsv"
+          printf '%s\t%s\n' "${BASE_REF}" "${BASE_SHA}" >"${base_rec}"
           repo_url="https://github.com/${GITHUB_REPOSITORY}/issues/"
           gh pr view "${PR_NUMBER}" --json closingIssuesReferences >"${RUNNER_TEMP}/links.json"
           foreign="$(jq -r --arg url "${repo_url}" '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${RUNNER_TEMP}/links.json")"
@@ -71,7 +72,12 @@ jobs:
           issues="$(jq -r '.closingIssuesReferences[].number' "${RUNNER_TEMP}/links.json")"
           if [ -z "${issues}" ]; then
             case "${PR_AUTHOR}" in
-              "dependabot[bot]") echo "Dependabot PR: no linked issue required."; exit 0 ;;
+              "dependabot[bot]")
+                echo "Dependabot PR: no linked issue required."
+                mkdir -p build/test-results
+                cp "${base_rec}" build/test-results/acceptance-base.tsv
+                exit 0
+                ;;
               *) echo "::error::No linked issue. Add 'Closes #<n>' to the PR body."; exit 1 ;;
             esac
           fi
@@ -84,8 +90,11 @@ jobs:
           for n in ${issues}; do
             ACCEPTANCE_RECORD="${record}" ACCEPTANCE_BINDING="${binding}" scripts/verify-acceptance "${n}" || rc=1
           done
+          # Copied in last: criteria may have rebuilt build/test-results.
+          mkdir -p build/test-results
           cp "${record}" build/test-results/acceptance.tsv
           cp "${binding}" build/test-results/acceptance-binding.tsv
+          cp "${base_rec}" build/test-results/acceptance-base.tsv
           exit "${rc}"
 
       - name: Upload test results

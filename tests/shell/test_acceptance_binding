@@ -164,9 +164,63 @@ test_ci_workflow_does_not_rerun_on_pr_body_edits() {
   [ "${base_ref}" = "\${{ github.event.pull_request.base.ref }}" ] || return 1
   base_sha="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .env.BASE_SHA' "${wf}")"
   [ "${base_sha}" = "\${{ github.event.pull_request.base.sha }}" ] || return 1
-  record_line="$(printf '%s\n' "${step}" | grep -n 'acceptance-base.tsv$' | tail -n 1 | cut -d: -f1)"
+  # Recorded outside build/ (criteria may delete build/test-results), before any exit.
+  record_line="$(printf '%s\n' "${step}" | grep -nF ">\"\${base_rec}\"" | head -n 1 | cut -d: -f1)"
+  printf '%s\n' "${step}" | grep -qF "base_rec=\"\${RUNNER_TEMP}/acceptance-base.tsv\"" || return 1
   first_exit="$(printf '%s\n' "${step}" | grep -n 'exit' | head -n 1 | cut -d: -f1)"
   [ -n "${record_line}" ] && [ "${record_line}" -lt "${first_exit}" ]
+}
+
+# run_evidence_step <dir> <links-json> <author>: run ci.yml's real "Acceptance
+# evidence" script in <dir>, with a fake gh and a fake `task` whose targets
+# rebuild build/test-results as `task test` does. Sets rc.
+run_evidence_step() {
+  step="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .run' .github/workflows/ci.yml)"
+  mkdir -p "$1/scripts" "$1/bin" "$1/tmp" "$1/build/test-results"
+  cp scripts/verify-acceptance scripts/lib-tests "$1/scripts/"
+  printf '%s\n' "$2" >"$1/links.json"
+  printf '## Acceptance criteria\n- [ ] all suites %stask:test%s\n' "${bt}" "${bt}" >"$1/issue-7.md"
+  cat >"$1/bin/gh" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+  "pr view") cat "$1/links.json" ;;
+  "issue view") cat "$1/issue-\$3.md" ;;
+  *) exit 9 ;;
+esac
+EOF
+  cat >"$1/bin/task" <<'EOF'
+#!/bin/sh
+rm -rf build/test-results
+mkdir -p build/test-results
+printf '<testsuite name="shell" tests="0" failures="0">\n</testsuite>\n' >build/test-results/shell.xml
+EOF
+  chmod +x "$1/bin/gh" "$1/bin/task"
+  rc=0
+  (cd "$1" && PATH="$1/bin:${PATH}" GITHUB_REPOSITORY=owner/repo RUNNER_TEMP="$1/tmp" PR_NUMBER=1 \
+    PR_AUTHOR="$3" BASE_REF=main BASE_SHA="${A40}" sh -e -c "${step}") >"$1/out" 2>&1 || rc=$?
+}
+
+A40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+test_ci_evidence_step_keeps_base_record_through_task_test() {
+  d="$(mktemp -d)"
+  run_evidence_step "${d}" '{"closingIssuesReferences":[{"number":7,"url":"https://github.com/owner/repo/issues/7"}]}' someone
+  [ "${rc}" -eq 0 ] || {
+    cat "${d}/out"
+    return 1
+  }
+  # The criterion's `task test` deleted build/test-results mid-step; every
+  # record is still in the evidence, copied in at the end.
+  got="$(cat "${d}/build/test-results/acceptance-base.tsv")"
+  [ "${got}" = "$(printf 'main\t%s' "${A40}")" ] || return 1
+  grep -qx "task	test	pass" "${d}/build/test-results/acceptance.tsv" || return 1
+  grep -q '^7	[0-9a-f]\{64\}$' "${d}/build/test-results/acceptance-binding.tsv" || return 1
+  # Dependabot PRs, with no linked issue, record the base too.
+  d="$(mktemp -d)"
+  run_evidence_step "${d}" '{"closingIssuesReferences":[]}' 'dependabot[bot]'
+  [ "${rc}" -eq 0 ] || return 1
+  got="$(cat "${d}/build/test-results/acceptance-base.tsv")"
+  [ "${got}" = "$(printf 'main\t%s' "${A40}")" ]
 }
 
 # ---- scripts/merge-gate, end to end with a local origin and a fake gh ----
