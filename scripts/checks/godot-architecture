@@ -4,11 +4,13 @@
 #   layout     every .gd is main.gd or lives in autoload/ types/ core/ game/ ui/
 #              feedback/ tests/
 #   pure       types/ (shared enums and value classes) and core/ (rules) are
-#              `extends RefCounted` and deterministic: no scene tree (Node,
+#              `extends RefCounted` (directly, or through a class of the same layer)
+#              and deterministic: no scene tree (Node,
 #              SceneTree, get_node, $Path, get_tree, add_child, ...), no engine
 #              or host access (Engine, OS, Input, Time, ClassDB), no global
-#              randomness (randi, randf, randomize, ...; inject a
-#              RandomNumberGenerator so runs can be replayed), no runtime
+#              randomness (bare randi, randf, ..., and randomize, pick_random and
+#              shuffle in any form; inject a RandomNumberGenerator, whose methods
+#              `_rng.randf()` are allowed, so runs can be replayed), no runtime
 #              load(), no autoload names
 #   imports    types/ <- autoload/ <- ui/, feedback/
 #              types/ <- core/ <- game/ <- main.gd
@@ -22,7 +24,12 @@
 #              core/ may name the bus's class (EventBus) for injection, never `Events`.
 #   wiring     only main.gd (and tests) construct core classes (`CoreClass.new(`)
 #   events     Game Events are emitted only through the bus's typed announce_* methods:
-#              `Events.<signal>.emit(` is rejected outside autoload/events.gd
+#              outside autoload/events.gd, `Events.<...>.emit(` is rejected, and so is
+#              any use of a signal name declared in autoload/events.gd (its channels
+#              included) other than `<name>.connect(`, `.disconnect(` or `.is_connected(`,
+#              whatever the receiver, so an injected bus (`_events.run.x.emit(`) or an
+#              alias (`var s: Signal = ...x`) cannot skip the typed announcers; and
+#              `Signal(...)` built from a name. A local name never reuses a Game Event's.
 #
 # Comments are ignored and strings are blanked before matching (scripts/lib-gdscript),
 # so neither can hide code or trip a rule.
@@ -81,6 +88,13 @@ while IFS= read -r f; do
     while IFS= read -r cls; do printf '%s %s\n' "${layer}" "${cls}"; done >>"${work}/classes"
 done <"${work}/files"
 
+# Game Event (signal) names declared by the bus, channels included.
+: >"${work}/bus-signals"
+if [ -f "${root}/autoload/events.gd" ]; then
+  gd_code blank "${root}/autoload/events.gd" |
+    sed -n 's/^[[:space:]]*signal[[:space:]]\{1,\}\([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' | sort -u >"${work}/bus-signals"
+fi
+
 # Autoload singleton names from project.godot.
 sed -n '/^\[autoload\]/,/^\[/p' "${root}/project.godot" |
   sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' >"${work}/autoloads"
@@ -98,7 +112,10 @@ forbidden_layers() {
 }
 
 # Words a pure layer (types/, core/) must not use, matched as whole words.
-impure_words='(Node|Node2D|Node3D|SceneTree|Viewport|Window|PackedScene|get_node|get_node_or_null|get_tree|get_parent|get_children|get_viewport|get_window|add_child|remove_child|queue_free|find_child|owner|Engine|OS|Input|Time|ClassDB|ResourceLoader|load|randi|randf|randomize|randi_range|randf_range|randfn|seed|rand_from_seed)'
+impure_words='(Node|Node2D|Node3D|SceneTree|Viewport|Window|PackedScene|get_node|get_node_or_null|get_tree|get_parent|get_children|get_viewport|get_window|add_child|remove_child|queue_free|find_child|owner|Engine|OS|Input|Time|ClassDB|ResourceLoader|load|randomize|rand_from_seed|pick_random|shuffle)'
+# The global RNG functions. As a method of the injected RandomNumberGenerator
+# (`_rng.randf()`) they are deterministic, so only the bare global form is impure.
+global_rng_words='(randi|randf|randi_range|randf_range|randfn|seed)'
 
 while IFS= read -r f; do
   layer="$(layer_of "${f}")"
@@ -112,11 +129,16 @@ while IFS= read -r f; do
 
   case "${layer}" in
     core | types)
-      if ! grep -Eq '^extends[[:space:]]+RefCounted[[:space:]]*$' "${work}/code"; then
-        fail "${f}" "${layer}/ classes must extend RefCounted"
+      # RefCounted, or a class declared in the same layer (which is checked the same way).
+      base="$(sed -n 's/^extends[[:space:]]\{1,\}\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*$/\1/p' "${work}/code")"
+      if [ "${base}" != RefCounted ] && ! awk -v l="${layer}" -v c="${base}" '$1 == l && $2 == c { found = 1 } END { exit !found }' "${work}/classes"; then
+        fail "${f}" "${layer}/ classes must extend RefCounted (or a ${layer}/ class)"
       fi
       if grep -Ewn "${impure_words}" "${work}/code" >"${work}/hits"; then
         fail "${f}" "${layer}/ must stay pure and deterministic (no scene tree, engine, host, global RNG or load)" hit
+      fi
+      if grep -En "(^|[^.A-Za-z0-9_[:space:]])[[:space:]]*${global_rng_words}([^A-Za-z0-9_]|\$)" "${work}/code" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must use the injected RandomNumberGenerator, not the global RNG" hit
       fi
       if grep -En 'RandomNumberGenerator[[:space:]]*\.[[:space:]]*new' "${work}/code" >"${work}/hits"; then
         fail "${f}" "${layer}/ must receive its RandomNumberGenerator by injection" hit
@@ -167,8 +189,22 @@ while IFS= read -r f; do
       ;;
   esac
 
-  if [ "${f}" != autoload/events.gd ] && grep -En '(^|[^A-Za-z0-9_])Events[[:space:]]*\.[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*emit[^A-Za-z0-9_]' "${work}/code" >"${work}/hits"; then
-    fail "${f}" "emit Game Events through Events.announce_*, not .emit()" hit
+  if [ "${f}" != autoload/events.gd ]; then
+    if grep -En '(^|[^A-Za-z0-9_])Events([[:space:]]*\.[[:space:]]*[A-Za-z_][A-Za-z0-9_]*)+[[:space:]]*\.[[:space:]]*emit([^A-Za-z0-9_]|$)' "${work}/code" >"${work}/hits"; then
+      fail "${f}" "emit Game Events through the bus's announce_* methods, not .emit()" hit
+    fi
+    # A bus signal may only be connected to or disconnected from: any other use
+    # (emit, aliasing it into a variable, passing it on) could skip the announcers.
+    while IFS= read -r sig; do
+      sed -E "s/(^|[^A-Za-z0-9_])${sig}[[:space:]]*\\.[[:space:]]*(connect|disconnect|is_connected)[[:space:]]*\\(/\\1(/g" \
+        "${work}/code" | grep -Ewn "${sig}" >"${work}/hits" || true
+      if [ -s "${work}/hits" ]; then
+        fail "${f}" "the Game Event ${sig} may only be connected to (emit it through announce_${sig})" hit
+      fi
+    done <"${work}/bus-signals"
+    if grep -En '(^|[^A-Za-z0-9_])Signal[[:space:]]*\(' "${work}/code" >"${work}/hits"; then
+      fail "${f}" "no Signal(...) built from a name (it could reach a Game Event)" hit
+    fi
   fi
 done <"${work}/files"
 
