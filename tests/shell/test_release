@@ -866,11 +866,13 @@ jobs: {}' || return 1
   rm -rf "${d}"
 }
 
-# The required ci job's timeout leaves headroom over the measured runtime,
-# stays bounded, and cannot hide behind a symlink (#118).
+# The required ci check's jobs have timeouts with headroom over the measured
+# runtime (#118), lowered once the gate was split into parallel parts (#119):
+# bounded from 10 to 30 minutes, and not hidden behind a symlink.
 test_workflow_permissions_bounds_ci_timeout() {
   scripts/checks/workflow-permissions >/dev/null || return 1
-  grep -q '^    timeout-minutes: 60$' .github/workflows/ci.yml || return 1
+  n="$(grep -c '^    timeout-minutes: 15$' .github/workflows/ci.yml)"
+  [ "${n}" -eq 2 ] || return 1
   d="$(mktemp -d)"
   # ci_timeout <ci-sed>: exit 0 if the check passes with that ci.yml variant.
   ci_timeout() {
@@ -881,14 +883,17 @@ test_workflow_permissions_bounds_ci_timeout() {
     sed "$1" .github/workflows/ci.yml >"${d}/w/ci.yml"
     scripts/checks/workflow-permissions "${d}/w" >/dev/null
   }
-  t='^    timeout-minutes: 60$'
+  t='^    timeout-minutes: 15$'
   ci_timeout "" || return 1
-  ci_timeout "s/${t}/    timeout-minutes: 120/" || return 1
-  ! ci_timeout "s/${t}/    timeout-minutes: 30/" || return 1
-  ! ci_timeout "s/${t}/    timeout-minutes: 59/" || return 1
-  ! ci_timeout "s/${t}/    timeout-minutes: 121/" || return 1
-  ! ci_timeout "s/${t}/    timeout-minutes: 60.5/" || return 1
-  ! ci_timeout "s/${t}/    timeout-minutes: \"60\"/" || return 1
+  ci_timeout "s/${t}/    timeout-minutes: 10/" || return 1
+  ci_timeout "s/${t}/    timeout-minutes: 30/" || return 1
+  # Each job on its own: the part job's line comes first, the ci job's second.
+  ! ci_timeout "1,/${t}/s/${t}/    timeout-minutes: 31/" || return 1
+  ! ci_timeout "/^  ci:\$/,\$s/${t}/    timeout-minutes: 31/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 9/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 60/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: 15.5/" || return 1
+  ! ci_timeout "s/${t}/    timeout-minutes: \"15\"/" || return 1
   ! ci_timeout "/${t}/d" || return 1
   ! ci_timeout 's/^  ci:$/  other:/' || return 1
   rm -f "${d}/w/ci.yml"
@@ -988,9 +993,10 @@ test_deploy_summary_fits_the_outcome() {
 # toolchain_like_ci <ci.yml> <release.yml> <Taskfile>: exit 0 if release.yml's
 # build job sets up the toolchain by exactly ci.yml's path (#95): the three
 # steps from ci.yml's `Restore Godot` (restore the cache, `task
-# ci:toolchain`, save the cache) appear unchanged in release.yml, before the
-# step that runs Godot, with only actions (no run step) before them in either
-# workflow; ci:toolchain is defined once and has only a desc and exactly the
+# ci:toolchain`, save the cache) appear unchanged in release.yml and in both
+# of ci.yml's jobs (the parts and the ci job, #119), before the step that runs
+# Godot or project code, with only actions (no run step) before them in any of
+# them; ci:toolchain is defined once and has only a desc and exactly the
 # commands that install the pinned Godot and then the pinned bubblewrap (no
 # deps, platforms, status, preconditions, env or other key that could skip
 # the install or run something first); and no other step installs either by
@@ -1026,17 +1032,18 @@ toolchain_like_ci() {
     def after($steps; $pat): at($steps) as $i
       | [$steps | to_entries[] | select(.value | runs | test($pat)) | .key]
       | length > 0 and all(. > $i + 2);
-    .jobs.ci.steps as $c | $rel.jobs.build.steps as $r
+    .jobs.part.steps as $c | .jobs.ci.steps as $g | $rel.jobs.build.steps as $r
     | block($c) as $b
     | ($b | length) == 3
     and ($b[0].uses | test("^actions/cache/restore@[0-9a-f]{40}$"))
     and ($b[1] == {"name": "Install the pinned Godot and bubblewrap", "run": "task ci:toolchain"})
     and ($b[2].uses | test("^actions/cache/save@[0-9a-f]{40}$"))
     and ($b[2].with.key == "${{ steps.godot-cache.outputs.cache-primary-key }}")
-    and block($r) == $b
-    and clean_before($c) and clean_before($r)
-    and single_path($c) and single_path($r)
-    and after($c; "^task ci$")
+    and block($r) == $b and block($g) == $b
+    and clean_before($c) and clean_before($g) and clean_before($r)
+    and single_path($c) and single_path($g) and single_path($r)
+    and after($c; "^task \"ci:part:")
+    and after($g; "^scripts/ci-merge-results ")
     and after($r; "scripts/release/build")' >/dev/null || return 1
 }
 
@@ -1101,11 +1108,18 @@ test_release_sets_up_godot_toolchain_like_ci() {
         run: sudo dpkg -i x.deb\
 
 ' || return 1
-  refused ci '/^      - name: task ci$/i\
+  refused ci '/^      - name: Run the part$/i\
       - name: extra\
         run: scripts/install-bubblewrap\
 
 ' || return 1
+  # The ci job (which runs task: criteria) on a toolchain of its own.
+  refused ci '/^      - name: Every part passed$/i\
+      - name: extra\
+        run: scripts/install-godot\
+
+' || return 1
+  refused ci "/^  ci:\$/,\$s/run: task ci:toolchain/run: scripts\\/install-godot/" || return 1
   # ci:toolchain that drops bubblewrap or also runs something else.
   refused task '/^      - scripts\/install-bubblewrap$/d' || return 1
   refused task '/^      - scripts\/install-bubblewrap$/a\

@@ -2,9 +2,17 @@
 # Run POSIX shell tests in tests/shell/test_* and write JUnit XML.
 # Each test file is a sh script; each function named test_* is one test case.
 #
-# Usage: scripts/test-shell [out-dir [test-file...]]
+# Usage: scripts/test-shell [--shard <k>/<n>] [out-dir [test-file...]]
 # With test files, only those run (the pre-push hook uses this for new test
 # files, writing outside build/test-results); `task test` always runs them all.
+#
+# --shard k/n runs only every n-th test case of the whole suite, in discovery
+# order, starting with the k-th (1 <= k <= n <= 32), and records shard="k/n" on
+# the <testsuite>. Only `task ci:part:shell` passes it, one shard per CI job
+# (#119). A shard is never evidence on its own: the ci job's
+# scripts/ci-merge-results refuses unless shards 1..n are all present once and
+# together report every test the suite defines, exactly once. It cannot be
+# combined with test files.
 #
 # TEST_SHELL_EXCLUDE="test_a test_b" leaves those tests out entirely: they are
 # not run and get no <testcase>, so nothing can count them as passed
@@ -16,6 +24,28 @@ set -eu
 # shellcheck source=lib-tests
 . "$(dirname "$0")/lib-tests"
 
+shard=""
+if [ "${1:-}" = --shard ]; then
+  shard="${2:-}"
+  case "${shard}" in
+    [1-9]/[1-9] | [1-9]/[1-3][0-9] | [1-3][0-9]/[1-3][0-9]) ;;
+    *)
+      printf 'test-shell: --shard needs <k>/<n> with 1 <= k <= n <= 32, not %s\n' "${shard}" >&2
+      exit 64
+      ;;
+  esac
+  shard_k="${shard%/*}"
+  shard_n="${shard#*/}"
+  if [ "${shard_k}" -gt "${shard_n}" ] || [ "${shard_n}" -gt 32 ]; then
+    printf 'test-shell: --shard needs <k>/<n> with 1 <= k <= n <= 32, not %s\n' "${shard}" >&2
+    exit 64
+  fi
+  shift 2
+  if [ "$#" -gt 1 ]; then
+    echo "test-shell: --shard runs the whole suite's shard; it takes no test files" >&2
+    exit 64
+  fi
+fi
 out_dir="${1:-build/test-results}"
 if [ "$#" -gt 0 ]; then shift; fi
 for file in "$@"; do
@@ -64,6 +94,9 @@ unset TEST_SHELL_EXCLUDE
 
 total=0
 failed=0
+# Every test case's 0-based position in the suite, counted whether or not this
+# shard runs it, so shards 1..n partition the suite.
+index=0
 for file in "$@"; do
   [ -f "${file}" ] || continue
   names="$(shell_test_names <"${file}")"
@@ -76,6 +109,10 @@ for file in "$@"; do
         ;;
       *) ;;
     esac
+    index=$((index + 1))
+    if [ -n "${shard}" ] && [ "$(((index - 1) % shard_n + 1))" -ne "${shard_k}" ]; then
+      continue
+    fi
     total=$((total + 1))
     log="$(mktemp)"
     if sh -c ". \"\$1\"; \"\$2\"" sh "${file}" "${name}" >"${log}" 2>&1; then
@@ -109,12 +146,20 @@ done
 
 {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-  printf '<testsuite name="shell" tests="%s" failures="%s">\n' "${total}" "${failed}"
+  if [ -n "${shard}" ]; then
+    printf '<testsuite name="shell" tests="%s" failures="%s" shard="%s">\n' "${total}" "${failed}" "${shard}"
+  else
+    printf '<testsuite name="shell" tests="%s" failures="%s">\n' "${total}" "${failed}"
+  fi
   cat "${cases}"
   printf '</testsuite>\n'
 } >"${staged_xml}"
 # Written last, after every test has run, so test code cannot pre-empt it.
 mv -f "${staged_xml}" "${xml}"
 
-printf 'test-shell: %s/%s passed\n' "$((total - failed))" "${total}"
+if [ -n "${shard}" ]; then
+  printf 'test-shell: shard %s: %s/%s passed\n' "${shard}" "$((total - failed))" "${total}"
+else
+  printf 'test-shell: %s/%s passed\n' "$((total - failed))" "${total}"
+fi
 [ "${failed}" -eq 0 ]

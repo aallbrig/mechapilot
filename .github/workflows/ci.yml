@@ -22,13 +22,131 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The gate runs as parallel parts (#119): every part of `task ci`
+  # (Taskfile.yml's ci:part:* targets, which tests/shell/test_ci_split holds
+  # to exactly `task ci`), each on its own runner, then the ci job below
+  # judges them. Only the ci job's check counts (scripts/ci-verdict); a part
+  # is never evidence by itself. scripts/checks/workflow-permissions keeps this
+  # shape: the exact part list, no continue-on-error, and a ci job that needs
+  # every part, runs unless the run was cancelled, and fails unless every part
+  # succeeded.
+  part:
+    name: part (${{ matrix.part }}${{ matrix.shard && ' ' || '' }}${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # Measured on 2026-11-27 (#119): the slowest part (a shell shard) took
+    # about 6 minutes, setup included; 15 leaves 2x headroom.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      # Every part reports, even after one fails.
+      fail-fast: false
+      matrix:
+        include:
+          - part: static
+          - part: godot
+          - part: web
+          - part: shell
+            shard: 1/5
+          - part: shell
+            shard: 2/5
+          - part: shell
+            shard: 3/5
+          - part: shell
+            shard: 4/5
+          - part: shell
+            shard: 5/5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          cache: true
+
+      # The pinned toolchain, by the one path release.yml also takes (#95):
+      # `task ci:toolchain` installs the pinned editor and the two web templates
+      # (about 100 MB; scripts/install-godot re-hashes every installed file
+      # against .godot-sha512sums and reinstalls from verified downloads on any
+      # mismatch), then the pinned bubblewrap .deb (scripts/install-bubblewrap)
+      # that scripts/godot-run requires on Linux CI. The cache is restored
+      # before and saved right after, before any project code runs, so nothing
+      # a test does can enter it. tests/shell/test_release checks that
+      # release.yml carries these three steps unchanged.
+      - name: Restore Godot
+        id: godot-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mechapilot/godot
+          key: godot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.godot-version', '.godot-sha512sums', 'scripts/install-godot', 'scripts/lib-godot') }}
+
+      - name: Install the pinned Godot and bubblewrap
+        run: task ci:toolchain
+
+      - name: Save Godot
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mechapilot/godot
+          key: ${{ steps.godot-cache.outputs.cache-primary-key }}
+
+      # Same pattern: saved right after install, before any project code runs.
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright and headless Chromium
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps --only-shell chromium
+
+      - name: Save Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+
+      - name: Run the part
+        env:
+          PART: ${{ matrix.part }}
+          SHARD: ${{ matrix.shard }}
+        run: task "ci:part:${PART}" SHARD="${SHARD}"
+
+      - name: Upload web build
+        if: matrix.part == 'web'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web
+          path: build/web/
+          if-no-files-found: error
+
+      # Only the ci job uploads test-results, the evidence the merge gate reads.
+      - name: Upload the part's test results
+        if: always() && (matrix.part == 'shell' || matrix.part == 'godot')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: part-results-${{ strategy.job-index }}
+          path: build/test-results/
+          if-no-files-found: error
+
   ci:
     name: ci
+    needs: [part]
+    # Runs when a part failed or was skipped, so it can fail; a cancelled run
+    # skips it, which scripts/ci-verdict never counts as green.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # Successful runs took 23 to 29 minutes (about 9 of setup, then task ci) on
-    # 2026-11-27, so 30 cancelled every run; 60 leaves headroom (#118).
-    # scripts/checks/workflow-permissions keeps it from 60 to 120.
-    timeout-minutes: 60
+    # Measured on 2026-11-27 (#119): about 3 minutes (setup, merge, and the
+    # acceptance evidence, which runs task:/check: criteria such as task:lint);
+    # 15 leaves headroom. scripts/checks/workflow-permissions keeps it from 10
+    # to 30.
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: read
@@ -89,15 +207,24 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
 
-      - name: task ci
-        run: task ci
+      - name: Every part passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "${NEEDS}" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
 
-      - name: Upload web build
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Download the parts' test results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: web
-          path: build/web/
-          if-no-files-found: error
+          pattern: part-results-*
+          path: ${{ runner.temp }}/parts
+
+      # scripts/ci-merge-results refuses unless the shards are 1/n..n/n and
+      # together report the whole shell suite exactly once, then writes the
+      # one shell.xml and godot.xml the merge gate reads.
+      - name: Merge the parts' test results
+        run: scripts/ci-merge-results "${RUNNER_TEMP}/parts" build/test-results
 
       - name: Verification guard (informational; the merge gate recomputes it)
         if: github.event_name == 'pull_request'

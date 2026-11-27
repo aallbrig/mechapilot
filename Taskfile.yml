@@ -473,6 +473,54 @@ tasks:
       - task: secrets
       - task: ci:guard:end
 
+  # ---- The split ci check (#119) ----
+  # The required ci check runs `task ci` as parallel parts, one CI job each
+  # (.github/workflows/ci.yml): static, godot, web and the shell suite in
+  # shards. Together the parts run exactly what `task ci` runs, each inside its
+  # own tree check; tests/shell/test_ci_split holds them to that. The ci job
+  # then merges the parts' results (scripts/ci-merge-results), which refuses
+  # unless the shards together report the whole shell suite exactly once.
+
+  ci:part:static:
+    desc: "CI only (one part of the ci check): lint, strict compile and the secrets scan"
+    cmds:
+      - task: ci:guard:begin
+      - task: lint
+      - task: godot:check
+      - task: secrets
+      - task: ci:guard:end
+
+  ci:part:shell:
+    desc: "CI only (one part of the ci check): one shard of the shell suite (usage: task ci:part:shell SHARD=<k>/<n>)"
+    requires:
+      vars: [SHARD]
+    cmds:
+      - task: ci:guard:begin
+      - rm -rf build/test-results
+      - mkdir -p build/test-results
+      - scripts/test-shell --shard "{{.SHARD}}" build/test-results
+      - scripts/checks/test-results-clean
+      - task: ci:guard:end
+
+  ci:part:godot:
+    desc: "CI only (one part of the ci check): the GdUnit4 suites"
+    cmds:
+      - task: ci:guard:begin
+      - rm -rf build/test-results
+      - mkdir -p build/test-results
+      - task: godot:test
+      - scripts/checks/test-results-clean
+      - task: ci:guard:end
+
+  ci:part:web:
+    desc: "CI only (one part of the ci check): every Marketing Site check, the web export and its e2e, and the Pages artifact"
+    cmds:
+      - task: ci:guard:begin
+      - task: site
+      - task: e2e:web
+      - task: pages:assemble
+      - task: ci:guard:end
+
   ci:guard:begin:
     desc: "Internal to `task ci`: snapshot the tree with a private copy of scripts/tree-guard"
     vars:

@@ -1,0 +1,151 @@
+#!/bin/sh
+# Merge the split ci gate's per-part test results into the one evidence
+# directory the merge gate reads (#119).
+#
+# Usage: scripts/ci-merge-results <parts-dir> <out-dir>
+#
+# <parts-dir> holds one directory per downloaded part artifact. Exactly one of
+# them holds godot.xml (the Godot part) and the others each hold one shell.xml
+# written by `scripts/test-shell --shard k/n`. Nothing else may be there.
+#
+# Refuses (exit 1, writing nothing) unless:
+#   - the shards are exactly 1/n .. n/n for one n, each present once;
+#   - every shard file is exactly what test-shell writes (an XML declaration,
+#     one <testsuite name="shell" tests= failures= shard=> line, test cases,
+#     then </testsuite>), and its tests= count matches its test cases;
+#   - the shards' test cases, together, are exactly the test cases the suite
+#     defines (tests/shell/test_*, discovered by scripts/lib-tests the way
+#     scripts/test-shell runs them), each exactly once: none missing, none
+#     extra, none duplicated.
+# Then writes <out-dir>/shell.xml (the shards' cases in shard order, with the
+# summed counts and no shard attribute, as an unsharded run writes it) and
+# copies godot.xml beside it. <out-dir> must not exist yet.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=lib-tests
+. "$(dirname "$0")/lib-tests"
+
+parts="${1:?usage: ci-merge-results <parts-dir> <out-dir>}"
+out="${2:?usage: ci-merge-results <parts-dir> <out-dir>}"
+
+tab="$(printf '\t')"
+die() {
+  printf 'ci-merge-results: %s\n' "$*" >&2
+  exit 1
+}
+
+[ -d "${parts}" ] && [ ! -L "${parts}" ] || die "no parts directory ${parts}"
+[ ! -e "${out}" ] && [ ! -L "${out}" ] || die "${out} already exists"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+# Every entry must be a regular file at depth two, named shell.xml or godot.xml.
+find "${parts}/." ! -name . -print >"${work}/entries"
+godot=""
+: >"${work}/shards"
+while IFS= read -r path; do
+  rel="${path#"${parts}/./"}"
+  if [ -L "${path}" ]; then die "symlink in the parts: ${rel}"; fi
+  case "${rel}" in
+    */*/*) die "unexpected nesting in the parts: ${rel}" ;;
+    */shell.xml | */godot.xml) ;;
+    */*) die "unexpected file in the parts: ${rel}" ;;
+    *)
+      [ -d "${path}" ] || die "unexpected file in the parts: ${rel}"
+      continue
+      ;;
+  esac
+  [ -f "${path}" ] || die "not a regular file: ${rel}"
+  case "${rel}" in
+    */godot.xml)
+      [ -z "${godot}" ] || die "more than one godot.xml in the parts"
+      godot="${path}"
+      ;;
+    *) printf '%s\n' "${path}" >>"${work}/shards" ;;
+  esac
+done <"${work}/entries"
+[ -n "${godot}" ] || die "no godot.xml in the parts (the Godot part's results are missing)"
+[ -s "${work}/shards" ] || die "no shell.xml in the parts (the shell parts' results are missing)"
+
+# The header each shard must carry: <k>\t<n>\t<tests>\t<failures>, one per file.
+decl='<?xml version="1.0" encoding="UTF-8"?>'
+: >"${work}/headers"
+: >"${work}/reported"
+while IFS= read -r f; do
+  first="$(sed -n 1p "${f}")"
+  [ "${first}" = "${decl}" ] || die "${f#"${parts}/"}: not written by test-shell (XML declaration)"
+  header="$(sed -n 2p "${f}" | sed -n 's|^<testsuite name="shell" tests="\([0-9]\{1,\}\)" failures="\([0-9]\{1,\}\)" shard="\([1-9][0-9]\{0,1\}\)/\([1-9][0-9]\{0,1\}\)">$|\3'"${tab}"'\4'"${tab}"'\1'"${tab}"'\2|p')"
+  [ -n "${header}" ] || die "${f#"${parts}/"}: not a shard written by test-shell --shard"
+  last="$(tail -n 1 "${f}")"
+  [ "${last}" = '</testsuite>' ] || die "${f#"${parts}/"}: not written by test-shell (no closing </testsuite>)"
+  printf '%s\t%s\n' "${header}" "${f}" >>"${work}/headers"
+  # The cases the shard reports, read as XML (the way verify-acceptance reads them).
+  yq -p xml -o json '.' "${f}" | jq -r '
+    [.. | objects | .testcase? // empty | if type == "array" then .[] else . end]
+    | .[] | [(.["+@classname"] // ""), (.["+@name"] // "")] | @tsv' >"${work}/cases" ||
+    die "${f#"${parts}/"}: does not parse"
+  count="$(wc -l <"${work}/cases" | tr -d ' ')"
+  tests="$(printf '%s\n' "${header}" | cut -f 3)"
+  [ "${count}" -eq "${tests}" ] || die "${f#"${parts}/"}: reports ${count} test cases but tests=\"${tests}\""
+  # Each <testcase line is one case: a case's text can't hide another.
+  lines="$(grep -c '^  <testcase ' "${f}" || true)"
+  [ "${lines}" -eq "${count}" ] || die "${f#"${parts}/"}: ${lines} <testcase> lines for ${count} test cases"
+  cat "${work}/cases" >>"${work}/reported"
+done <"${work}/shards"
+
+# Shards 1..n, each exactly once, all with the same n.
+cut -f 2 "${work}/headers" | sort -u >"${work}/ns"
+n="$(tr '\n' ' ' <"${work}/ns")"
+n="${n% }"
+case "${n}" in
+  "" | *[!0-9]*) die "the shards disagree on their count: ${n}" ;;
+  *) ;;
+esac
+cut -f 1 "${work}/headers" | sort -n >"${work}/ks"
+seq 1 "${n}" >"${work}/want-ks"
+if ! cmp -s "${work}/ks" "${work}/want-ks"; then
+  found="$(tr '\n' ' ' <"${work}/ks")"
+  die "shards must be exactly 1/${n} .. ${n}/${n}, each once; found k = ${found% }"
+fi
+
+# Together, exactly the suite: every defined test once, nothing else.
+: >"${work}/defined"
+for file in tests/shell/test_*; do
+  [ -f "${file}" ] || continue
+  shell_test_names <"${file}" | sed "s|^|${file}${tab}|" >>"${work}/defined"
+done
+sort "${work}/defined" >"${work}/want"
+sort "${work}/reported" >"${work}/got"
+if ! cmp -s "${work}/want" "${work}/got"; then
+  {
+    printf 'ci-merge-results: the shards do not report exactly the shell suite\n'
+    comm -23 "${work}/want" "${work}/got" | sed 's/^/  missing: /'
+    comm -13 "${work}/want" "${work}/got" | sed 's/^/  extra or duplicated: /'
+  } >&2
+  exit 1
+fi
+
+# Shard order, then the body lines exactly as test-shell wrote them.
+total=0
+failures=0
+sort -n -k 1,1 "${work}/headers" >"${work}/ordered"
+: >"${work}/body"
+while IFS="${tab}" read -r _k _n t fl f; do
+  total=$((total + t))
+  failures=$((failures + fl))
+  sed '1,2d;$d' "${f}" >>"${work}/body"
+done <"${work}/ordered"
+
+mkdir -p "${work}/out"
+{
+  printf '%s\n' "${decl}"
+  printf '<testsuite name="shell" tests="%s" failures="%s">\n' "${total}" "${failures}"
+  cat "${work}/body"
+  printf '</testsuite>\n'
+} >"${work}/out/shell.xml"
+cp "${godot}" "${work}/out/godot.xml"
+mkdir -p "$(dirname "${out}")"
+mv "${work}/out" "${out}"
+printf 'ci-merge-results: %s shards, %s shell test cases (%s failed), godot.xml\n' "${n}" "${total}" "${failures}"
