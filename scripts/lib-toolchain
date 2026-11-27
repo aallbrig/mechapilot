@@ -14,8 +14,14 @@
 # session's git hooks run inside its sandbox, where the state dir is read-only.
 # If the mark below can be written, a hook ran outside the sandbox, and the
 # Supervisor's preflight refuses to start until a human has looked.
-if [ "${AGENT_LOOP_SESSION:-}" = 1 ]; then
-  if [ -n "${AGENT_LOOP_STATE_DIR:-}" ] && [ -d "${AGENT_LOOP_STATE_DIR}" ]; then
+#
+# The session branch takes effect only when AGENT_LOOP_STATE_DIR is set too,
+# as the launcher sets both, and it always says so on stderr, so a shell that
+# merely exported AGENT_LOOP_SESSION=1 neither skips mise unnoticed nor gets the
+# session's lighter merge hook.
+if [ "${AGENT_LOOP_SESSION:-}" = 1 ] && [ -n "${AGENT_LOOP_STATE_DIR:-}" ]; then
+  printf 'toolchain: Agent Loop session (AGENT_LOOP_SESSION=1): using the launcher'"'"'s toolchain, not mise\n' >&2
+  if [ -d "${AGENT_LOOP_STATE_DIR}" ]; then
     (date -u +%Y-%m-%dT%H:%M:%SZ >>"${AGENT_LOOP_STATE_DIR}/hook-outside-sandbox") 2>/dev/null || true
   fi
 elif command -v mise >/dev/null 2>&1; then

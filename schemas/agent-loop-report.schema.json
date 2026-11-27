@@ -91,7 +91,7 @@
       "description": "The shared core REST budget, from rate_limit events.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["readings", "lowest", "used_per_window", "budget_holds"],
+      "required": ["readings", "lowest", "used_per_window", "budget_holds", "budget_unknown"],
       "properties": {
         "readings": { "$ref": "#/$defs/count" },
         "lowest": {
@@ -120,7 +120,8 @@
             "max": { "$ref": "#/$defs/maybe_count" }
           }
         },
-        "budget_holds": { "$ref": "#/$defs/count" }
+        "budget_holds": { "$ref": "#/$defs/count" },
+        "budget_unknown": { "description": "Stretches with no usable budget reading, when the hold failed open.", "$ref": "#/$defs/count" }
       }
     },
     "ci": {

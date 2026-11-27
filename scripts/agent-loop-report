@@ -58,18 +58,34 @@ if [ ! -s "${file}" ] && [ "${format}" = table ]; then
   printf 'agent-loop-report: no metrics yet (%s)\n' "${file}"
   exit 0
 fi
-# Lines that are not JSON objects are skipped, never fatal.
+# Lines that are not JSON, and events that don't match their schema
+# (schemas/agent-loop-metrics-event.schema.json: the fields this report reads,
+# with their types), are skipped, never fatal.
 if [ -s "${file}" ]; then
-  jq -c 'select(type == "object")' "${file}" 2>/dev/null >"${work}/events" || true
+  jq -c '.' "${file}" 2>/dev/null >"${work}/parsed" || true
   # jq stops at the first malformed line; fall back to one line at a time.
   lines="$(wc -l <"${file}")"
-  kept="$(wc -l <"${work}/events")"
+  kept="$(wc -l <"${work}/parsed")"
   if [ "${kept}" -lt "${lines}" ]; then
-    : >"${work}/events"
+    : >"${work}/parsed"
     while IFS= read -r line; do
-      printf '%s\n' "${line}" | jq -c 'select(type == "object")' 2>/dev/null >>"${work}/events" || true
+      printf '%s\n' "${line}" | jq -c '.' 2>/dev/null >>"${work}/parsed" || true
     done <"${file}"
   fi
+  jq -c '
+    def count: type == "number" and . >= 0 and . == floor;
+    def text: type == "string";
+    select(type == "object" and (.at | count) and (.event | text) and (.machine | text))
+    | select(
+        if .event == "delivered" then (.issue | count) and (.seconds | count)
+          and ((has("pr") | not) or ((.pr | count) and (.merged_at | count) and (.review_rounds | count)))
+        elif .event == "claimed" or .event == "unclaimed" then .issue | count
+        elif .event == "restart" then (.pct | type) == "number"
+        elif .event == "nudge" then (has("count") | not) or (.count | count)
+        elif .event == "checkout_scan" then .seconds | count
+        elif .event == "rate_limit" then ([.remaining, .limit, .reset, .used] | all(count)) and ((has("resource") | not) or (.resource | text))
+        elif .event == "budget_hold" or .event == "budget_unknown" or .event == "stall" then .reason | text
+        else true end)' "${work}/parsed" >"${work}/events"
 else
   : >"${work}/events"
 fi
@@ -134,7 +150,8 @@ def int: select(type == "number" and . == floor and . >= 0);
       readings: ($rates | length),
       lowest: (if $lowest == null then null else {remaining: $lowest.remaining, limit: $lowest.limit, at: $lowest.at} end),
       used_per_window: {windows: ($windows | length), median: ($windows | median), max: ($windows | max)},
-      budget_holds: ([$all[] | select(.event == "budget_hold")] | length)
+      budget_holds: ([$all[] | select(.event == "budget_hold")] | length),
+      budget_unknown: ([$all[] | select(.event == "budget_unknown")] | length)
     },
     ci: (if $r == null then null else
       [$r[] | select(.status == "completed")] as $done
@@ -193,6 +210,7 @@ def pct: . * 100 | round | tostring + "%";
     "  readings: \($r.api.readings)\(if $r.api.lowest == null then "" else ", lowest \($r.api.lowest.remaining)/\($r.api.lowest.limit) at \($r.api.lowest.at | stamp)" end)",
     "  used per rate-limit window: \(if $r.api.used_per_window.windows == 0 then "n/a" else "median \($r.api.used_per_window.median), max \($r.api.used_per_window.max) (\($r.api.used_per_window.windows) windows)" end)",
     "  budget holds: \($r.api.budget_holds)",
+    "  budget unknown, so the hold failed open: \($r.api.budget_unknown)\(if $r.api.budget_unknown > 0 then " (WARNING)" else "" end)",
     "",
     "checkout scans (lsof before a start): \(if $r.checkout_scans.count == 0 then "n/a" else "\($r.checkout_scans.count), median \($r.checkout_scans.median_seconds)s, max \($r.checkout_scans.max_seconds)s" end)"
   ]

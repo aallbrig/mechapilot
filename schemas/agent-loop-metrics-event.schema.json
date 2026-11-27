@@ -12,8 +12,8 @@
   "properties": {
     "at": { "type": "integer", "minimum": 0 },
     "event": {
-      "description": "supervisor_start/supervisor_exit: the Supervisor process; session_start: a session was launched; nudge (count: nudges in this episode so far); stall: nudges failed, an agent-loop-stall issue was filed and the session restarted; restart: the context restart (pct set); shutoff: no work, the session was ended; claimed: this machine's label first seen on an issue; delivered: an issue this machine claimed closed as completed (issue and seconds set, plus pr, merged_at and review_rounds when its merged PR was found); unclaimed: an issue this machine claimed lost its machine label; rate_limit: the x-ratelimit-* headers of one REST call; budget_hold: the Supervisor began holding new work because the REST budget was low; checkout_scan: how long the lsof scan of the session checkout took before a start.",
-      "enum": ["supervisor_start", "supervisor_exit", "session_start", "nudge", "stall", "restart", "shutoff", "claimed", "delivered", "unclaimed", "rate_limit", "budget_hold", "checkout_scan"]
+      "description": "supervisor_start/supervisor_exit: the Supervisor process; session_start: a session was launched; nudge (count: nudges in this episode so far); stall: nudges failed, an agent-loop-stall issue was filed and the session restarted; restart: the context restart (pct set); shutoff: no work, the session was ended; claimed: this machine's label first seen on an issue; delivered: an issue this machine claimed closed as completed (issue and seconds set, plus pr, merged_at and review_rounds when its merged PR was found); unclaimed: an issue this machine claimed lost its machine label; rate_limit: the x-ratelimit-* headers of one REST call; budget_hold: the Supervisor began holding new work because the REST budget was low; budget_unknown: it began a stretch with no usable budget reading, so the hold failed open; checkout_scan: how long the lsof scan of the session checkout took before a start.",
+      "enum": ["supervisor_start", "supervisor_exit", "session_start", "nudge", "stall", "restart", "shutoff", "claimed", "delivered", "unclaimed", "rate_limit", "budget_hold", "budget_unknown", "checkout_scan"]
     },
     "machine": { "type": "string", "pattern": "^m-[0-9a-f]{6}$" },
     "reason": { "type": "string" },
@@ -25,7 +25,7 @@
     "merged_at": { "description": "delivered: when that PR merged.", "type": "integer", "minimum": 0 },
     "review_rounds": { "description": "delivered: distinct PR head SHAs that received a review-verdict.", "$ref": "#/$defs/count" },
     "source": { "description": "rate_limit: who made the call.", "enum": ["supervisor", "session"] },
-    "command": { "description": "rate_limit: the scripts/agent-loop-gh command.", "enum": ["issues", "blockers", "issue-state", "rate-limit"] },
+    "command": { "description": "rate_limit: the scripts/agent-loop-gh command.", "enum": ["issues", "blockers", "issue-state", "triage-view", "rate-limit"] },
     "resource": { "description": "rate_limit: x-ratelimit-resource (core for REST).", "type": "string", "pattern": "^[a-z_]+$" },
     "remaining": { "$ref": "#/$defs/count" },
     "limit": { "$ref": "#/$defs/count" },
@@ -40,6 +40,7 @@
     { "if": { "properties": { "event": { "const": "nudge" } } }, "then": { "required": ["count"] } },
     { "if": { "properties": { "event": { "const": "checkout_scan" } } }, "then": { "required": ["seconds"] } },
     { "if": { "properties": { "event": { "const": "budget_hold" } } }, "then": { "required": ["reason"] } },
+    { "if": { "properties": { "event": { "const": "budget_unknown" } } }, "then": { "required": ["reason"] } },
     {
       "if": { "properties": { "event": { "const": "rate_limit" } } },
       "then": { "required": ["source", "command", "resource", "remaining", "limit", "reset", "used"] },

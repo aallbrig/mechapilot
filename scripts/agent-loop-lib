@@ -27,7 +27,10 @@ def incident: (.labels | index("prod-incident")) != null;
 def triageable($m): (parked | not) and ((.labels | index("ready-for-agent")) == null) and (other_machine($m) | not);
 # The shared REST budget is below config.budget_min_pct of its limit and has
 # not reset yet: start no new work (#64).
-def budget_low: .rate_limit != null and .rate_limit.limit > 0 and .now < .rate_limit.reset
+# A reading counts only when remaining, limit and reset are all numbers.
+def budget_low: (.rate_limit | type) == "object"
+  and ([.rate_limit.remaining, .rate_limit.limit, .rate_limit.reset] | all(type == "number"))
+  and .rate_limit.limit > 0 and .now < .rate_limit.reset
   and (.rate_limit.remaining * 100 < .rate_limit.limit * .config.budget_min_pct);
 def work:
   .machine as $m

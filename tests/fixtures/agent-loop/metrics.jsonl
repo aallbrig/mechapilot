@@ -1,4 +1,5 @@
 {"at":1795651200,"event":"supervisor_start","machine":"m-a1b2c3"}
+{"at":1795651200,"event":"budget_unknown","machine":"m-a1b2c3","reason":"no usable rate_limit reading; the budget hold failed open"}
 {"at":1795651200,"event":"rate_limit","machine":"m-a1b2c3","source":"supervisor","command":"rate-limit","resource":"core","remaining":4900,"limit":5000,"reset":1795654800,"used":100}
 {"at":1795651230,"event":"checkout_scan","machine":"m-a1b2c3","seconds":2}
 {"at":1795651260,"event":"session_start","machine":"m-a1b2c3","reason":"mine=[] unclaimed=[101] prod_down=false triage=[]"}

@@ -1,6 +1,7 @@
 #!/bin/sh
 # The Agent Loop's read-mostly door to GitHub (#20). The Supervisor uses all of
-# it; the session's allowlist permits only `blockers`. Tests stub `gh` on PATH.
+# it; the session's allowlist permits only `blockers` and `triage-view`. Tests
+# stub `gh` on PATH.
 #
 # Usage:
 #   agent-loop-gh issues <label> <cache-dir>
@@ -12,6 +13,12 @@
 #       Print the issue's open blocker count, or "unknown".
 #   agent-loop-gh issue-state <number>
 #       Print "open", "completed" or "not_planned".
+#   agent-loop-gh triage-view <number>
+#       Print the issue for the triage pass as {number, state, labels,
+#       author_trusted, title, body, comments, ignored_comments}: the title and
+#       body only when the author is the owner, a member or a collaborator,
+#       and only those authors' comments (author_association), so no outsider's
+#       text reaches the acceptance criteria the loop writes.
 #   agent-loop-gh rate-limit
 #       Print the core REST budget as {"remaining","limit","reset","used"}
 #       from the x-ratelimit-* headers of GET /rate_limit, a call that does
@@ -26,7 +33,7 @@
 #       comment once on the open one with the same title.
 #
 # Budget metrics (#64): every REST call above made through api_get (issues,
-# blockers, issue-state, rate-limit) uses --include, and its x-ratelimit-*
+# blockers, issue-state, triage-view, rate-limit) uses --include, and its x-ratelimit-*
 # headers are appended as one rate_limit event
 # (schemas/agent-loop-metrics-event.schema.json) to AGENT_LOOP_METRICS_FILE
 # when it and AGENT_LOOP_MACHINE are set. The Supervisor points it at its state
@@ -175,6 +182,29 @@ issue_state() {
   jq -r 'if .state == "open" then "open" elif .state_reason == "completed" then "completed" else "not_planned" end' "${work}/issue"
 }
 
+# triage_view <n>: what the triage pass may read of an issue. Anyone can open
+# or comment on an issue in a public repository, so only text from the
+# owner, members and collaborators passes through; the rest is counted, never
+# shown (#64).
+triage_view() {
+  issue_number "$1"
+  status="$(api_get triage-view "${work}/issue" "repos/{owner}/{repo}/issues/$1")"
+  [ "${status}" = 200 ] || die "triage-view $1: GitHub answered ${status}"
+  status="$(api_get triage-view "${work}/comments" "repos/{owner}/{repo}/issues/$1/comments?per_page=100")"
+  [ "${status}" = 200 ] || die "triage-view $1: GitHub answered ${status} for its comments"
+  jq -e 'type == "array"' "${work}/comments" >/dev/null || die "triage-view $1: comments are not a JSON array"
+  jq -n --slurpfile issue "${work}/issue" --slurpfile comments "${work}/comments" '
+    def trusted: (.author_association // "") as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) != null;
+    $issue[0] as $i
+    | ($i | trusted) as $author_trusted
+    | {number: $i.number, state: $i.state, labels: [$i.labels[]?.name],
+       author_trusted: $author_trusted,
+       title: (if $author_trusted then $i.title else null end),
+       body: (if $author_trusted then ($i.body // "") else null end),
+       comments: [$comments[0][] | select(trusted) | {author: .user.login, body: (.body // "")}],
+       ignored_comments: ([$comments[0][] | select(trusted | not)] | length)}'
+}
+
 rate_limit() {
   status="$(api_get rate-limit "${work}/rate" rate_limit)"
   [ "${status}" = 200 ] || die "rate-limit: GitHub answered ${status}"
@@ -228,10 +258,11 @@ case "${cmd}" in
   blockers) blockers "${1:?issue number}" ;;
   issue-state) issue_state "${1:?issue number}" ;;
   rate-limit) rate_limit ;;
+  triage-view) triage_view "${1:?issue number}" ;;
   merged-pr) merged_pr "${1:?branch}" ;;
   file-stall) file_stall "${1:?title}" "${2:?body file}" ;;
   *)
-    printf 'usage: agent-loop-gh issues <label> <cache-dir> | blockers <n> | issue-state <n> | rate-limit | merged-pr <branch> | file-stall <title> <body-file>\n' >&2
+    printf 'usage: agent-loop-gh issues <label> <cache-dir> | blockers <n> | issue-state <n> | triage-view <n> | rate-limit | merged-pr <branch> | file-stall <title> <body-file>\n' >&2
     exit 64
     ;;
 esac

@@ -851,12 +851,34 @@ do_stop_session() {
 # adapter records it as a rate_limit metric; the snapshot reads
 # rate-limit.json. A failed read keeps the last reading, which still holds
 # the loop until its reset time (#64).
+#
+# The hold fails open: with no usable reading (none yet, a malformed one, a
+# zero limit, or a failed read whose last reading has already reset) nothing
+# can be held. That is visible, not silent: each tick logs it, and the first
+# tick of each such stretch records a budget_unknown event, which
+# task loop:report counts.
 refresh_budget() {
   if "${script_dir}/agent-loop-gh" rate-limit >"${state_dir}/rate-limit.json.tmp" 2>/dev/null; then
     mv -f "${state_dir}/rate-limit.json.tmp" "${state_dir}/rate-limit.json"
   else
     rm -f "${state_dir}/rate-limit.json.tmp"
     log "reading the API budget failed; keeping the last reading"
+  fi
+  t="$(now)"
+  usable=no
+  if [ -s "${state_dir}/rate-limit.json" ]; then
+    usable="$(jq -r --argjson now "${t}" 'if type == "object" and (.limit | type) == "number" and .limit > 0
+      and (.remaining | type) == "number" and (.reset | type) == "number" and .reset > $now then "yes" else "no" end' \
+      "${state_dir}/rate-limit.json" 2>/dev/null || printf 'no')"
+  fi
+  if [ "${usable}" = yes ]; then
+    rm -f "${state_dir}/budget-unknown"
+    return 0
+  fi
+  log "API budget unknown: the budget hold cannot apply (it fails open)"
+  if [ ! -e "${state_dir}/budget-unknown" ]; then
+    : >"${state_dir}/budget-unknown"
+    metric budget_unknown reason "no usable rate_limit reading; the budget hold failed open"
   fi
 }
 
@@ -1172,14 +1194,16 @@ status() {
   fi
   printf 'last tick:   %s\n' "${last}" | tr '\t' ' '
   if [ -s "${state_dir}/rate-limit.json" ]; then
-    jq -r --argjson now "${t}" '"API budget:  \(.remaining)/\(.limit) remaining, resets in \(.reset - $now)s"' "${state_dir}/rate-limit.json"
+    jq -r --argjson now "${t}" '"API budget:  \(.remaining)/\(.limit) remaining, \(if (.reset - $now) > 0 then "resets in \(.reset - $now)s" else "reset \($now - .reset)s ago (stale reading)" end)"' "${state_dir}/rate-limit.json" 2>/dev/null || true
   fi
   if [ -e "${state_dir}/hook-outside-sandbox" ]; then
     printf 'WARNING:     a git hook ran outside the sandbox (%s); preflight fails until a human checks it\n' "${state_dir}/hook-outside-sandbox"
   fi
   if [ -s "${state_dir}/metrics.jsonl" ]; then
     printf 'recent events:\n'
-    tail -n 5 "${state_dir}/metrics.jsonl" | jq -r '"  \(.at | todate) \(.event) \(.reason // .issue // "")"'
+    # rate_limit readings arrive every tick and would hide everything else.
+    jq -c 'select(type == "object" and .event != "rate_limit")' "${state_dir}/metrics.jsonl" 2>/dev/null | tail -n 5 |
+      jq -r '"  \(.at | todate) \(.event) \(.reason // .issue // "")"' 2>/dev/null || true
   fi
 }
 

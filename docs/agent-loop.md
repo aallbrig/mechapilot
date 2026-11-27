@@ -29,7 +29,7 @@ The Agent Loop (#20) is an unattended Claude Code session that the Supervisor (`
    - a **custom deployment branch policy** with exactly one pattern, the branch `main`, and no tag pattern;
    - **Allow administrators to bypass** off (`can_admins_bypass: false`).
 
-   It needs no required reviewers, and there is no `v*` tag ruleset. Deploy is a `workflow_dispatch` from `main` (#31). The human gate is that only the owner can dispatch it, and that no production job runs on any push. Preflight checks both settings, and it runs `scripts/checks/production-dispatch-only` on `origin/main`'s workflows. That check requires every workflow using `production` to run only on `workflow_dispatch`. Every other workflow must declare its token permissions and never grant `actions: write`, because a push-triggered `GITHUB_TOKEN` with that permission could dispatch Deploy itself. The same check runs in `task checks`, so a PR can't weaken it unnoticed.
+   It needs no required reviewers, and there is no `v*` tag ruleset. Deploy is a `workflow_dispatch` from `main` (#31). The human gate is that only the owner can dispatch it, and that no production job runs on any push. Preflight checks both settings, and it runs `scripts/checks/production-dispatch-only` on `origin/main`'s workflows. That check requires every workflow using `production` to run only on `workflow_dispatch`. Every other workflow must call no reusable workflow outside this repository: a job-level `uses` must start with `./`, because a remote callee's `environment: production` resolves to this repository's environment. It must also declare its token permissions and never grant `actions: write`, because a push-triggered `GITHUB_TOKEN` with that permission could dispatch Deploy itself. Environment names and permission values are trimmed and lowercased, and anything that resembles production counts as production. The same check runs in `task checks`, so a PR can't weaken it unnoticed.
 3. **Pin the runtime** (per machine, and again whenever you want the loop to run newer loop code). The session's settings, hooks, status line and skill come from one commit you chose, never from a newer `origin/main`:
    - `task loop:start` pins the current `origin/main` the first time.
    - `task loop:pin -- <sha>` moves the pin to another commit on `origin/main`.
@@ -66,6 +66,7 @@ All the agents share one REST budget (5000 requests an hour per user, whatever t
 - **Readings.** Once per tick, the Supervisor reads `gh api rate_limit`, which doesn't count against that budget. It records the `x-ratelimit-remaining`, `-limit`, `-reset` and `-used` headers as a `rate_limit` event in `metrics.jsonl`. `scripts/agent-loop-gh` does the same for every REST call it makes.
 - **Where the session's readings go.** The session's sandbox can't write the state dir, so its readings go to `<checkout>/.agent-loop/metrics.jsonl`, and the Supervisor never reads that file. Pass it to `task loop:report -- <file>` to see them.
 - **The hold.** While the remaining budget is below 20% of the limit (`AGENT_LOOP_BUDGET_MIN_PCT`), the Supervisor starts no session and gives an idle session no new pass until the reset time. It logs each such tick and records one `budget_hold` event per hold. A stalled session is still nudged.
+- **When the hold can't apply.** With no usable reading (none yet, malformed, or a stale one after a failed read), the hold fails open. The Supervisor logs that every tick and records one `budget_unknown` event per stretch, which `task loop:report` shows.
 
 `task loop:report` reads only the metrics file and makes one `gh run list` call. It prints:
 - cycle time per issue (claim to merge) and review rounds per PR;
@@ -78,6 +79,7 @@ All the agents share one REST budget (5000 requests an hour per user, whatever t
 ## Triage
 
 When nothing ready-for-agent can be claimed, the session triages `needs-triage` issues, at most 3 per pass (the skill's pass 5). The Supervisor counts such issues as work.
+- **Only trusted text counts.** The session reads an issue only through `scripts/agent-loop-gh triage-view`. It shows the title, body and comments only from the owner, members and collaborators (`author_association`), and an issue an outsider opened goes to the owner as `ready-for-human`.
 - **Most issues become `ready-for-agent`.** The session writes acceptance criteria in the gate format, checks them against the map, GLOSSARY.md, the ADRs and the existing issues, and adds the label.
 - **A human gets it only when one is truly needed:** secrets, infrastructure apply, releases and deploys, or account settings.
 - **Closing is rare.** The session closes an issue only when it is a clear duplicate or the work is already on main, with a comment saying why.
