@@ -73,3 +73,108 @@ test_asset_credits_ignores_vendored_addons_and_the_editor_cache() {
   printf 'png' >"${d}/.godot/imported/ship.png"
   scripts/checks/asset-credits "${d}"
 }
+
+test_asset_credits_rejects_an_uncredited_video_or_binary_resource() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf 'ogv' >"${d}/art/intro.ogv"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/intro.ogv"
+  printf 'res' >"${d}/art/boom.res"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/boom.res"
+  printf 'opus' >"${d}/art/theme.OPUS"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_media_embedded_in_a_text_resource() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  printf '[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat = 1\n' >"${d}/art/boom.tres"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/boom.tres"
+  printf '[gd_scene format=3]\n\n[sub_resource type="Image" id="1"]\ndata = {}\n' >"${d}/art/a.tscn"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  rm "${d}/art/a.tscn"
+  printf '[gd_resource type="Resource" format=3]\n\n[resource]\nblob = PackedByteArray("AAAA")\n' >"${d}/art/blob.tres"
+  ! scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_accepts_credited_embedded_media_and_plain_resources() {
+  d="$(credits_fixture '| @art/@ Art pack | Kenney | CC0 1.0 |')"
+  printf '[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat = 1\n' >"${d}/art/boom.tres"
+  scripts/checks/asset-credits "${d}" || return 1
+  printf '[gd_scene format=3]\n\n[node name="Sfx" type="AudioStreamPlayer"]\n' >"${d}/plain.tscn"
+  printf '[gd_resource type="AudioBusLayout" format=3]\n\n[resource]\nbus/1/name = &"Music"\n' >"${d}/buses.tres"
+  scripts/checks/asset-credits "${d}"
+}
+
+test_asset_credits_rejects_a_new_asset_under_an_original_work_directory() {
+  d="$(credits_fixture '| @art/ship.png@ Ship | Original work made for this repository | CC0 1.0 |')"
+  scripts/checks/asset-credits "${d}" || return 1
+  # A folder credit on an original-work row would also cover a third-party file
+  # dropped into that folder later, so the row itself is rejected...
+  d="$(credits_fixture '| @art/@ Our art | Original work made for this repository | CC0 1.0 |')"
+  ! scripts/checks/asset-credits "${d}" || return 1
+  # ...and so is the file it would have hidden.
+  printf 'png' >"${d}/art/kenney-ship.png"
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"art/kenney-ship.png: not credited"*) ;;
+  *) return 1 ;;
+  esac
+  # A third-party pack may still be credited as a folder.
+  d="$(credits_fixture '| @art/@ Space pack | Kenney | CC0 1.0 |')"
+  printf 'png' >"${d}/art/kenney-ship.png"
+  scripts/checks/asset-credits "${d}"
+}
+
+# Every file extension the pinned Godot editor can import or load, one per line.
+godot_importable_extensions() {
+  p="$(mktemp -d)"
+  printf 'config_version=5\n' >"${p}/project.godot"
+  printf '%s\n' 'extends SceneTree' '' '' 'func _initialize() -> void:' \
+    '	var exts: PackedStringArray = ResourceLoader.get_recognized_extensions_for_type("Resource")' \
+    '	print("EXTS:" + ",".join(exts))' '	quit()' >"${p}/list.gd"
+  out="$(scripts/godot --headless --editor --path "${p}" -s list.gd 2>/dev/null)" || true
+  rm -rf "${p}"
+  printf '%s\n' "${out}" | sed -n 's/^EXTS://p' | tr ',' '\n' | sort -u
+}
+
+test_asset_credits_covers_every_importable_extension() {
+  exts="$(godot_importable_extensions)"
+  count="$(printf '%s\n' "${exts}" | grep -c .)" || true
+  # Guard against a Godot that failed to start and listed nothing.
+  [ "${count}" -ge 40 ] || {
+    printf 'only %s extensions listed\n' "${count}"
+    return 1
+  }
+  for ext in ttf ttc otf otc pfb pfm font fnt png svg ogg wav mp3 glb blend res; do
+    printf '%s\n' "${exts}" | grep -Fqx "${ext}" || {
+      printf 'Godot did not list %s\n' "${ext}"
+      return 1
+    }
+  done
+  d="$(credits_fixture '| @art/ship.png@ Ship | Kenney | CC0 1.0 |')"
+  # Text formats are reviewed as text (scenes and resources by the embedded-media
+  # rule); every other loadable extension, plus the runtime-only video and
+  # texture formats, must be an asset.
+  for ext in ${exts} ogv dds ktx ktx2 svgz; do
+    case "${ext}" in
+    tres | tscn | escn | csv | glsl) continue ;;
+    *) ;;
+    esac
+    printf 'x' >"${d}/art/sample.${ext}"
+  done
+  out="$(scripts/checks/asset-credits "${d}" 2>&1)" && return 1
+  missed=""
+  for f in "${d}"/art/sample.*; do
+    name="art/${f##*/}"
+    case "${out}" in
+    *"${name}: not credited"*) ;;
+    *) missed="${missed} ${name}" ;;
+    esac
+  done
+  [ -z "${missed}" ] || {
+    printf 'not treated as assets:%s\n' "${missed}"
+    return 1
+  }
+}
