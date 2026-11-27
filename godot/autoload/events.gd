@@ -367,6 +367,7 @@ class ProfileChannel:
 	func announce_intel_catalog_changed(entries: Array[IntelEntry]) -> void:
 		intel_catalog_changed.emit(entries)
 
+
 ## The Developer console (#116): its commands, and what they decided.
 class DevChannel:
 	extends RefCounted
