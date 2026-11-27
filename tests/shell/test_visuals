@@ -3,18 +3,18 @@
 # scripts/test-shell. The Godot suites can only read files by literal path, so
 # the checks that need every level file live here.
 
-# The sky ids allowed by the Level Schema, one per line, sorted.
+# The sky themes allowed by the Level Schema (sky.theme), one per line, sorted.
 schema_sky_ids() {
-  jq -r '.properties.sky.enum[]' schemas/level.schema.json | sort
+  jq -r '.properties.sky.properties.theme.enum[]' schemas/level.schema.json | sort
 }
 
 test_level_sky_ids_match_sky_scenes() {
-  count="$(jq '.properties.sky.enum | length' schemas/level.schema.json)"
+  count="$(jq '.properties.sky.properties.theme.enum | length' schemas/level.schema.json)"
   [ "${count}" -eq 6 ] || return 1
   ids="$(schema_sky_ids)"
   scenes="$(find godot/game/visuals/sky/themes -name '*.tscn' -exec basename {} .tscn \; | sort)"
   [ "${ids}" = "${scenes}" ] || {
-    printf 'schema sky ids:\n%s\nsky scenes:\n%s\n' "${ids}" "${scenes}"
+    printf 'schema sky themes:\n%s\nsky scenes:\n%s\n' "${ids}" "${scenes}"
     return 1
   }
   for id in ${ids}; do
@@ -23,9 +23,9 @@ test_level_sky_ids_match_sky_scenes() {
       godot/game/visuals/sky/sky_library.gd || return 1
   done
   for level in godot/levels/*.json; do
-    sky="$(jq -r '.sky' "${level}")"
+    sky="$(jq -r '.sky.theme' "${level}")"
     printf '%s\n' "${ids}" | grep -Fqx "${sky}" || {
-      printf '%s: sky %s has no environment\n' "${level}" "${sky}"
+      printf '%s: sky theme %s has no environment\n' "${level}" "${sky}"
       return 1
     }
   done
