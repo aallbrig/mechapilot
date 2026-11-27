@@ -6,7 +6,7 @@ extends UiScreen
 
 const SCROLL_SPEED: float = 40.0
 const SCROLL_START_DELAY: float = 1.5
-const LIST_HEIGHT: float = 420.0
+const LIST_HEIGHT: float = 360.0
 
 var _scroll: ScrollContainer
 var _list: VBoxContainer

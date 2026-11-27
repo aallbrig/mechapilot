@@ -43,6 +43,7 @@ var _shots: Array[MeshInstance3D] = []
 var _shot_velocity: Array[Vector3] = []
 var _shot_age: Array[float] = []
 var _shot_mesh: SphereMesh
+var _camera: Camera3D
 var _kills: int = 0
 
 
@@ -100,6 +101,8 @@ func _on_game_state_changed(_from: GameState.Phase, to: GameState.Phase) -> void
 func _activate(on: bool) -> void:
 	visible = on
 	set_process(on)
+	# Hand the view back to the game's camera outside the Title.
+	_camera.current = on
 
 
 func _step_enemy(i: int, delta: float) -> void:
@@ -187,10 +190,9 @@ func _nearest_enemy() -> MeshInstance3D:
 
 
 func _build_world() -> void:
-	var camera: Camera3D = Camera3D.new()
-	camera.position = CAMERA_POSITION
-	camera.current = true
-	add_child(camera)
+	_camera = Camera3D.new()
+	_camera.position = CAMERA_POSITION
+	add_child(_camera)
 	var light: DirectionalLight3D = DirectionalLight3D.new()
 	light.rotation = Vector3(-0.8, 0.6, 0.0)
 	add_child(light)

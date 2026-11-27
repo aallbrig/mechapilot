@@ -164,7 +164,8 @@ static func pulse(control: Control, amount: float, period: float) -> Tween:
 
 
 ## Count from 0 to 1 over `duration`, calling `step(t)` on the way and `done()`
-## at the end. With reduced motion it reaches the end on the next frame.
+## at the end. With reduced motion it reaches the end on the next frame
+## (callers that must finish at once check reduced_motion themselves).
 static func count(node: Node, duration: float, step: Callable, done: Callable) -> Tween:
 	var length: float = 0.0 if reduced_motion else maxf(duration, 0.0)
 	var tween: Tween = make(node)

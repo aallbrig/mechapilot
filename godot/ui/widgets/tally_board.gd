@@ -14,8 +14,8 @@ enum Format { NUMBER, PERCENT, TEXT }
 const ROW_TIME: float = 0.55
 const TICKS_PER_ROW: int = 8
 const VALUE_PUNCH: float = 0.15
-const NAME_WIDTH: float = 300.0
-const VALUE_WIDTH: float = 200.0
+const NAME_WIDTH: float = 220.0
+const VALUE_WIDTH: float = 240.0
 
 var _names: Array[String] = []
 var _targets: Array[float] = []
@@ -61,10 +61,13 @@ func add_text_row(row_name: String, text: String) -> void:
 	_add(row_name, 0.0, Format.TEXT, text)
 
 
-## Starts counting from the first row.
+## Starts counting from the first row. With reduced motion, it finishes at once.
 func play() -> void:
 	_done = false
 	_row = 0
+	if TweenFx.reduced_motion:
+		finish()
+		return
 	for i: int in _value_labels.size():
 		_value_labels[i].text = _format(i, 0.0)
 	_play_row()
@@ -100,7 +103,7 @@ func _add(row_name: String, value: float, format: Format, text: String) -> void:
 	var name_label: Label = UiBuild.label(row_name, &"BodyLabel")
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	name_label.custom_minimum_size = Vector2(NAME_WIDTH, 0.0)
-	var value_label: Label = UiBuild.label("", &"ScoreLabel")
+	var value_label: Label = UiBuild.label("", &"TallyLabel")
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	value_label.custom_minimum_size = Vector2(VALUE_WIDTH, 0.0)
 	add_child(name_label)

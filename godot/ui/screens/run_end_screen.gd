@@ -158,6 +158,12 @@ func _show_stage() -> void:
 	var had_actions: bool = _actions.visible
 	_picker.visible = asking
 	_picker_title.visible = asking
+	# The initials replace the counted tally, so both fit a landscape phone.
+	_tally.visible = not asking
+	if asking:
+		_picker_title.text = (
+			"NEW HIGH SCORE %s! ENTER YOUR INITIALS" % UiFormat.score(_summary.score)
+		)
 	_actions.visible = counted and not asking
 	if not is_visible_in_tree():
 		return

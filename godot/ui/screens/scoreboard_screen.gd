@@ -6,8 +6,10 @@ extends UiScreen
 ## a new Run; Back returns to the Title.
 
 const CAPACITY: int = 10
-const COLUMN_WIDTHS: Array[float] = [56.0, 90.0, 170.0, 70.0, 100.0]
+const COLUMN_WIDTHS: Array[float] = [44.0, 80.0, 180.0, 50.0, 90.0]
 const ROW_STAGGER: float = 0.04
+## Ten rows must fit a 640 UI pixel high landscape screen.
+const COMPACT_GAP: int = 8
 const HIGHLIGHT_DELAY: float = 0.45
 const HIGHLIGHT_PUNCH: float = 0.25
 const EMPTY_TEXT: String = "No scores yet. Go fly!"
@@ -22,9 +24,10 @@ var _pops: int = 0
 
 func _ready() -> void:
 	var content: VBoxContainer = UiBuild.centered_panel(self)
+	content.add_theme_constant_override(&"separation", COMPACT_GAP)
 	content.add_child(UiBuild.label("SCOREBOARD", &"HeaderLabel"))
 	content.add_child(_row(["#", "NAME", "SCORE", "LVL", "TIME"], &"HintLabel"))
-	_rows_box = UiBuild.column(2)
+	_rows_box = UiBuild.column(0)
 	content.add_child(_rows_box)
 	var actions: HBoxContainer = UiBuild.row()
 	content.add_child(actions)

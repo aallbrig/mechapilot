@@ -4,7 +4,7 @@ extends RefCounted
 ## theme variations, sizes and focus rules from ui/theme/theme.tres.
 
 ## The widest a menu column grows, in UI pixels. The phone portrait layout is
-## 640 UI pixels wide (see ui/README.md), so this leaves a margin on both sides.
+## 640 UI pixels wide (see project.godot), so this leaves a margin on both sides.
 const COLUMN_WIDTH: float = 520.0
 const BUTTON_HEIGHT: float = 64.0
 const GAP: int = 14

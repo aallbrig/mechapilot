@@ -97,9 +97,9 @@ expand_margin_bottom = 4.0
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
 content_margin_left = 28.0
-content_margin_top = 24.0
+content_margin_top = 16.0
 content_margin_right = 28.0
-content_margin_bottom = 24.0
+content_margin_bottom = 16.0
 bg_color = Color(0.02, 0.05, 0.14, 0.86)
 border_width_left = 2
 border_width_top = 2
@@ -314,6 +314,12 @@ ScoreLabel/colors/font_outline_color = Color(0, 0, 0.1, 1)
 ScoreLabel/constants/outline_size = 10
 ScoreLabel/font_sizes/font_size = 40
 ScoreLabel/fonts/font = SubResource("FontVariation_header")
+TallyLabel/base_type = &"Label"
+TallyLabel/colors/font_color = Color(1, 1, 1, 1)
+TallyLabel/colors/font_outline_color = Color(0, 0, 0.1, 1)
+TallyLabel/constants/outline_size = 8
+TallyLabel/font_sizes/font_size = 30
+TallyLabel/fonts/font = SubResource("FontVariation_header")
 TitleLabel/base_type = &"Label"
 TitleLabel/colors/font_color = Color(1, 1, 1, 1)
 TitleLabel/colors/font_outline_color = Color(0, 0.05, 0.2, 1)

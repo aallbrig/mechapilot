@@ -69,6 +69,11 @@ func played() -> Array[UiCue.Cue]:
 	return _played.duplicate()
 
 
+## The volume the cues play at, in dB.
+func volume_db() -> float:
+	return _volume_db
+
+
 ## A short tone: [start Hz, end Hz, seconds, loudness, square].
 static func tone(spec: Array) -> AudioStreamWAV:
 	var start_hz: float = spec[0]
