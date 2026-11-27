@@ -2,7 +2,7 @@ class_name UiRoot
 extends Control
 ## Every screen, and which ones show. One screen (plus the HUD in play) per
 ## Game State, from flow.game_state_changed alone; sub-screens (Settings,
-## Credits) open on top of the current one and close with Back. It also hands
+## Credits, How to Play, Intel) open on top of the current one and close with Back. It also hands
 ## the last-used device and the reduced-motion setting to every screen.
 ##
 ## Back, Esc and gamepad B go to the top screen's handle_cancel(); while
@@ -32,6 +32,8 @@ const SCREENS_FOR: Dictionary[GameState.Phase, Array] = {
 const SUB_SCREENS: Dictionary[StringName, StringName] = {
 	&"settings": &"Settings",
 	&"credits": &"Credits",
+	&"how_to_play": &"HowToPlay",
+	&"intel": &"Intel",
 }
 
 var _bus: EventBus

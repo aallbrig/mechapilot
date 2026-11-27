@@ -96,12 +96,12 @@ static func _build() -> void:
 		ShotSpec.Style.BOMB, DamageSource.Source.BOMB, 1.0 * gs, BOMB_GRAVITY, SHOT_LIFE, 0.6
 	)
 
-	var fighter: EnemyProfile = _profile(EnemyKind.Kind.FIGHTER, Behaviour.CHASE, 1, 1.1)
+	var fighter: EnemyProfile = _profile(EnemyKind.Kind.FIGHTER, Behaviour.CHASE, 1.1)
 	fighter.speed_min = 6.0 * gs
 	fighter.speed_max = 12.0 * gs
 	fighter.turn = 3.0 * gs
 
-	var heavy: EnemyProfile = _profile(EnemyKind.Kind.HEAVY, Behaviour.CHASE, 4, 1.6)
+	var heavy: EnemyProfile = _profile(EnemyKind.Kind.HEAVY, Behaviour.CHASE, 1.6)
 	heavy.speed_min = 5.0 * gs
 	heavy.speed_max = 7.0 * gs
 	heavy.turn = 1.5 * gs
@@ -110,7 +110,7 @@ static func _build() -> void:
 	heavy.shot = bullet
 	heavy.look_scale = 1.6
 
-	var interceptor: EnemyProfile = _profile(EnemyKind.Kind.INTERCEPTOR, Behaviour.STANDOFF, 2, 1.0)
+	var interceptor: EnemyProfile = _profile(EnemyKind.Kind.INTERCEPTOR, Behaviour.STANDOFF, 1.0)
 	interceptor.speed_min = 10.0 * gs
 	interceptor.speed_max = 13.0 * gs
 	interceptor.turn = 3.0 * gs
@@ -120,7 +120,7 @@ static func _build() -> void:
 	interceptor.shot = shell
 	interceptor.look_scale = 0.9
 
-	var drone: EnemyProfile = _profile(EnemyKind.Kind.DRONE, Behaviour.HOMING, 1, 0.8)
+	var drone: EnemyProfile = _profile(EnemyKind.Kind.DRONE, Behaviour.HOMING, 0.8)
 	drone.speed_min = 4.0 * gs
 	drone.speed_max = 14.0 * gs
 	drone.turn = 4.5 * gs
@@ -128,7 +128,7 @@ static func _build() -> void:
 	drone.contact = DamageSource.Source.MISSILE
 	drone.look_scale = 0.6
 
-	var bomber: EnemyProfile = _profile(EnemyKind.Kind.BOMBER, Behaviour.CROSS, 4, 1.8)
+	var bomber: EnemyProfile = _profile(EnemyKind.Kind.BOMBER, Behaviour.CROSS, 1.8)
 	bomber.speed_min = 6.0 * gs
 	bomber.speed_max = 7.0 * gs
 	bomber.turn = 1.2 * gs
@@ -139,7 +139,7 @@ static func _build() -> void:
 	bomber.shot = bomb
 	bomber.look_scale = 1.8
 
-	var mech: EnemyProfile = _profile(EnemyKind.Kind.ENEMY_MECH, Behaviour.STRAFE, 6, 1.3)
+	var mech: EnemyProfile = _profile(EnemyKind.Kind.ENEMY_MECH, Behaviour.STRAFE, 1.3)
 	mech.speed_min = 8.0 * gs
 	mech.speed_max = 10.0 * gs
 	mech.turn = 2.5 * gs
@@ -157,12 +157,13 @@ static func _build() -> void:
 		_table[profile.kind] = profile
 
 
+## Hit points come from EnemyRoster, so the Intel codex never disagrees with play.
 static func _profile(
-	profile_kind: EnemyKind.Kind, flies: Behaviour, hits: int, contact_radius: float
+	profile_kind: EnemyKind.Kind, flies: Behaviour, contact_radius: float
 ) -> EnemyProfile:
 	var profile: EnemyProfile = EnemyProfile.new()
 	profile.kind = profile_kind
 	profile.behaviour = flies
-	profile.hit_points = hits
+	profile.hit_points = EnemyRoster.hit_points(profile_kind)
 	profile.radius = contact_radius
 	return profile

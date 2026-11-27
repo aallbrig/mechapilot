@@ -19,17 +19,19 @@ Fixed tuning lives in `run_rules.gd` (`RunRules`); per-Level tuning lives in `le
 | `BossDefinition` | A Level's boss: id, name, description, threshold, health, phases (inner `Phase`, `Attack`) and escorts. | `static parse(...)`, `phase_for(health) -> int` |
 | `Scoreboard` | Top 10 Runs, best first (ties keep the earlier entry). | `restore()`, `entries()`, `rank_for(score)`, `submit(entry) -> rank`, `static normalize_initials(raw)` |
 | `Settings` | The player's `GameSettings`, clamped, with per-field fallback to defaults. | `restore()`, `current()`, `apply(settings)`, `reset()` |
-| `IntelCodex` | Intel unlocks on first encounter in play (not in the Title's attract mode). | `static catalog(levels)`, `restore()`, `is_unlocked(id)`, `unlocked()`, `unlock(id) -> bool` |
-| `TutorialProgress` | Which first-flight prompts are done, and whether the first Run was flown. No events: #75's tutorial rules decide when prompts show. | `restore()`, `is_done(prompt)`, `mark_done(prompt) -> bool`, `is_complete()`, `is_first_run_done()`, `mark_first_run_done()`, `reset()` |
+| `IntelCodex` | Intel unlocks on first encounter in play (not in the Title's attract mode), and what the codex lists. | `static catalog(levels)`, `static entries_for(levels)`, `restore()`, `is_unlocked(id)`, `unlocked()`, `unlock(id) -> bool` |
+| `TutorialProgress` | Which first-flight prompts are done, and whether the first Run was flown. No events: `TutorialCoach` decides when prompts show. | `restore()`, `is_done(prompt)`, `mark_done(prompt) -> bool`, `is_complete()`, `is_first_run_done()`, `mark_first_run_done()`, `reset()` |
+| `TutorialCoach` | The first-flight tutorial (#75): in Level 1 of the first Run, each prompt shows once and leaves when its condition is met (move; 3 shots; a miss, then a hit; 25% Boss Gauge; a Repair Kit drop, then a pickup; the Boss Warning), one at a time; the read-only ones leave after `HOLD_TIME` of play. Hints off hides them all. | `tick(delta)`, `current()`, `is_running()` |
+| `EnemyRoster` | Each enemy kind's name, Intel description and hit points (#73 fixes Heavy 4 and Drone 1; the enemy nodes take theirs from here). | `static hit_points(kind)`, `static intel_entry(kind)` |
 | `DocumentStore` | The storage interface behind every store: one JSON-shaped `Dictionary`. `MemoryDocumentStore` (here) is for tests; `LocalDocumentStore` (`game/`) keeps one fixed `user://` file per slot. | `read_document() -> Dictionary`, `write_document(doc) -> bool` |
 | `RunRules` | The fixed tuning constants of #73. | `static kill_points(kind)`, `static damage_for(source, attack_damage)`, `static boss_points(level)` |
 | `DataReader`, `Subscriptions` | Helpers: validating reads of JSON data; one check of a class's bus connections. | |
 
-Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `InputDevice.Kind`, `UiCue.Cue`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry` and `GameSettings`.
+Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `IntelEntry`, `InputDevice.Kind`, `UiCue.Cue`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry` and `GameSettings`.
 
 ### Wiring and ticking
 
-`main.gd` constructs the rules on `Events`, restores the stores (`Settings`, `Scoreboard`, `IntelCodex`, `TutorialProgress`), calls `GameStateMachine.boot()`, and on every physics step (60 Hz) ticks `RunLedger`, then `LevelProgression`, then `SpawnDirector`. Nothing ticks while Paused.
+`main.gd` constructs the rules on `Events`, restores the stores (`Settings`, `Scoreboard`, `IntelCodex`, `TutorialProgress`), calls `GameStateMachine.boot()`, and on every physics step (60 Hz) ticks `RunLedger`, then `LevelProgression`, then `SpawnDirector`, then `TutorialCoach`. Nothing ticks while Paused.
 
 ## Events
 
@@ -64,6 +66,8 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `kill_scored` | `points, multiplier: int, position: Vector3` | `RunLedger` | score pop-ups, juice; `LevelProgression` (gauge) |
 | `score_changed` | `total, delta: int` | `RunLedger` | HUD |
 | `combo_changed` | `multiplier: int` (1 when none) | `RunLedger` | HUD, juice |
+| `tutorial_prompt_shown` | `prompt: TutorialPrompt.Id` | `TutorialCoach` | HUD tutorial banner |
+| `tutorial_prompt_dismissed` | `prompt: TutorialPrompt.Id, completed: bool` | `TutorialCoach` | HUD tutorial banner |
 
 ### `Events.player`
 
@@ -80,7 +84,9 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `bonus_life_awarded` | `lives: int` | `RunLedger` | "1UP" juice, SFX |
 | `player_respawned` | | `LevelProgression` (after `RunRules.RESPAWN_DELAY`) | player mech (reset); `SpawnDirector` (resumes) |
 | `repair_kit_dropped` | `position: Vector3` | `SpawnDirector` | Repair Kit spawner, tutorial |
-| `repair_collected` | `position: Vector3` | Repair Kit (*reported*) | `RunLedger` (+30 Armor), juice |
+| `repair_collected` | `position: Vector3` | Repair Kit (*reported*) | `RunLedger` (+30 Armor), juice; `TutorialCoach` |
+| `player_moved` | | player mech (*reported*: the pilot steered; once per Skirmish is enough) | `TutorialCoach` |
+| `shot_missed` | `position: Vector3` | player shot (*reported*: it expired without a hit) | `TutorialCoach` |
 
 ### `Events.enemy`
 
@@ -118,6 +124,7 @@ Every `spawn_requested` must be answered by exactly one `enemy_spawned`; `SpawnD
 | `settings_changed` | `settings: GameSettings` | `Settings` (restore, change, reset) | audio buses, juice, touch sticks, rumble, tutorial |
 | `intel_unlocked` | `entry_id: StringName` | `IntelCodex` | "New Intel" toast |
 | `intel_changed` | `unlocked: Array[StringName]` | `IntelCodex` (restore) | Intel screen |
+| `intel_catalog_changed` | `entries: Array[IntelEntry]` | `IntelCodex` (restore) | Intel screen |
 
 ## Decisions worth knowing
 

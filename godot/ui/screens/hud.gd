@@ -1,7 +1,8 @@
 class_name Hud
 extends UiScreen
 ## The in-play HUD (#73): Armor bar, lives icons, score with a punch, the
-## combo, the Boss Gauge and, in the Boss Fight, the boss's health bar. The
+## combo, the Boss Gauge and, in the Boss Fight, the boss's health bar, plus
+## the first-flight tutorial prompts (run.tutorial_prompt_*) with glyphs. The
 ## pause keys (Esc, P, Start) are routed by UiRoot. The one on-screen pause
 ## button is the touch controls' (game/input/touch_controls.gd, #25 and #84).
 ## Everything lets the pointer through to the game, so touches reach the sticks.
@@ -34,6 +35,7 @@ var _boss_row: Control
 var _boss_name: Label
 var _boss_bar: ProgressBar
 var _one_up: Label
+var _tutorial: TutorialBanner
 
 
 func _ready() -> void:
@@ -64,6 +66,14 @@ func _ready() -> void:
 	_one_up.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_one_up.visible = false
 	add_child(_one_up)
+	var bottom: MarginContainer = UiBuild.full_margin()
+	add_child(bottom)
+	var bottom_box: VBoxContainer = UiBuild.column()
+	bottom_box.alignment = BoxContainer.ALIGNMENT_END
+	bottom.add_child(bottom_box)
+	_tutorial = TutorialBanner.new()
+	_tutorial.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	bottom_box.add_child(_tutorial)
 	_reset()
 
 
@@ -113,6 +123,11 @@ func request_pause() -> void:
 	_request_pause()
 
 
+## The tutorial prompt shown, glyphs in brackets ("" when none).
+func tutorial_text() -> String:
+	return _tutorial.text()
+
+
 func _subscribe() -> void:
 	var _ok: bool = _require(
 		[
@@ -128,8 +143,19 @@ func _subscribe() -> void:
 			_bus.boss.boss_summoned.connect(_on_boss_summoned),
 			_bus.boss.boss_damaged.connect(_on_boss_damaged),
 			_bus.boss.boss_defeated.connect(_on_boss_defeated),
+			_bus.run.tutorial_prompt_shown.connect(_on_tutorial_prompt_shown),
+			_bus.run.tutorial_prompt_dismissed.connect(_tutorial.dismiss),
 		]
 	)
+
+
+func _on_device_changed() -> void:
+	_tutorial.set_device(_device)
+
+
+func _on_tutorial_prompt_shown(prompt: TutorialPrompt.Id) -> void:
+	cue(UiCue.Cue.POP)
+	_tutorial.show_prompt(prompt)
 
 
 func _request_pause() -> void:

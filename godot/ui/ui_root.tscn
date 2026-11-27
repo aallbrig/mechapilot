@@ -13,6 +13,8 @@
 [ext_resource type="Script" path="res://ui/screens/scoreboard_screen.gd" id="11_scoreboard_screen"]
 [ext_resource type="Script" path="res://ui/screens/settings_screen.gd" id="12_settings_screen"]
 [ext_resource type="Script" path="res://ui/screens/credits_screen.gd" id="13_credits_screen"]
+[ext_resource type="Script" path="res://ui/screens/how_to_play_screen.gd" id="14_how_to_play_screen"]
+[ext_resource type="Script" path="res://ui/screens/intel_screen.gd" id="15_intel_screen"]
 
 [node name="UiRoot" type="Control"]
 process_mode = 3
@@ -158,3 +160,25 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("13_credits_screen")
+
+[node name="HowToPlay" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("14_how_to_play_screen")
+
+[node name="Intel" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("15_intel_screen")

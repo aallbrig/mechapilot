@@ -7,6 +7,8 @@ extends Area3D
 
 ## The shot's life ran out; the pool parks it for reuse.
 signal expired(shot: PlayerShot)
+## The shot's life ran out without hitting anything, at `position`.
+signal missed(position: Vector3)
 
 const RADIUS: float = 0.3
 const BOLT_SIZE: Vector3 = Vector3(0.4, 0.4, 1.6)
@@ -78,6 +80,7 @@ func step(delta: float) -> void:
 	life_left -= delta
 	if life_left <= 1e-6:
 		life_left = 0.0
+		missed.emit(position)
 		expired.emit(self)
 
 
