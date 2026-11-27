@@ -16,7 +16,10 @@ const BULLET_GRAVITY := 20.0
 const BULLET_INHERIT := 0.6
 const SPHERE_RADIUS := 40.0
 const SPAWN_DIST := 25.0
-const CAM_OFFSET := Vector3(0, 0, 18.0)
+## Visual scale of the player mech; the contact radius scales with it.
+const MECH_SCALE := 1.5
+const CAMERA_DISTANCE := 24.0
+const CAM_OFFSET := Vector3(0, 0, CAMERA_DISTANCE)
 const Mech := preload("res://mech.gd")
 const WAVE_INTERVAL := 14.0
 const COMBO_WINDOW := 1.6
@@ -232,7 +235,7 @@ func _build_world() -> void:
 
 func _build_player() -> void:
 	player = Mech.new()
-	player.scale = Vector3.ONE * 1.9
+	player.scale = Vector3.ONE * MECH_SCALE
 	add_child(player)
 
 	muzzle_light = OmniLight3D.new()
@@ -741,7 +744,7 @@ func _update_enemies(delta: float) -> void:
 			e.flash -= delta
 			if e.flash <= 0.0:
 				_restore_enemy_mats(e)
-		if to_p.length() < e.radius + 1.0:
+		if to_p.length() < e.radius + 0.47 * MECH_SCALE:
 			_kill(e, false)
 			_game_over()
 			return
