@@ -4,8 +4,9 @@ extends Node
 ## device. Keyboard, mouse and gamepad come through the InputMap (InputBindings).
 ##
 ## Touch seam (#25): the touch controls call set_touch_sticks() with their
-## sticks and request_tap_shot() for a quick tap. Nothing else about touch lives
-## here, beyond the device detector noticing screen events.
+## sticks, request_tap_shot() for a quick tap and clear_touch() on leaving play.
+## Nothing else about touch lives here, beyond the device detector noticing
+## screen events.
 
 ## The last-used device changed (also published on the Events bus, see PlayerBusLink).
 signal device_changed(device: InputDevice.Kind)
@@ -55,6 +56,13 @@ func set_touch_sticks(move: Vector2, aim: Vector2) -> void:
 func request_tap_shot(screen_point: Vector2) -> void:
 	_tap_pending = true
 	_tap_point = screen_point
+
+
+## Touch seam: forget the sticks and any pending tap (the controls left play).
+func clear_touch() -> void:
+	_touch_move = Vector2.ZERO
+	_touch_aim = Vector2.ZERO
+	_tap_pending = false
 
 
 func read_intent() -> PilotIntent:

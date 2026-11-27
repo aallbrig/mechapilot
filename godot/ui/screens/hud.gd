@@ -1,14 +1,17 @@
 class_name Hud
 extends UiScreen
 ## The in-play HUD (#73): Armor bar, lives icons, score with a punch, the
-## combo, the Boss Gauge and, in the Boss Fight, the boss's health bar. Plus
-## the on-screen pause button for touch. The pause keys (Esc, P, Start) are
-## routed by UiRoot.
-## Everything but the pause button lets the pointer through to the game.
+## combo, the Boss Gauge and, in the Boss Fight, the boss's health bar. The
+## pause keys (Esc, P, Start) are routed by UiRoot. The one on-screen pause
+## button is the touch controls' (game/input/touch_controls.gd, #25 and #84).
+## Everything lets the pointer through to the game, so touches reach the sticks.
 
 const BAR_SIZE: Vector2 = Vector2(220.0, 24.0)
 const WIDE_BAR_SIZE: Vector2 = Vector2(360.0, 22.0)
-const PAUSE_SIZE: Vector2 = Vector2(72.0, 72.0)
+## Room kept at the top right for the touch controls' pause button (72 px, the
+## same size), so the score never sits under it. ui/ can't name game/, so the
+## size is repeated here.
+const PAUSE_CLEARANCE: Vector2 = Vector2(72.0, 72.0)
 const BAR_TWEEN_TIME: float = 0.25
 const HIT_SHAKE: float = 10.0
 const HIT_SHAKE_TIME: float = 0.3
@@ -31,7 +34,6 @@ var _boss_row: Control
 var _boss_name: Label
 var _boss_bar: ProgressBar
 var _one_up: Label
-var _pause_button: Button
 
 
 func _ready() -> void:
@@ -45,15 +47,10 @@ func _ready() -> void:
 	layout.add_child(top)
 	top.add_child(_build_status())
 	top.add_child(_build_score())
-	_pause_button = Button.new()
-	_pause_button.text = "II"
-	_pause_button.focus_mode = Control.FOCUS_NONE
-	_pause_button.custom_minimum_size = PAUSE_SIZE
-	_pause_button.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	_pause_button.tooltip_text = "Pause"
-	if _pause_button.pressed.connect(_request_pause) != OK:
-		push_error("Hud: could not wire the pause button")
-	top.add_child(_pause_button)
+	var clearance: Control = Control.new()
+	clearance.custom_minimum_size = PAUSE_CLEARANCE
+	clearance.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top.add_child(clearance)
 	_gauge_row = _bar_row("BOSS GAUGE", &"GaugeBar")
 	_gauge_bar = _gauge_row.get_child(1) as ProgressBar
 	layout.add_child(_gauge_row)
@@ -114,11 +111,6 @@ func boss_ratio() -> float:
 ## decision per key press).
 func request_pause() -> void:
 	_request_pause()
-
-
-## The on-screen pause button (touch and mouse).
-func pause_button() -> Button:
-	return _pause_button
 
 
 func _subscribe() -> void:
