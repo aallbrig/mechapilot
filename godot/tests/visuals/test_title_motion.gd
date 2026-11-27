@@ -1,11 +1,11 @@
 extends GdUnitTestSuite
-## The title screen respects the player (#27): the logo follows the
-## reduced-motion setting, and the title flight never lets coordinates grow
-## without bound, while re-origining stays invisible.
+## The title (#27): the logo follows the reduced-motion setting, the attract
+## dogfight is the one title view (built from the game's own sky and models)
+## and never lets coordinates grow without bound, and moving a sky's origin
+## stays invisible.
 
 const LOGO: PackedScene = preload("res://ui/title/title_logo.tscn")
-const BACKDROP: PackedScene = preload("res://game/visuals/title_backdrop.tscn")
-## Simulated title time: long enough to re-origin many times.
+## Simulated title time: long enough to show nothing drifts.
 const LONG_RUN_SECONDS: int = 2000
 const STEP_SECONDS: float = 1.0
 
@@ -34,39 +34,46 @@ func test_title_logo_follows_the_reduced_motion_setting() -> void:
 	var _follows_back: GdUnitAssert = assert_bool(restored).is_true()
 
 
-func test_title_flight_reorigins_so_coordinates_stay_bounded() -> void:
-	var backdrop: TitleBackdrop = BACKDROP.instantiate() as TitleBackdrop
-	add_child(backdrop)
+func test_attract_flight_stays_bounded() -> void:
+	var attract: AttractDogfight = AttractDogfight.new()
+	add_child(attract)
 	var farthest: float = 0.0
 	for _step: int in LONG_RUN_SECONDS:
-		backdrop._process(STEP_SECONDS)
-		farthest = maxf(farthest, absf(backdrop.camera_position().x))
-	var sky: SkyEnvironment = backdrop.get_node(^"Sky") as SkyEnvironment
-	var travelled: float = sky.world_offset().x + backdrop.camera_position().x
-	backdrop.free()
-	var bound: float = TitleBackdrop.REORIGIN_DISTANCE + TitleBackdrop.CRUISE_SPEED * STEP_SECONDS
+		attract.step(STEP_SECONDS)
+		farthest = maxf(farthest, attract.mech().position.length())
+		for enemy: EnemyVisual in attract.enemies():
+			farthest = maxf(farthest, enemy.position.length())
+	attract.free()
+	# The dogfight orbits the origin, so however long the Title runs, nothing
+	# drifts away from it (coordinates stay small; no re-origin is needed).
+	var bound: float = AttractDogfight.ORBIT_RADIUS + absf(AttractDogfight.ENEMY_DEPTH)
 	var _bounded: GdUnitAssert = assert_float(farthest).is_less_equal(bound)
-	# The flight really travelled the whole way; the origin just moved with it.
-	var _travelled: GdUnitAssert = assert_float(travelled).is_equal_approx(
-		TitleBackdrop.CRUISE_SPEED * LONG_RUN_SECONDS * STEP_SECONDS, 0.01
-	)
 
 
-func test_title_backdrop_owns_the_title_view_and_hands_it_back() -> void:
+func test_attract_owns_the_title_view_and_hands_it_back() -> void:
 	var main: Node = (load("res://main.tscn") as PackedScene).instantiate()
 	add_child(main)
-	var backdrop: TitleBackdrop = main.get_node(^"TitleBackdrop") as TitleBackdrop
-	var stage: FlightStage = main.get_node(^"FlightStage") as FlightStage
-	var title_view: bool = backdrop.is_shown() and not stage.visible
+	var attract: AttractDogfight = main.get_node(^"Attract") as AttractDogfight
+	# One title view, made of the game's own sky and models.
+	var looks: bool = (
+		attract.sky().sky_id == &"dawn"
+		and attract.view_environment() == attract.sky().environment()
+		and attract.mech() is PlayerMechVisual
+		and attract.enemies().size() == AttractDogfight.ENEMY_IDS.size()
+	)
+	# Its camera renders only the attract layer: the resting flight stage
+	# (default layer 1) never shows behind the Title.
+	var own_layer: bool = attract.view_layers() == 1 << (AttractDogfight.VISUAL_LAYER - 1)
+	var title_view: bool = attract.is_active() and attract.has_view()
 	Events.flow.announce_game_state_changed(GameState.Phase.TITLE, GameState.Phase.LEVEL_INTRO)
-	var play_view: bool = not backdrop.is_shown() and stage.visible
-	var stopped: bool = backdrop.process_mode == Node.PROCESS_MODE_DISABLED
+	var handed_back: bool = not attract.is_active() and not attract.has_view()
 	Events.flow.announce_game_state_changed(GameState.Phase.GAME_OVER, GameState.Phase.TITLE)
-	var back_to_title: bool = backdrop.is_shown() and not stage.visible
+	var back_to_title: bool = attract.is_active() and attract.has_view()
 	main.free()
+	var _looks: GdUnitAssert = assert_bool(looks).is_true()
+	var _own_layer: GdUnitAssert = assert_bool(own_layer).is_true()
 	var _title: GdUnitAssert = assert_bool(title_view).is_true()
-	var _play: GdUnitAssert = assert_bool(play_view).is_true()
-	var _stopped: GdUnitAssert = assert_bool(stopped).is_true()
+	var _handed_back: GdUnitAssert = assert_bool(handed_back).is_true()
 	var _back: GdUnitAssert = assert_bool(back_to_title).is_true()
 
 

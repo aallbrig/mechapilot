@@ -44,6 +44,14 @@ test_safe_api_rejects_decoding_media_or_config_from_data() {
       return 1
     }
   done
+  # A test may read a config file (tests are not exported); images stay banned.
+  rm "${d}/core/decode.gd"
+  write_suite test_presets 'var presets: ConfigFile = ConfigFile.new()' \
+    'var _ok: GdUnitAssert = assert_object(presets).is_not_null()'
+  scripts/checks/godot-safe-api "${d}" || return 1
+  write_suite test_presets 'var _e: Error = Image.new().load_png_from_buffer(PackedByteArray())' \
+    'var _ok: GdUnitAssert = assert_int(_e).is_equal(OK)'
+  rejects "no decoding media or config from data"
 }
 
 test_safe_api_rejects_str_to_var() {

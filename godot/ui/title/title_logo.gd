@@ -2,14 +2,19 @@ class_name TitleLogo
 extends Control
 ## The "MECHA FIGHTER" title treatment for the Title screen: heavy italic
 ## lettering with a chrome gradient, a dark outline and drop shadow, a red
-## speed stripe beneath, and a shine that sweeps across the letters. It sizes
-## its lettering to its own width, so it reads from a 360 px phone to 4K.
-## play_intro() slams it in. Under reduced motion (the player's setting,
-## followed through Events.profile.settings_changed) there is no slam, float or
+## speed stripe beneath, and a shine that sweeps across the letters. It measures
+## its lettering and sizes it to fit its own width and height, so it reads from
+## a 360 px phone to 4K without overflowing.
+## play_intro() pops it in. Under reduced motion (the player's setting,
+## followed through Events.profile.settings_changed) there is no pop, float or
 ## shine sweep.
 
-## Lettering size as a fraction of the logo's width, and its limits in pixels.
-const FONT_TO_WIDTH: float = 0.105
+## The share of the logo's width and height the lettering may fill (the rest
+## leaves room for the outline, the italic slant and the shadow), the font size
+## the lettering is measured at, and the size limits in pixels.
+const FILL_WIDTH: float = 0.8
+const FILL_HEIGHT: float = 0.6
+const MEASURE_SIZE: int = 100
 const MIN_FONT_SIZE: int = 28
 const MAX_FONT_SIZE: int = 220
 ## Outline and shadow sizes relative to the font size.
@@ -17,8 +22,9 @@ const OUTLINE_RATIO: float = 0.09
 const SHADOW_RATIO: float = 0.05
 ## The speed stripe's width relative to the font size.
 const STRIPE_TO_FONT: float = 6.5
-## The intro: start scale, duration and the settle overshoot.
-const INTRO_SCALE: float = 1.8
+## The intro: the lettering pops up from this scale (from small, like the rest
+## of the UI's juice, so it never spills off the screen), and how long it takes.
+const INTRO_SCALE: float = 0.3
 const INTRO_TIME: float = 0.45
 const STRIPE_TIME: float = 0.3
 ## Idle float: amplitude in pixels and period in seconds.
@@ -27,7 +33,7 @@ const FLOAT_PERIOD: float = 3.0
 const TEXT_SIZE_PARAM: StringName = &"text_size"
 const SHINE_PARAM: StringName = &"shine_amount"
 
-## Skip the intro slam, the idle float and the shine (the reduced-motion
+## Skip the intro pop, the idle float and the shine (the reduced-motion
 ## setting; kept in step with the player's settings once the logo is ready).
 @export var reduced_motion: bool = false:
 	set(value):
@@ -87,7 +93,7 @@ func _process(delta: float) -> void:
 	_lettering.position.y = sin(_clock / FLOAT_PERIOD * TAU) * FLOAT_AMPLITUDE
 
 
-## Slam the title in: it drops from large and faded to its place, then the
+## Pop the title in: it grows from small and faded to its place, then the
 ## stripe sweeps out under it. Under reduced motion it simply appears.
 func play_intro() -> void:
 	if _intro != null and _intro.is_valid():
@@ -124,17 +130,35 @@ func font_size() -> int:
 	return _title.label_settings.font_size
 
 
-func _fit() -> void:
-	var font_px: int = clampi(roundi(size.x * FONT_TO_WIDTH), MIN_FONT_SIZE, MAX_FONT_SIZE)
+## Size the lettering to fit a box of `box` pixels now, without waiting for the
+## containers to lay the logo out (the Title screen calls it as it resizes).
+func fit_to(box: Vector2) -> void:
+	if not is_node_ready():
+		return
 	var settings: LabelSettings = _title.label_settings
+	# Measure the lettering, then size it to fit both the logo's width and height.
+	var measured: Vector2 = settings.font.get_string_size(
+		_title.text, HORIZONTAL_ALIGNMENT_LEFT, -1, MEASURE_SIZE
+	)
+	var per_px: float = measured.x / MEASURE_SIZE
+	var by_width: float = box.x * FILL_WIDTH / maxf(per_px, 1e-3)
+	var by_height: float = box.y * FILL_HEIGHT if box.y > 0.0 else by_width
+	var font_px: int = clampi(floori(minf(by_width, by_height)), MIN_FONT_SIZE, MAX_FONT_SIZE)
 	settings.font_size = font_px
 	settings.outline_size = maxi(1, roundi(font_px * OUTLINE_RATIO))
 	settings.shadow_size = maxi(1, roundi(font_px * SHADOW_RATIO))
 	settings.shadow_offset = Vector2.ONE * roundf(font_px * SHADOW_RATIO)
 	_stripe.custom_minimum_size = Vector2(
-		roundf(font_px * STRIPE_TO_FONT), maxf(2.0, roundf(font_px * SHADOW_RATIO))
+		minf(roundf(font_px * STRIPE_TO_FONT), box.x), maxf(2.0, roundf(font_px * SHADOW_RATIO))
 	)
 	_stripe.pivot_offset = Vector2(_stripe.size.x * 0.5, 0.0)
+
+
+## On its own resize, fit the box the parent asked for (its minimum size) when
+## there is one: a resize from an older layout pass must not refit the lettering
+## to a stale, larger box after the parent already fitted the new one.
+func _fit() -> void:
+	fit_to(custom_minimum_size if custom_minimum_size != Vector2.ZERO else size)
 
 
 func _update_shine_area() -> void:

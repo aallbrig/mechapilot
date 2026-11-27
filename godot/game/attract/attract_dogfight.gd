@@ -1,42 +1,62 @@
 class_name AttractDogfight
 extends Node3D
 ## The Title's attract mode (#73): an AI-flown mech dogfighting a few enemies
-## behind the menu. It is self-contained on purpose: it announces no Game
-## Events (so it never scores, unlocks Intel or spawns through the rules), and
-## builds its scene from primitive meshes.
+## behind the menu, under the Level 1 sky. It is self-contained on purpose: it
+## announces no Game Events (so it never scores, unlocks Intel or spawns through
+## the rules). Its look is the game's own: the dawn sky (SkyLibrary), the player
+## mech (PlayerMechVisual) and the enemy models (VisualLibrary); only the shots
+## and blasts are drawn here.
 ##
-## Seam: when the gameplay scenes (player mech #22, enemies #23) are in, the
-## composition root can swap this node for the real stage flown by a bot pilot.
-## Anything with this node's contract works: it shows and runs only while
-## `active_phases` holds the Game State, and stays idle otherwise.
+## It is the one title view: its camera is current and it runs only while
+## ACTIVE_PHASES holds the Game State, and it hands the view back otherwise. Its
+## models sit on their own visual layer and its camera renders only that layer,
+## so the flight stage resting behind the Title never shows through.
+##
+## Seam: when the gameplay scenes are in, the composition root can swap this
+## node for the real stage flown by a bot pilot; anything with this contract
+## works.
 
 const ACTIVE_PHASES: Array[GameState.Phase] = [GameState.Phase.BOOT, GameState.Phase.TITLE]
-const ENEMY_COUNT: int = 4
+## The enemy models that take part, in order (one each).
+const ENEMY_IDS: Array[StringName] = [&"fighter", &"interceptor", &"drone", &"heavy"]
+## The sky the Title shows: Level 1's.
+const SKY_ID: StringName = &"dawn"
+## The visual layer (1-based) the attract scene draws on, alone.
+const VISUAL_LAYER: int = 20
 const ORBIT_RADIUS: float = 9.0
 const MECH_ORBIT_RADIUS: float = 5.0
 const MECH_ORBIT_SPEED: float = 0.55
 const ENEMY_ORBIT_SPEED: float = 0.35
 const BOB_HEIGHT: float = 1.2
+const ENEMY_DEPTH: float = -2.0
+const MECH_SCALE: float = 1.6
+## How far the mech tilts toward its climb or dive (fraction of the slope angle).
+const MECH_TILT: float = 0.5
+## A streamlined flying pose for the mech, in the prototype's joint angles.
+const WING_POSE: float = 0.35
+const ARM_POSE: float = -0.75
+const THIGH_POSE: float = -0.6
+const SHIN_POSE: float = -0.08
 const FIRE_INTERVAL: float = 0.35
 const SHOT_SPEED: float = 22.0
 const SHOT_GRAVITY: float = 9.0
 const SHOT_LIFE: float = 1.6
+const SHOT_RADIUS: float = 0.15
 const HIT_RADIUS: float = 1.1
 const RESPAWN_TIME: float = 1.2
 const BLAST_TIME: float = 0.5
 const BLAST_SCALE: float = 3.5
 const CAMERA_POSITION: Vector3 = Vector3(0.0, 0.0, 22.0)
-const SKY_TOP: Color = Color(0.16, 0.24, 0.55)
-const SKY_HORIZON: Color = Color(0.98, 0.62, 0.55)
-const MECH_COLOR: Color = Color(0.75, 0.9, 1.0)
-const ENEMY_COLOR: Color = Color(1.0, 0.35, 0.4)
 const SHOT_COLOR: Color = Color(1.0, 0.9, 0.4)
 const BLAST_COLOR: Color = Color(1.0, 0.6, 0.2)
 
 var _time: float = 0.0
 var _fire_left: float = 0.0
-var _mech: MeshInstance3D
-var _enemies: Array[MeshInstance3D] = []
+var _sky: SkyEnvironment
+var _mech: PlayerMechVisual
+var _mech_last: Vector3 = Vector3.ZERO
+var _enemies: Array[EnemyVisual] = []
+var _enemy_last: Array[Vector3] = []
 var _enemy_phase: Array[float] = []
 var _respawn_left: Array[float] = []
 var _shots: Array[MeshInstance3D] = []
@@ -49,17 +69,25 @@ var _kills: int = 0
 
 func _ready() -> void:
 	_build_world()
-	_mech = _mesh(_mech_mesh(), MECH_COLOR)
-	for i: int in ENEMY_COUNT:
-		var enemy: MeshInstance3D = _mesh(_enemy_mesh(), ENEMY_COLOR)
+	_mech = VisualLibrary.player_mech()
+	_mech.scale = Vector3.ONE * MECH_SCALE
+	add_child(_mech)
+	_pose(PlayerMechVisual.LEFT)
+	_pose(PlayerMechVisual.RIGHT)
+	for i: int in ENEMY_IDS.size():
+		var enemy: EnemyVisual = VisualLibrary.enemy(ENEMY_IDS[i])
+		add_child(enemy)
 		_enemies.append(enemy)
-		_enemy_phase.append(TAU * i / ENEMY_COUNT)
+		_enemy_last.append(Vector3.ZERO)
+		_enemy_phase.append(TAU * i / ENEMY_IDS.size())
 		_respawn_left.append(0.0)
 	_shot_mesh = SphereMesh.new()
-	_shot_mesh.radius = 0.15
-	_shot_mesh.height = 0.3
+	_shot_mesh.radius = SHOT_RADIUS
+	_shot_mesh.height = SHOT_RADIUS * 2.0
+	_put_on_layer(self)
 	if Events.flow.game_state_changed.connect(_on_game_state_changed) != OK:
 		push_error("AttractDogfight: could not hear game_state_changed")
+	step(0.0)
 	_activate(true)
 
 
@@ -68,19 +96,50 @@ func is_active() -> bool:
 	return visible
 
 
+## Whether its camera is the view (it is, exactly while active).
+func has_view() -> bool:
+	return _camera.current
+
+
+## The Environment its camera looks through (the sky's own).
+func view_environment() -> Environment:
+	return _camera.environment
+
+
+## The visual layers its camera renders (the attract scene's own, alone).
+func view_layers() -> int:
+	return _camera.cull_mask
+
+
 ## Enemies shot down so far (the dogfight is alive).
 func kills() -> int:
 	return _kills
+
+
+## The sky behind the dogfight.
+func sky() -> SkyEnvironment:
+	return _sky
+
+
+## The player mech flying the dogfight.
+func mech() -> PlayerMechVisual:
+	return _mech
+
+
+## The enemy models in the dogfight.
+func enemies() -> Array[EnemyVisual]:
+	return _enemies.duplicate()
 
 
 ## Advances the dogfight by `delta` seconds (the engine calls it every frame).
 func step(delta: float) -> void:
 	_time += delta
 	var mech_angle: float = _time * MECH_ORBIT_SPEED
+	_mech_last = _mech.position
 	_mech.position = Vector3(
 		cos(mech_angle) * MECH_ORBIT_RADIUS, sin(mech_angle * 2.0) * BOB_HEIGHT, 0.0
 	)
-	_mech.rotation.z = mech_angle + PI * 0.5
+	_face_mech(_mech.position - _mech_last)
 	for i: int in _enemies.size():
 		_step_enemy(i, delta)
 	_fire_left -= delta
@@ -88,6 +147,7 @@ func step(delta: float) -> void:
 		_fire_left = FIRE_INTERVAL
 		_fire()
 	_step_shots(delta)
+	_sky.follow(_camera.position)
 
 
 func _process(delta: float) -> void:
@@ -105,28 +165,57 @@ func _activate(on: bool) -> void:
 	_camera.current = on
 
 
+func _pose(side: int) -> void:
+	_mech.wing(side).rotation.x = WING_POSE
+	_mech.arm(side).rotation.x = ARM_POSE
+	_mech.thigh(side).rotation.x = THIGH_POSE
+	_mech.shin(side).rotation.x = SHIN_POSE
+
+
+## Turn the mech to fly along `travel`: its body yaws to face left or right,
+## and the whole mech tilts toward the climb or dive.
+func _face_mech(travel: Vector3) -> void:
+	if travel.length_squared() < 1e-10:
+		return
+	var facing: float = 1.0 if travel.x >= 0.0 else -1.0
+	_mech.body().rotation.y = -PI * 0.5 * facing
+	_mech.rotation.z = atan2(travel.y, absf(travel.x)) * MECH_TILT * facing
+
+
+## Point a side-profile model (nose along +X) along `travel`, keeping it upright.
+static func _face(model: Node3D, travel: Vector3) -> void:
+	if travel.length_squared() < 1e-10:
+		return
+	if travel.x >= 0.0:
+		model.rotation = Vector3(0.0, 0.0, atan2(travel.y, travel.x))
+	else:
+		model.rotation = Vector3(0.0, PI, atan2(travel.y, -travel.x))
+
+
 func _step_enemy(i: int, delta: float) -> void:
-	var enemy: MeshInstance3D = _enemies[i]
+	var enemy: EnemyVisual = _enemies[i]
 	if _respawn_left[i] > 0.0:
 		_respawn_left[i] -= delta
 		enemy.visible = _respawn_left[i] <= 0.0
 		return
 	var angle: float = _enemy_phase[i] - _time * ENEMY_ORBIT_SPEED
+	_enemy_last[i] = enemy.position
 	enemy.position = Vector3(
-		cos(angle) * ORBIT_RADIUS, sin(angle * 1.5) * ORBIT_RADIUS * 0.45, -2.0
+		cos(angle) * ORBIT_RADIUS, sin(angle * 1.5) * ORBIT_RADIUS * 0.45, ENEMY_DEPTH
 	)
-	enemy.rotation.z = angle - PI * 0.5
+	_face(enemy, enemy.position - _enemy_last[i])
 
 
 func _fire() -> void:
-	var target: MeshInstance3D = _nearest_enemy()
+	var target: EnemyVisual = _nearest_enemy()
 	if target == null:
 		return
 	var aim: Vector3 = (target.position - _mech.position).normalized()
 	var shot: MeshInstance3D = MeshInstance3D.new()
 	shot.mesh = _shot_mesh
-	shot.material_override = _material(SHOT_COLOR, true)
+	shot.material_override = _material(SHOT_COLOR)
 	shot.position = _mech.position
+	shot.layers = _layer_mask()
 	add_child(shot)
 	_shots.append(shot)
 	# Aim a little high: the shots drop, like the player's.
@@ -161,10 +250,10 @@ func _destroy(i: int) -> void:
 	_respawn_left[i] = RESPAWN_TIME
 	_enemies[i].visible = false
 	var blast: MeshInstance3D = MeshInstance3D.new()
-	var sphere: SphereMesh = SphereMesh.new()
-	blast.mesh = sphere
-	blast.material_override = _material(BLAST_COLOR, true)
+	blast.mesh = SphereMesh.new()
+	blast.material_override = _material(BLAST_COLOR)
 	blast.position = _enemies[i].position
+	blast.layers = _layer_mask()
 	add_child(blast)
 	var tween: Tween = blast.create_tween().set_parallel(true)
 	var _grow: PropertyTweener = tween.tween_property(
@@ -176,8 +265,8 @@ func _destroy(i: int) -> void:
 	var _gone: CallbackTweener = tween.chain().tween_callback(blast.queue_free)
 
 
-func _nearest_enemy() -> MeshInstance3D:
-	var best: MeshInstance3D = null
+func _nearest_enemy() -> EnemyVisual:
+	var best: EnemyVisual = null
 	var best_distance: float = INF
 	for i: int in _enemies.size():
 		if _respawn_left[i] > 0.0:
@@ -192,51 +281,33 @@ func _nearest_enemy() -> MeshInstance3D:
 func _build_world() -> void:
 	_camera = Camera3D.new()
 	_camera.position = CAMERA_POSITION
+	_camera.cull_mask = _layer_mask()
 	add_child(_camera)
-	var light: DirectionalLight3D = DirectionalLight3D.new()
-	light.rotation = Vector3(-0.8, 0.6, 0.0)
-	add_child(light)
-	var sky_material: ProceduralSkyMaterial = ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = SKY_TOP
-	sky_material.sky_horizon_color = SKY_HORIZON
-	sky_material.ground_horizon_color = SKY_HORIZON
-	sky_material.ground_bottom_color = SKY_TOP
-	var sky: Sky = Sky.new()
-	sky.sky_material = sky_material
-	var environment: Environment = Environment.new()
-	environment.background_mode = Environment.BG_SKY
-	environment.sky = sky
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	var world: WorldEnvironment = WorldEnvironment.new()
-	world.environment = environment
-	add_child(world)
+	_sky = SkyLibrary.instantiate(SKY_ID)
+	add_child(_sky)
+	# The camera looks through the sky's own Environment, so the Title shows the
+	# dawn sky whichever WorldEnvironment the world uses, and the sky's sun
+	# lights only the attract scene.
+	_camera.environment = _sky.environment()
+	_sky.sun().light_cull_mask = _layer_mask()
 
 
-func _mesh(mesh: Mesh, color: Color) -> MeshInstance3D:
-	var instance: MeshInstance3D = MeshInstance3D.new()
-	instance.mesh = mesh
-	instance.material_override = _material(color, false)
-	add_child(instance)
-	return instance
+## Move every visual node below `node` onto the attract scene's own layer.
+static func _put_on_layer(node: Node) -> void:
+	var visual: VisualInstance3D = node as VisualInstance3D
+	if visual != null:
+		visual.layers = _layer_mask()
+	for child: Node in node.get_children():
+		_put_on_layer(child)
 
 
-static func _mech_mesh() -> Mesh:
-	var body: CapsuleMesh = CapsuleMesh.new()
-	body.radius = 0.45
-	body.height = 1.8
-	return body
+static func _layer_mask() -> int:
+	return 1 << (VISUAL_LAYER - 1)
 
 
-static func _enemy_mesh() -> Mesh:
-	var body: PrismMesh = PrismMesh.new()
-	body.size = Vector3(1.2, 1.6, 0.5)
-	return body
-
-
-static func _material(color: Color, glow: bool) -> StandardMaterial3D:
+static func _material(color: Color) -> StandardMaterial3D:
 	var material: StandardMaterial3D = StandardMaterial3D.new()
 	material.albedo_color = color
-	if glow:
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	return material
