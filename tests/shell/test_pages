@@ -110,7 +110,7 @@ test_pages_artifact_rejects_incomplete_or_unsafe_trees() {
   artifact_rejects production-build "sed -i.bak '/name=\"robots\"/d' index.html && rm index.html.bak" || return 1
   artifact_rejects no-game-link "sed -i.bak 's#/mechapilot/game/#/elsewhere/#' index.html && rm index.html.bak" || return 1
   artifact_rejects no-config "sed -i.bak '/GODOT_CONFIG = /d' game/index.html && rm game/index.html.bak" || return 1
-  artifact_rejects two-configs "grep 'GODOT_CONFIG = ' game/index.html >>game/index.html" || return 1
+  artifact_rejects two-configs "grep 'GODOT_CONFIG = ' game/index.html >../cfg && cat ../cfg >>game/index.html && rm ../cfg" || return 1
   artifact_rejects config-not-json "sed -i.bak 's/\"args\":\\[\\],/\"args\":[,/' game/index.html && rm game/index.html.bak" || return 1
   artifact_rejects exe-traversal "sed -i.bak 's/\"executable\":\"index\"/\"executable\":\"..\\/index\"/' game/index.html && rm game/index.html.bak" || return 1
   artifact_rejects pack-not-pck "sed -i.bak 's/\"mainPack\":null/\"mainPack\":\"index.zip\"/' game/index.html && rm game/index.html.bak" || return 1
