@@ -95,10 +95,6 @@ func step(
 	# so the whole camera (not only its goal) recentres within RECENTER seconds.
 	_focus = _focus.lerp(_goal, settle)
 	_focus.z = 0.0
-	# The goal stays inside the safe frame too, so the spring never pulls the
-	# focus back against the clamp.
-	_goal.x = clampf(_goal.x, target.x - safe_frame.x, target.x + safe_frame.x)
-	_goal.y = clampf(_goal.y, target.y - safe_frame.y, target.y + safe_frame.y)
 	return _hold_in_frame(target, velocity, safe_frame)
 
 
