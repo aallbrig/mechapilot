@@ -14,12 +14,8 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
 unset HOOK_TIMING_CHILD
 # Git passes the refs being pushed on stdin.
 selected="$(scripts/pre-push-select)"
-set --
-while IFS= read -r t; do
-  [ -n "${t}" ] && set -- "$@" "${t}"
-done <<EOF
-${selected}
-EOF
-[ "$#" -gt 0 ] || set -- ci:fast
-printf 'pre-push: task %s\n' "$*"
-exec scripts/hook-timing pre-push "$*" task "$@"
+[ -n "${selected}" ] || selected=ci:fast
+# What the timing line records: the tasks, plus test:shell:new for new test files.
+label="$(printf '%s\n' "${selected}" | sed 's/^shell-test:.*/test:shell:new/' | uniq | tr '\n' ' ')"
+printf 'pre-push: %s\n' "${label}"
+exec scripts/hook-timing pre-push "${label}" scripts/pre-push-run "${selected}"

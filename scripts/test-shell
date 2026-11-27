@@ -1,11 +1,26 @@
 #!/bin/sh
 # Run POSIX shell tests in tests/shell/test_* and write JUnit XML.
 # Each test file is a sh script; each function named test_* is one test case.
+#
+# Usage: scripts/test-shell [out-dir [test-file...]]
+# With test files, only those run (the pre-push hook uses this for new test
+# files, writing outside build/test-results); `task test` always runs them all.
 set -eu
 # shellcheck source=lib-tests
 . "$(dirname "$0")/lib-tests"
 
 out_dir="${1:-build/test-results}"
+if [ "$#" -gt 0 ]; then shift; fi
+for file in "$@"; do
+  case "${file}" in
+    tests/shell/test_*/* | tests/shell/*[!A-Za-z0-9_/]*) ;;
+    tests/shell/test_*) [ ! -f "${file}" ] || continue ;;
+    *) ;;
+  esac
+  printf 'test-shell: not a shell test file: %s\n' "${file}" >&2
+  exit 64
+done
+if [ "$#" -eq 0 ]; then set -- tests/shell/test_*; fi
 mkdir -p "${out_dir}"
 xml="${out_dir}/shell.xml"
 cases="$(mktemp)"
@@ -19,10 +34,12 @@ unset ACCEPTANCE_RECORD ACCEPTANCE_EVIDENCE ACCEPTANCE_BINDING ACCEPTANCE_BINDIN
 # finds its repository from its working directory.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE GIT_QUARANTINE_PATH
+# Set by scripts/hook-timing for the hook it runs; tests start without it.
+unset HOOK_TIMING_CHILD
 
 total=0
 failed=0
-for file in tests/shell/test_*; do
+for file in "$@"; do
   [ -f "${file}" ] || continue
   names="$(shell_test_names <"${file}")"
   for name in ${names}; do
