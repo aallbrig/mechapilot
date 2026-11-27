@@ -16,6 +16,10 @@ const CREATOR_PREFIX: String = "Created by "
 const CREATOR_GAP: int = 4
 const CREATOR_POP_FROM: float = 0.85
 const CREATOR_POP_DELAY: float = 0.1
+## The creator's name starts at the TitleLabel size and steps down by this
+## until it fits the column on one line, but never below the floor.
+const CREATOR_FIT_STEP: int = 2
+const CREATOR_MIN_FONT_SIZE: int = 32
 
 var _scroll: ScrollContainer
 var _list: VBoxContainer
@@ -114,17 +118,28 @@ static func read_font_licences() -> PackedStringArray:
 
 
 ## The creator named on the "Created by <name>." line of res://CREDITS.md,
-## or "" when the file has no such line.
+## or "" when the file has no such line above its asset table.
 static func read_creator() -> String:
 	var file: FileAccess = FileAccess.open("res://CREDITS.md", FileAccess.READ)
 	if file == null:
 		push_error("CreditsScreen: res://CREDITS.md is missing")
 		return ""
-	while not file.eof_reached():
-		var line: String = file.get_line().strip_edges()
+	var creator: String = creator_in(file.get_as_text())
+	if creator.is_empty():
+		push_error('CreditsScreen: res://CREDITS.md has no "Created by" line above its table')
+	return creator
+
+
+## The name on the first "Created by <name>." line of a CREDITS.md text that
+## comes before the asset table; a table cell or a line below the table never
+## counts. "" when there is none.
+static func creator_in(text: String) -> String:
+	for raw: String in text.split("\n"):
+		var line: String = raw.strip_edges()
+		if line.begins_with("|"):
+			break
 		if line.begins_with(CREATOR_PREFIX) and line.ends_with("."):
 			return line.trim_prefix(CREATOR_PREFIX).trim_suffix(".").strip_edges()
-	push_error('CreditsScreen: res://CREDITS.md has no "Created by" line')
 	return ""
 
 
@@ -178,6 +193,24 @@ func _add_opening(creator: String) -> void:
 	_creator_name = UiBuild.paragraph(creator, &"TitleLabel")
 	_opening.add_child(_creator_name)
 	_list.add_child(_opening)
+	_fit_on_one_line(_creator_name, UiBuild.COLUMN_WIDTH)
+
+
+## Steps `label`'s font size down from its theme size until its text, with its
+## outline, fits `width` on one line (or the size reaches the floor).
+static func _fit_on_one_line(label: Label, width: float) -> void:
+	var font: Font = label.get_theme_font(&"font")
+	var outline: int = label.get_theme_constant(&"outline_size")
+	var font_size: int = label.get_theme_font_size(&"font_size")
+	while (
+		font_size > CREATOR_MIN_FONT_SIZE
+		and (
+			font.get_string_size(label.text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + outline
+			> width
+		)
+	):
+		font_size -= CREATOR_FIT_STEP
+	label.add_theme_font_size_override(&"font_size", font_size)
 
 
 func _on_enter() -> void:
