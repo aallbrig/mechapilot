@@ -1,0 +1,114 @@
+#!/bin/sh
+# Every media asset in the Godot project is credited, and every credit is real.
+#
+#   asset    a file under the project (outside addons/, which carries its own
+#            licences and is pinned by godot-addons, and outside .godot/) whose
+#            extension is an image, audio, model, font or texture format
+#   credit   a table row in <project>/CREDITS.md whose first cell holds one or
+#            more backticked project-relative paths (a file, or a directory
+#            ending in "/" that covers everything below it) and whose last cell
+#            names an allowed licence (optionally as a Markdown link)
+#
+# Fails when an asset has no credit, a credit names a licence outside the
+# allowlist, a credited path does not exist (a stale credit), or a credited
+# path is absolute or climbs out of the project ("..").
+#
+# Usage: scripts/checks/asset-credits [project-dir]   (default: godot)
+set -euf
+LC_ALL=C
+export LC_ALL
+
+root="${1:-godot}"
+if [ ! -f "${root}/project.godot" ]; then
+  printf 'asset-credits: no project.godot in %s\n' "${root}" >&2
+  exit 1
+fi
+credits="${root}/CREDITS.md"
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+status=0
+
+fail() {
+  printf 'asset-credits: %s\n' "$1" >&2
+  status=1
+}
+
+# Media assets, project-relative and sorted. Extensions match in any case.
+(cd "${root}" && find . -type f ! -path './addons/*' ! -path './.godot/*' |
+  sed 's|^\./||' |
+  grep -Ei '\.(png|jpe?g|webp|svg|bmp|tga|exr|hdr|ktx2?|dds|ogg|wav|mp3|flac|glb|gltf|bin|obj|fbx|blend|dae|ttf|otf|woff2?|fnt)$' |
+  sort) >"${work}/assets" || true
+
+# Credit rows: "<paths>\t<licence>", one row per line. The licence is the last
+# cell, with a Markdown link reduced to its text.
+: >"${work}/rows"
+if [ -f "${credits}" ]; then
+  awk -F'|' '
+    /^[[:space:]]*\|/ {
+      first = $2
+      last = $(NF - 1)
+      if (first !~ /`/) next
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", last)
+      if (last ~ /^\[[^]]*\]\([^)]*\)$/) { sub(/^\[/, "", last); sub(/\]\(.*$/, "", last) }
+      paths = ""
+      rest = first
+      while (match(rest, /`[^`]*`/)) {
+        p = substr(rest, RSTART + 1, RLENGTH - 2)
+        paths = paths (paths == "" ? "" : " ") p
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      printf "%s\t%s\n", paths, last
+    }
+  ' "${credits}" >"${work}/rows"
+elif [ -s "${work}/assets" ]; then
+  fail "${credits} is missing, but the project has assets"
+fi
+
+: >"${work}/credited"
+tab="$(printf '\t')"
+while IFS="${tab}" read -r paths licence; do
+  case "${licence}" in
+    'CC0 1.0' | 'CC BY 3.0' | 'CC BY 4.0' | 'OFL 1.1' | 'MIT' | 'Apache 2.0') ;;
+    *) fail "${paths}: licence \"${licence}\" is not in the allowlist" ;;
+  esac
+  for p in ${paths}; do
+    case "${p}" in
+      /* | ../* | */../* | .. | */..)
+        fail "${p}: credited paths must stay inside the project"
+        continue
+        ;;
+      *) ;;
+    esac
+    if [ ! -e "${root}/${p}" ]; then
+      fail "${p}: credited, but no such file or directory (stale credit)"
+      continue
+    fi
+    printf '%s\n' "${p}" >>"${work}/credited"
+  done
+done <"${work}/rows"
+
+while IFS= read -r asset; do
+  covered=no
+  while IFS= read -r p; do
+    case "${p}" in
+      */)
+        case "${asset}" in "${p}"*) covered=yes ;; *) ;; esac
+        ;;
+      *)
+        if [ "${asset}" = "${p}" ]; then covered=yes; fi
+        ;;
+    esac
+    if [ "${covered}" = yes ]; then break; fi
+  done <"${work}/credited"
+  if [ "${covered}" = no ]; then
+    fail "${asset}: not credited in ${credits}"
+  fi
+done <"${work}/assets"
+
+if [ "${status}" -eq 0 ]; then
+  count="$(wc -l <"${work}/assets" | tr -d ' ')"
+  rows="$(wc -l <"${work}/rows" | tr -d ' ')"
+  printf 'asset-credits: ok (%s assets, %s credits)\n' "${count}" "${rows}"
+fi
+exit "${status}"

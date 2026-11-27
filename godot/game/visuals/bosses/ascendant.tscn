@@ -1,0 +1,392 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://game/visuals/bosses/boss_visual.gd" id="1_boss_visual"]
+[ext_resource type="Script" path="res://game/visuals/kit/visual_piece.gd" id="2_visual_piece"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
+resource_name = "hull"
+albedo_color = Color(0.88, 0.86, 0.8, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2"]
+resource_name = "trim"
+albedo_color = Color(0.7, 0.62, 0.45, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_3"]
+resource_name = "frame"
+albedo_color = Color(0.2, 0.16, 0.24, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4"]
+resource_name = "accent"
+albedo_color = Color(0.85, 0.65, 0.25, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5"]
+resource_name = "metal"
+albedo_color = Color(0.6, 0.6, 0.65, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_6"]
+resource_name = "glow"
+albedo_color = Color(1, 0.25, 0.85, 1)
+emission_enabled = true
+emission = Color(1, 0.25, 0.85, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_7"]
+radius = 6
+height = 12
+radial_segments = 16
+rings = 8
+
+[sub_resource type="SphereMesh" id="SphereMesh_8"]
+radius = 3
+height = 6
+radial_segments = 14
+rings = 6
+
+[sub_resource type="TorusMesh" id="TorusMesh_9"]
+inner_radius = 5.4
+outer_radius = 6
+rings = 20
+ring_segments = 4
+
+[sub_resource type="PrismMesh" id="PrismMesh_10"]
+left_to_right = 0.5
+size = Vector3(3, 1.2, 0.6)
+
+[sub_resource type="PrismMesh" id="PrismMesh_11"]
+left_to_right = 0.5
+size = Vector3(0.6, 1.4, 0.3)
+
+[sub_resource type="BoxMesh" id="BoxMesh_12"]
+size = Vector3(14, 0.15, 0.2)
+
+[sub_resource type="SphereMesh" id="SphereMesh_13"]
+radius = 0.6
+height = 1.2
+radial_segments = 6
+rings = 3
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_14"]
+top_radius = 0.15
+bottom_radius = 0.45
+height = 1.1
+radial_segments = 6
+rings = 1
+
+[sub_resource type="SphereMesh" id="SphereMesh_15"]
+radius = 0.2
+height = 0.4
+radial_segments = 6
+rings = 3
+
+[sub_resource type="SphereMesh" id="SphereMesh_16"]
+radius = 0.75
+height = 1.5
+radial_segments = 4
+rings = 2
+
+[sub_resource type="TorusMesh" id="TorusMesh_17"]
+inner_radius = 0.85
+outer_radius = 1.05
+rings = 10
+ring_segments = 3
+
+[sub_resource type="SphereMesh" id="SphereMesh_18"]
+radius = 1.5
+height = 3
+radial_segments = 8
+rings = 4
+
+[sub_resource type="TorusMesh" id="TorusMesh_19"]
+inner_radius = 1.7
+outer_radius = 2
+rings = 14
+ring_segments = 3
+
+[sub_resource type="SphereMesh" id="SphereMesh_20"]
+radius = 1.3
+height = 2.6
+radial_segments = 10
+rings = 5
+
+[sub_resource type="PrismMesh" id="PrismMesh_21"]
+left_to_right = 0.5
+size = Vector3(0.5, 1.6, 0.4)
+
+[node name="Ascendant" type="Node3D"]
+script = ExtResource("1_boss_visual")
+phase_count = 3
+turret_count = 4
+weak_point_count = 1
+extra_markers = Array[StringName]([&"ShieldNode1", &"ShieldNode2", &"ShieldNode3"])
+
+[node name="Hull" type="MeshInstance3D" parent="."]
+unique_name_in_owner = true
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1.8, 0, 0, 0, 0.42, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("SphereMesh_7")
+material_override = SubResource("StandardMaterial3D_1")
+
+[node name="Part2" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1.5, 0, 0, 0, 0.6, 0, 0, 0, 1, 0, 1.5, 0)
+mesh = SubResource("SphereMesh_8")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part3" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+mesh = SubResource("TorusMesh_9")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part4" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0.980067, -0.198669, 0, 0.198669, 0.980067, 0, 0, 0, 1, -8.5, 0.4, 0)
+mesh = SubResource("PrismMesh_10")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part5" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(0.980067, 0.198669, 0, -0.198669, 0.980067, 0, 0, 0, 1, 8.5, 0.4, 0)
+mesh = SubResource("PrismMesh_10")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part6" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 2, 0)
+mesh = SubResource("PrismMesh_11")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part7" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 2.5, 0)
+mesh = SubResource("PrismMesh_11")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part8" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)
+mesh = SubResource("PrismMesh_11")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part9" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2.5, 0)
+mesh = SubResource("PrismMesh_11")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part10" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 2, 0)
+mesh = SubResource("PrismMesh_11")
+material_override = SubResource("StandardMaterial3D_4")
+
+[node name="Part11" type="MeshInstance3D" parent="Hull"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.4, 2)
+mesh = SubResource("BoxMesh_12")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Turret1" type="Node3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -6, -2.3, 0)
+
+[node name="Turret1Shell" type="MeshInstance3D" parent="Turret1"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Turret1/Turret1Shell"]
+mesh = SubResource("SphereMesh_13")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part2" type="MeshInstance3D" parent="Turret1/Turret1Shell"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0.7, 0, 0)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part3" type="MeshInstance3D" parent="Turret1/Turret1Shell"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 0)
+mesh = SubResource("SphereMesh_15")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Turret1Muzzle" type="Marker3D" parent="Turret1"]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.45, 0, 0)
+
+[node name="Turret2" type="Node3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, -2, -2.3, 0)
+
+[node name="Turret2Shell" type="MeshInstance3D" parent="Turret2"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Turret2/Turret2Shell"]
+mesh = SubResource("SphereMesh_13")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part2" type="MeshInstance3D" parent="Turret2/Turret2Shell"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0.7, 0, 0)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part3" type="MeshInstance3D" parent="Turret2/Turret2Shell"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 0)
+mesh = SubResource("SphereMesh_15")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Turret2Muzzle" type="Marker3D" parent="Turret2"]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.45, 0, 0)
+
+[node name="Turret3" type="Node3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 2, -2.3, 0)
+
+[node name="Turret3Shell" type="MeshInstance3D" parent="Turret3"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Turret3/Turret3Shell"]
+mesh = SubResource("SphereMesh_13")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part2" type="MeshInstance3D" parent="Turret3/Turret3Shell"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0.7, 0, 0)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part3" type="MeshInstance3D" parent="Turret3/Turret3Shell"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 0)
+mesh = SubResource("SphereMesh_15")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Turret3Muzzle" type="Marker3D" parent="Turret3"]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.45, 0, 0)
+
+[node name="Turret4" type="Node3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 6, -2.3, 0)
+
+[node name="Turret4Shell" type="MeshInstance3D" parent="Turret4"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Turret4/Turret4Shell"]
+mesh = SubResource("SphereMesh_13")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part2" type="MeshInstance3D" parent="Turret4/Turret4Shell"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 0.7, 0, 0)
+mesh = SubResource("CylinderMesh_14")
+material_override = SubResource("StandardMaterial3D_2")
+
+[node name="Part3" type="MeshInstance3D" parent="Turret4/Turret4Shell"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 0)
+mesh = SubResource("SphereMesh_15")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Turret4Muzzle" type="Marker3D" parent="Turret4"]
+unique_name_in_owner = true
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.45, 0, 0)
+
+[node name="WeakPoint1" type="Marker3D" parent="."]
+unique_name_in_owner = true
+transform = Transform3D(-1, 0, 0, 0, 0, 1, 0, 1, 0, 0, -3.3, 0)
+
+[node name="Phase1" type="Node3D" parent="."]
+unique_name_in_owner = true
+
+[node name="ShieldNode1" type="MeshInstance3D" parent="Phase1"]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1.4, 1.5)
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase1/ShieldNode1"]
+mesh = SubResource("SphereMesh_16")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Part2" type="MeshInstance3D" parent="Phase1/ShieldNode1"]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+mesh = SubResource("TorusMesh_17")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="ShieldNode2" type="MeshInstance3D" parent="Phase1"]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.9, 1.5)
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase1/ShieldNode2"]
+mesh = SubResource("SphereMesh_16")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Part2" type="MeshInstance3D" parent="Phase1/ShieldNode2"]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+mesh = SubResource("TorusMesh_17")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="ShieldNode3" type="MeshInstance3D" parent="Phase1"]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 1.4, 1.5)
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase1/ShieldNode3"]
+mesh = SubResource("SphereMesh_16")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Part2" type="MeshInstance3D" parent="Phase1/ShieldNode3"]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+mesh = SubResource("TorusMesh_17")
+material_override = SubResource("StandardMaterial3D_5")
+
+[node name="CoreCage" type="MeshInstance3D" parent="Phase1"]
+script = ExtResource("2_visual_piece")
+
+[node name="Phase2" type="Node3D" parent="."]
+unique_name_in_owner = true
+
+[node name="CurtainCage" type="MeshInstance3D" parent="Phase2"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase1/CoreCage"]
+transform = Transform3D(1.3, 0, 0, 0, 0.9, 0, 0, 0, 1, 0, -3, 0)
+mesh = SubResource("SphereMesh_18")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase2/CurtainCage"]
+transform = Transform3D(1.3, 0, 0, 0, 0.9, 0, 0, 0, 1, 0, -3, 0)
+mesh = SubResource("SphereMesh_18")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part2" type="MeshInstance3D" parent="Phase2/CurtainCage"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -3, 0)
+mesh = SubResource("TorusMesh_19")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Phase3" type="Node3D" parent="."]
+unique_name_in_owner = true
+
+[node name="OpenCore" type="MeshInstance3D" parent="Phase3"]
+script = ExtResource("2_visual_piece")
+
+[node name="Part1" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -3.2, 0)
+mesh = SubResource("SphereMesh_20")
+material_override = SubResource("StandardMaterial3D_6")
+
+[node name="Part2" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(0, 1, 0, -1, 0, 0, 0, 0, 1, 1.9, -3.2, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part3" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(0.866025, 0.5, 0, -0.5, 0.866025, 0, 0, 0, 1, 0.95, -1.98756, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part4" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(0.866025, -0.5, 0, 0.5, 0.866025, 0, 0, 0, 1, -0.95, -1.98756, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part5" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, -1.9, -3.2, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part6" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(-0.866025, -0.5, 0, 0.5, -0.866025, 0, 0, 0, 1, -0.95, -4.41244, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
+
+[node name="Part7" type="MeshInstance3D" parent="Phase3/OpenCore"]
+transform = Transform3D(-0.866025, 0.5, 0, -0.5, -0.866025, 0, 0, 0, 1, 0.95, -4.41244, 0)
+mesh = SubResource("PrismMesh_21")
+material_override = SubResource("StandardMaterial3D_3")
