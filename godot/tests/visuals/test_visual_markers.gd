@@ -181,6 +181,34 @@ func test_baked_pieces_are_shared_between_instances() -> void:
 	var _recoloured: GdUnitAssert = assert_bool(recoloured).is_true()
 
 
+func test_palette_override_rebakes_or_is_rejected() -> void:
+	var plain: EnemyVisual = VisualLibrary.enemy(&"fighter")
+	var green: EnemyVisual = VisualLibrary.enemy(&"fighter")
+	var also_green: EnemyVisual = VisualLibrary.enemy(&"fighter")
+	var recolour: Dictionary[StringName, Color] = {&"hull": Color.GREEN}
+	# Before ready: a per-copy palette bakes its own mesh, shared by its twins.
+	green.palette = recolour
+	also_green.palette = recolour.duplicate()
+	for rig: VisualRig in [plain, green, also_green]:
+		add_child(rig)
+	var plain_piece: VisualPiece = plain.pieces()[0]
+	var green_piece: VisualPiece = green.pieces()[0]
+	var plain_mesh: Mesh = plain_piece.mesh
+	var green_mesh: Mesh = green_piece.mesh
+	var twin_mesh: Mesh = also_green.pieces()[0].mesh
+	var keys_differ: bool = plain.bake_key(plain_piece) != green.bake_key(green_piece)
+	# After ready: a palette change is rejected, so the rig never claims a
+	# colour its baked mesh does not show.
+	plain.palette = recolour
+	var kept: bool = plain.palette.is_empty() and plain_piece.mesh == plain_mesh
+	for rig: VisualRig in [plain, green, also_green]:
+		rig.free()
+	var _rebaked: GdUnitAssert = assert_bool(green_mesh != plain_mesh).is_true()
+	var _keyed: GdUnitAssert = assert_bool(keys_differ).is_true()
+	var _shared: GdUnitAssert = assert_bool(twin_mesh == green_mesh).is_true()
+	var _rejected: GdUnitAssert = assert_bool(kept).is_true()
+
+
 func _instantiate(scene_name: String) -> VisualRig:
 	var rig: VisualRig = null
 	if scene_name == "player_mech":

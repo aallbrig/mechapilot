@@ -83,6 +83,15 @@ func follow(focus: Vector2) -> void:
 	_apply()
 
 
+## Move the layer's frame back by `offset` (the scene re-origined): every puff
+## keeps its place relative to the focus, so the shift is invisible.
+func shift_origin(offset: Vector2) -> void:
+	for i: int in _anchors.size():
+		_anchors[i] -= offset
+	_focus -= offset
+	_apply()
+
+
 ## Where each puff currently is (x, y), after drift and wrapping.
 func puff_positions() -> PackedVector2Array:
 	return _positions.duplicate()

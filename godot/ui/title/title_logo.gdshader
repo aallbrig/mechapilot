@@ -14,6 +14,8 @@ uniform vec2 text_size = vec2(800.0, 120.0);
 uniform float shine_period = 3.5;
 uniform float shine_duration = 0.8;
 uniform float shine_width = 0.08;
+// 0 turns the sweep off (reduced motion), 1 shows it.
+uniform float shine_amount : hint_range(0.0, 1.0) = 1.0;
 // Skew of the shine band (it leans like the italic letters).
 uniform float shine_slant = 0.35;
 
@@ -36,6 +38,6 @@ void fragment() {
 	float t = mod(TIME, shine_period) / shine_duration;
 	float band = abs(uv.x + (1.0 - uv.y) * shine_slant - mix(-0.3, 1.3, t));
 	float shine = smoothstep(shine_width, 0.0, band) * step(t, 1.0);
-	vec3 lit = mix(chrome, shine_color.rgb, shine * 0.85);
+	vec3 lit = mix(chrome, shine_color.rgb, shine * shine_amount * 0.85);
 	COLOR = vec4(mix(COLOR.rgb, lit, fill), COLOR.a * tex.a);
 }

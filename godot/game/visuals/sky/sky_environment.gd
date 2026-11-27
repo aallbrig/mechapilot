@@ -19,6 +19,7 @@ const WEATHER: NodePath = ^"Weather"
 ## The storm sky shader's parameters driven by lightning.
 const FLASH_PARAM: StringName = &"flash"
 const BOLT_PARAM: StringName = &"bolt_x"
+const WORLD_OFFSET_PARAM: StringName = &"world_offset"
 ## Range of the bolt's horizontal position in sky coordinates.
 const BOLT_RANGE: Vector2 = Vector2(-0.9, 0.9)
 ## Chance that a strike flickers a second time.
@@ -42,6 +43,7 @@ var _flash: float = 0.0
 var _next_strike: float = 0.0
 var _second_flash_in: float = -1.0
 var _sun_energy: float = 1.0
+var _world_offset: Vector2 = Vector2.ZERO
 
 
 func _ready() -> void:
@@ -74,6 +76,28 @@ func follow(focus: Vector3) -> void:
 	var focus_2d: Vector2 = Vector2(focus.x, focus.y)
 	for layer: CloudLayer in cloud_layers():
 		layer.follow(focus_2d)
+
+
+## The scene moved its origin back by `offset` (to keep coordinates small on a
+## long flight). The clouds keep their places relative to the focus and the
+## sky's parallax keeps counting from the original origin, so nothing jumps.
+## Call it with the same offset you subtract from the camera and the focus.
+func shift_origin(offset: Vector3) -> void:
+	var flat: Vector2 = Vector2(offset.x, offset.y)
+	_world_offset += flat
+	for layer: CloudLayer in cloud_layers():
+		layer.shift_origin(flat)
+	var weather: Node3D = get_node_or_null(WEATHER) as Node3D
+	if weather != null:
+		weather.position -= offset
+	var material: ShaderMaterial = sky_material()
+	if material != null:
+		material.set_shader_parameter(WORLD_OFFSET_PARAM, _world_offset)
+
+
+## The total distance the origin has been moved back by.
+func world_offset() -> Vector2:
+	return _world_offset
 
 
 ## Flash lightning now (0..1).

@@ -17,7 +17,14 @@ extends Node3D
 const HULL: StringName = &"Hull"
 
 ## Palette slot -> colour. A part's material resource_name names its slot.
-@export var palette: Dictionary[StringName, Color] = {}
+## Set it before the rig enters the tree: the pieces bake once, on ready, and
+## a later change is rejected with a warning (the parts are gone by then).
+@export var palette: Dictionary[StringName, Color] = {}:
+	set(value):
+		if is_node_ready():
+			push_warning("%s: palette changes after ready are ignored; set it before" % name)
+			return
+		palette = value
 ## How many `Phase<N>` groups the rig has (0 for none).
 @export_range(0, 9) var phase_count: int = 0
 ## Cosmetic idle spin: pivot name -> rate in rad/s about the pivot's local Y
@@ -33,10 +40,7 @@ func _ready() -> void:
 	_pieces.clear()
 	_collect_pieces(self, _pieces)
 	for piece: VisualPiece in _pieces:
-		var key: StringName = &""
-		if scene_file_path != "":
-			key = StringName("%s|%s" % [scene_file_path, get_path_to(piece)])
-		piece.bake(palette, key)
+		piece.bake(palette, bake_key(piece))
 	for marker_name: StringName in required_markers():
 		if marker(marker_name) == null:
 			push_error("%s: missing required marker %%%s" % [name, marker_name])
@@ -61,6 +65,16 @@ func required_markers() -> Array[StringName]:
 	for phase: int in range(1, phase_count + 1):
 		names.append(phase_name(phase))
 	return names
+
+
+## The cache key a piece's baked mesh is shared under: the scene, the piece's
+## path in it and the palette, so a copy recoloured with its own palette (set
+## before it enters the tree) bakes its own mesh instead of reusing another's.
+## Empty (no caching) for rigs built outside a saved scene.
+func bake_key(piece: VisualPiece) -> StringName:
+	if scene_file_path == "":
+		return &""
+	return StringName("%s|%s|%x" % [scene_file_path, get_path_to(piece), palette.hash()])
 
 
 ## A scene-unique marker or pivot by name, or null if the rig has none.

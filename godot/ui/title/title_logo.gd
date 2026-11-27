@@ -4,7 +4,9 @@ extends Control
 ## lettering with a chrome gradient, a dark outline and drop shadow, a red
 ## speed stripe beneath, and a shine that sweeps across the letters. It sizes
 ## its lettering to its own width, so it reads from a 360 px phone to 4K.
-## play_intro() slams it in (skipped, like every motion, under reduced motion).
+## play_intro() slams it in. Under reduced motion (the player's setting,
+## followed through Events.profile.settings_changed) there is no slam, float or
+## shine sweep.
 
 ## Lettering size as a fraction of the logo's width, and its limits in pixels.
 const FONT_TO_WIDTH: float = 0.105
@@ -23,9 +25,14 @@ const STRIPE_TIME: float = 0.3
 const FLOAT_AMPLITUDE: float = 4.0
 const FLOAT_PERIOD: float = 3.0
 const TEXT_SIZE_PARAM: StringName = &"text_size"
+const SHINE_PARAM: StringName = &"shine_amount"
 
-## Skip the intro slam and the idle float (the reduced-motion setting).
-@export var reduced_motion: bool = false
+## Skip the intro slam, the idle float and the shine (the reduced-motion
+## setting; kept in step with the player's settings once the logo is ready).
+@export var reduced_motion: bool = false:
+	set(value):
+		reduced_motion = value
+		_apply_motion()
 
 var _clock: float = 0.0
 var _intro: Tween = null
@@ -42,8 +49,34 @@ func _ready() -> void:
 		var err: Error = source.resized.connect(handler) as Error
 		if err != OK:
 			push_error("TitleLogo: could not subscribe to resized: %s" % error_string(err))
+	var settings_err: Error = Events.profile.settings_changed.connect(_on_settings_changed) as Error
+	if settings_err != OK:
+		push_error(
+			"TitleLogo: could not subscribe to settings_changed: %s" % error_string(settings_err)
+		)
 	_fit()
 	_update_shine_area()
+	_apply_motion()
+
+
+func _on_settings_changed(settings: GameSettings) -> void:
+	reduced_motion = settings.reduced_motion
+
+
+## Settle everything that moves when reduced motion turns on.
+func _apply_motion() -> void:
+	if not is_node_ready():
+		return
+	if reduced_motion:
+		if _intro != null and _intro.is_valid():
+			_intro.kill()
+		_lettering.scale = Vector2.ONE
+		_lettering.modulate.a = 1.0
+		_lettering.position.y = 0.0
+		_stripe.scale.x = 1.0
+	var shine: ShaderMaterial = _title.material as ShaderMaterial
+	if shine != null:
+		shine.set_shader_parameter(SHINE_PARAM, 0.0 if reduced_motion else 1.0)
 
 
 func _process(delta: float) -> void:

@@ -14,13 +14,16 @@ uniform float horizon_height = -0.35;
 uniform float gradient_span = 1.6;
 // Sky-coordinate shift per world unit of camera movement (x, y).
 uniform vec2 parallax = vec2(0.0015, 0.004);
+// World distance the scene's origin has been moved back by (SkyEnvironment.
+// shift_origin), added to the camera so re-origining never jumps the sky.
+uniform vec2 world_offset = vec2(0.0, 0.0);
 
 // Directions this close to sideways (or behind the camera) are clamped.
 const float MIN_FORWARD = 0.05;
 
 vec2 sky_coords(vec3 eyedir, vec3 camera) {
 	vec2 view = eyedir.xy / max(-eyedir.z, MIN_FORWARD);
-	return view + camera.xy * parallax;
+	return view + (camera.xy + world_offset) * parallax;
 }
 
 // 0 at the horizon, 1 at the top of the gradient, negative below the horizon.

@@ -3,8 +3,8 @@
 shader_type spatial;
 render_mode unshaded, depth_draw_never, cull_back, blend_mix, shadows_disabled;
 
-uniform vec3 lit_color : source_color = vec3(1.0, 1.0, 1.0);
-uniform vec3 shade_color : source_color = vec3(0.6, 0.65, 0.8);
+uniform vec3 lit_color = vec3(1.0, 1.0, 1.0);
+uniform vec3 shade_color = vec3(0.6, 0.65, 0.8);
 uniform float softness : hint_range(0.0, 1.0) = 0.55;
 
 varying float v_up;

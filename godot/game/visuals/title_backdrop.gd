@@ -3,10 +3,14 @@ extends Node3D
 ## The scene behind the Title menu: the Level 1 sky, with the player's mech
 ## chasing two enemy fighters through it. The camera and the flight cruise
 ## forward together, so the clouds stream past and wrap around. The attract-mode
-## dogfight (#24) can replace the flight; the sky and camera stay.
+## dogfight (#24) can replace the flight; the sky and camera stay. The flight
+## re-origins every REORIGIN_DISTANCE, so coordinates stay small however long
+## the title runs.
 
 ## Cruise speed of the whole flight (world units per second, along +X).
 const CRUISE_SPEED: float = 6.0
+## How far the camera cruises before the scene moves its origin back.
+const REORIGIN_DISTANCE: float = 1000.0
 ## Gentle bob of each flyer: amplitude (units) and angular speed (rad/s).
 const BOB_AMPLITUDE: float = 0.35
 const BOB_SPEED: float = 1.3
@@ -38,6 +42,11 @@ func _ready() -> void:
 	_sky.follow(_camera.position)
 
 
+## Where the camera is (the flight moves with it).
+func camera_position() -> Vector3:
+	return _camera.position
+
+
 func _pose_side(side: int) -> void:
 	_mech.wing(side).rotation.x = WING_POSE
 	_mech.arm(side).rotation.x = ARM_POSE
@@ -55,4 +64,9 @@ func _process(delta: float) -> void:
 		var bob: float = sin(_clock * BOB_SPEED + phase) * BOB_AMPLITUDE
 		flyer.position = _rest[flyer] + Vector3(0.0, bob, 0.0)
 		phase += 1.0
+	if _camera.position.x >= REORIGIN_DISTANCE:
+		var shift: Vector3 = Vector3(_camera.position.x, 0.0, 0.0)
+		_camera.position -= shift
+		_flight.position -= shift
+		_sky.shift_origin(shift)
 	_sky.follow(_camera.position)
