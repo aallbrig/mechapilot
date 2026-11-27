@@ -8,7 +8,8 @@ extends RefCounted
 ##   Albatross       a slow gunship holding station ahead and above, two turrets.
 ##   Thunderhead     a heavy bomber cruising high above, a tail gun behind.
 ##   Hornet          a fast twin-rotor gunship weaving close.
-##   Leviathan       a huge carrier far above; launch bays, then its core.
+##   Leviathan       a huge carrier far above; only its launch bays take hits
+##                   until they are destroyed, which exposes its core.
 ##   Crimson Lancer  a rival ace mech duelling at mech range, weaving hard.
 ##   Ascendant       a mothership looming overhead.
 
@@ -39,6 +40,12 @@ var turrets: Array[Vector3] = []
 ## Placeholder look: hull size and colour.
 var size: Vector3 = Vector3.ONE
 var color: Color = Color.WHITE
+## Bosses whose core is shielded at first (the Leviathan): until this phase
+## (0-based) only the turrets (its launch bays) take hits, each within
+## `bay_radius`; the body deflects shots. Once its health crosses into this
+## phase the bays are destroyed and the core is exposed. 0 = no shielding.
+var shielded_until_phase: int = 0
+var bay_radius: float = 0.0
 
 
 ## The profile of `boss_id`, or null when no boss has that id.
@@ -88,6 +95,8 @@ static func _build() -> void:
 	leviathan.turrets = [Vector3(-4.5, -1.8, 0.0), Vector3(0.0, -2.2, 0.0), Vector3(4.5, -1.8, 0.0)]
 	leviathan.size = Vector3(13.0, 3.2, 4.0)
 	leviathan.color = Color(0.2, 0.25, 0.4)
+	leviathan.shielded_until_phase = 1
+	leviathan.bay_radius = 1.6
 
 	var lancer: BossProfile = _profile(&"crimson_lancer", Vector3(10.0, 2.0, 0.0), 1.8, 1.6)
 	lancer.weave = Vector2(2.0, 4.0)

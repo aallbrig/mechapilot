@@ -79,6 +79,25 @@ func set_charge(amount: float) -> void:
 		glow.scale = Vector3.ONE * lerpf(1.0, GLOW_GROW, t)
 
 
+## The core's colour now (it shows the phase).
+func core_color() -> Color:
+	return _core_material.albedo_color
+
+
+## Hide the turret glows: the launch bays are wrecked (the Leviathan).
+func set_bays_destroyed(destroyed: bool) -> void:
+	for glow: MeshInstance3D in _glows:
+		glow.visible = not destroyed
+
+
+## True when every turret glow is hidden.
+func bays_destroyed() -> bool:
+	for glow: MeshInstance3D in _glows:
+		if glow.visible:
+			return false
+	return not _glows.is_empty()
+
+
 func glow_energy() -> float:
 	return _glow_material.emission_energy_multiplier
 

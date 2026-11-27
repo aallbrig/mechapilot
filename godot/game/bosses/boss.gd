@@ -142,6 +142,9 @@ func enter_phase(phase_index: int) -> void:
 			)
 		)
 	_look.set_phase(_phase)
+	_look.set_bays_destroyed(
+		profile.shielded_until_phase > 0 and _phase >= profile.shielded_until_phase
+	)
 
 
 ## Start the defeat sequence (BossHealth announced the defeat).
@@ -163,13 +166,29 @@ func begin_defeat() -> void:
 func resolve_shot(at: Vector3, shot_radius: float) -> bool:
 	if _state == State.DEFEATED or _state == State.GONE:
 		return false
-	if Vector2(at.x - position.x, at.y - position.y).length() > profile.hit_radius + shot_radius:
+	var on_body: bool = _plane_distance(at, position) <= profile.hit_radius + shot_radius
+	var on_bay: bool = false
+	if is_shielded():
+		for bay: Vector3 in _muzzles():
+			on_bay = on_bay or _plane_distance(at, bay) <= profile.bay_radius + shot_radius
+	if not on_body and not on_bay:
 		return false
-	if _state == State.FIGHTING:
+	# Shielded: only a launch bay takes the hit; the hull deflects the shot.
+	if _state == State.FIGHTING and (on_bay or not is_shielded()):
 		_events.boss.announce_boss_hit(_shot_damage, Vector3(at.x, at.y, 0.0))
 		_flash_left = FLASH_TIME
 		_look.set_flash(true)
 	return true
+
+
+## Where a shot does damage now: a launch bay while shielded, else the centre.
+func weak_point() -> Vector3:
+	return _muzzles()[0] if is_shielded() else position
+
+
+## True while only the launch bays take hits (the Leviathan's first phase).
+func is_shielded() -> bool:
+	return _phase < profile.shielded_until_phase
 
 
 ## Advance `delta` seconds against `target`, firing into `shots` at the

@@ -76,6 +76,46 @@ class AttackLog:
 		var _cleared: bool = _started.erase(attack_id)
 
 
+## Records each player hit with whether the boss was charging and touching.
+class HitLog:
+	extends RefCounted
+
+	var boss: Boss
+	var reach: float = 0.0
+	## Per hit: source, attack damage, and whether it was a charge on the body.
+	var sources: Array[DamageSource.Source] = []
+	var damages: Array[int] = []
+	var charging: Array[bool] = []
+
+	func on_player_hit(source: DamageSource.Source, at: Vector3, attack_damage: int) -> void:
+		sources.append(source)
+		damages.append(attack_damage)
+		var touching: bool = (
+			Vector2(at.x - boss.position.x, at.y - boss.position.y).length() <= reach
+		)
+		charging.append(boss.is_dashing() and touching)
+
+	## Hits with `damage` as BOSS_ATTACK that landed mid-charge on the body.
+	func lance_hits(damage: int) -> int:
+		var count: int = 0
+		for i: int in sources.size():
+			if (
+				sources[i] == DamageSource.Source.BOSS_ATTACK
+				and damages[i] == damage
+				and charging[i]
+			):
+				count += 1
+		return count
+
+	## Hits with `damage` that were not a charge on the body.
+	func stray_hits(damage: int) -> int:
+		var count: int = 0
+		for i: int in sources.size():
+			if damages[i] == damage and not charging[i]:
+				count += 1
+		return count
+
+
 func _on_phase(phase: int, _phases: int) -> void:
 	_phase_changes.append(phase)
 
@@ -118,7 +158,7 @@ func _enter(boss: Boss) -> void:
 
 ## One player shot straight into the boss's centre.
 func _shoot(boss: Boss) -> bool:
-	return _arena.resolve_shot(boss.position, 0.3)
+	return _arena.resolve_shot(boss.weak_point(), 0.3)
 
 
 func test_every_level_defines_a_valid_boss() -> void:
@@ -179,28 +219,29 @@ func test_boss_flies_in_then_fights() -> void:
 
 
 func test_boss_changes_phase_at_thresholds() -> void:
+	# Crimson Lancer: 540 health, phases from 0.66 and 0.33, shots of 3. Phase 1
+	# starts once health <= 356.4: the 62nd shot takes it from 357 to 354.
+	# Phase 2 starts once health <= 178.2: the 121st shot, from 180 to 177.
+	var expected_crossings: Array[int] = [354, 177]
 	var boss: Boss = _summon(5)
 	var definition: BossDefinition = _h.levels[4].boss
 	_enter(boss)
+	var _lancer_health: GdUnitAssert = assert_int(definition.health).is_equal(540)
+	var _shot_of_3: GdUnitAssert = assert_int(_h.levels[4].player.projectile_damage).is_equal(3)
 	var phases_seen: Array[int] = [boss.phase()]
 	var attacks_seen: Array[Array] = [boss.attack_ids()]
-	var crossings_ok: bool = true
+	var colors_seen: Array[Color] = [boss.look().core_color()]
+	var crossings: Array[int] = []
 	var guard: int = 0
 	while _defeats.is_empty() and guard < 1000:
 		var _hit: bool = _shoot(boss)
 		guard += 1
-		var health: int = _health.health()
-		var want: int = definition.phase_for(health)
-		crossings_ok = crossings_ok and boss.phase() == want
 		if boss.phase() != phases_seen[-1]:
 			phases_seen.append(boss.phase())
 			attacks_seen.append(boss.attack_ids())
-			# It crossed on this very hit: the phase starts at this fraction.
-			var fraction: float = float(health) / definition.health
-			var _at_threshold: GdUnitAssert = assert_float(fraction).is_less_equal(
-				definition.phases[boss.phase()].starts_at
-			)
-	var _every_hit_in_phase: GdUnitAssert = assert_bool(crossings_ok).is_true()
+			colors_seen.append(boss.look().core_color())
+			crossings.append(_health.health())
+	var _exactly_there: GdUnitAssert = assert_array(crossings).is_equal(expected_crossings)
 	var _three_phases: GdUnitAssert = assert_array(phases_seen).is_equal([0, 1, 2])
 	var _announced: GdUnitAssert = assert_array(_phase_changes).is_equal([1, 2])
 	for i: int in phases_seen.size():
@@ -208,6 +249,44 @@ func test_boss_changes_phase_at_thresholds() -> void:
 		for attack: BossDefinition.Attack in definition.phases[i].attacks:
 			expected.append(attack.id)
 		var _patterns_switch: GdUnitAssert = assert_array(attacks_seen[i]).is_equal(expected)
+		# The core shows the phase.
+		var _core_shows_phase: GdUnitAssert = assert_str(colors_seen[i].to_html()).is_equal(
+			BossLook.PHASE_CORE_COLORS[i].to_html()
+		)
+
+
+func test_leviathan_core_is_shielded_until_its_bays_are_destroyed() -> void:
+	var boss: Boss = _summon(4)
+	_enter(boss)
+	var definition: BossDefinition = _h.levels[3].boss
+	var full: int = _health.health()
+	# The hull deflects a shot at the core: it is spent, but deals nothing.
+	var deflected: bool = _arena.resolve_shot(boss.position, 0.3)
+	var after_core_shot: int = _health.health()
+	var shielded: bool = boss.is_shielded()
+	var bays_up: bool = not boss.look().bays_destroyed()
+	# Shots at a launch bay wear it down until the bays are wrecked (phase 1).
+	var guard: int = 0
+	while boss.phase() == 0 and guard < 1000:
+		var _bay_hit: bool = _arena.resolve_shot(boss.weak_point(), 0.3)
+		guard += 1
+	var at_exposure: int = _health.health()
+	var core_hit: bool = _arena.resolve_shot(boss.position, 0.3)
+	var _deflected: GdUnitAssert = assert_bool(deflected).is_true()
+	var _no_core_damage: GdUnitAssert = assert_int(after_core_shot).is_equal(full)
+	var _shielded: GdUnitAssert = assert_bool(shielded).is_true()
+	var _bays_shown: GdUnitAssert = assert_bool(bays_up).is_true()
+	var _bays_take_hits: GdUnitAssert = assert_int(boss.phase()).is_equal(1)
+	var _exposed: GdUnitAssert = assert_bool(boss.is_shielded()).is_false()
+	var _bays_wrecked: GdUnitAssert = assert_bool(boss.look().bays_destroyed()).is_true()
+	var _at_threshold: GdUnitAssert = (
+		assert_float(float(at_exposure) / definition.health)
+		. is_less_equal(definition.phases[1].starts_at)
+	)
+	var _core_takes_hits: GdUnitAssert = assert_bool(core_hit).is_true()
+	var _core_damaged: GdUnitAssert = assert_int(_health.health()).is_equal(
+		at_exposure - _h.levels[3].player.projectile_damage
+	)
 
 
 func test_boss_attacks_are_telegraphed() -> void:
@@ -323,31 +402,29 @@ func test_all_six_bosses_spawn_and_can_be_defeated() -> void:
 
 
 func test_boss_dash_strikes_with_its_attack_damage() -> void:
-	var boss: Boss = _summon(3)
+	# Crimson Lancer's last phase: a 35-damage lance charge (not the 25 of a
+	# ram) and a 22-damage spread, so the damage tells the two hits apart.
+	var boss: Boss = _summon(5)
 	_enter(boss)
-	var dash_damage: int = 0
-	for attack: BossDefinition.Attack in _h.levels[2].boss.phases[0].attacks:
-		if attack.id == &"dash":
-			dash_damage = attack.damage
-	var dashed: bool = false
-	var guard: int = 0
-	var lanced: int = RunRules.damage_for(DamageSource.Source.BOSS_ATTACK, dash_damage)
-	while not _h.target.damage_taken.has(lanced) and guard < 1200:
+	_h.bus.boss.announce_boss_phase_changed(2, 3)
+	var lance: BossDefinition.Attack = null
+	for attack: BossDefinition.Attack in _h.levels[4].boss.phases[2].attacks:
+		if attack.id == &"charge_lance":
+			lance = attack
+	var record: HitLog = HitLog.new()
+	record.boss = boss
+	record.reach = boss.profile.hit_radius + _h.target.radius()
+	var err: int = _h.bus.player.player_hit.connect(record.on_player_hit)
+	for _i: int in roundi(15.0 / STEP):
 		_advance(STEP)
-		dashed = dashed or boss.is_dashing()
-		guard += 1
-	var _dashed: GdUnitAssert = assert_bool(dashed).is_true()
-	var _boss_attack: GdUnitAssert = (
-		assert_bool(_h.player_hits.has(DamageSource.Source.BOSS_ATTACK)).is_true()
-	)
-	var _attack_damage: GdUnitAssert = (
-		assert_bool(
-			_h.target.damage_taken.has(
-				RunRules.damage_for(DamageSource.Source.BOSS_ATTACK, dash_damage)
-			)
-		)
-		. is_true()
-	)
+	_h.bus.player.player_hit.disconnect(record.on_player_hit)
+	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
+	var _lance_35: GdUnitAssert = assert_int(lance.damage).is_equal(35)
+	var _not_a_ram: GdUnitAssert = assert_int(lance.damage).is_not_equal(RunRules.COLLISION_DAMAGE)
+	# A BOSS_ATTACK hit with the lance's own damage, on the boss body, mid-charge.
+	var _lanced: GdUnitAssert = assert_int(record.lance_hits(lance.damage)).is_greater(0)
+	# Every hit with the lance's damage came from the charge, never a projectile.
+	var _only_while_dashing: GdUnitAssert = assert_int(record.stray_hits(lance.damage)).is_equal(0)
 
 
 func test_leviathan_launches_drone_waves() -> void:
