@@ -7,6 +7,9 @@ extends RefCounted
 ## around them. Spawns come from the test (order()), not the spawn director, so
 ## each test places exactly the enemies it needs.
 ## The suite adds `world` to its tree and calls dispose() at the end.
+## advance() steps the RunDirector and the mech by hand, in the game's tick
+## order, while they also sit in the tree. That is only safe because no suite
+## using this harness awaits a frame: a frame would tick them a second time.
 
 const STEP: float = RunHarness.STEP
 const SEED: int = 8484
