@@ -111,5 +111,8 @@ test_test_shell_excluded_tests_are_unreported_and_refused_in_ci() {
   printf '%s\n' "${sandbox}" | jq -e 'any(.[]; .task == "test" and .vars.TEST_SHELL_EXCLUDE == "test_lan_nginx_routes_and_mime")' >/dev/null || return 1
   ci="$(yq -o json '.tasks["ci:fast"].cmds' Taskfile.yml)" || return 1
   printf '%s\n' "${ci}" | jq -e 'all(.[]; has("vars") | not)' >/dev/null || return 1
+  # ci:sandbox is ci:fast with that one exclusion: it runs every ci:fast step.
+  printf '%s\n' "${ci}" | jq -e --argjson sandbox "${sandbox}" \
+    'all(.[]; .task as $t | any($sandbox[]; .task == $t))' >/dev/null || return 1
   rm -rf "${d}"
 }

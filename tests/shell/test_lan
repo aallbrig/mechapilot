@@ -127,6 +127,25 @@ test_lan_build_assembles_three_roots() {
   grep -q 'a placeholder (no task godot:export:web yet)' "${d}/log" || return 1
   cmp -s docker/lan/game-placeholder.html "${www}/new/game/index.html" || return 1
 
+  # auto: with a godot:export:web task, the export runs, and its failure fails
+  # the build (never a silent placeholder). The stub records the call and
+  # fails, so the real build/web is never touched.
+  mkdir -p "${d}/bin2"
+  dollar='$'
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "%s1" = --list-all ]; then printf "%%s\\n" %s; exit 0; fi\n' "${dollar}" "'{\"tasks\":[{\"name\":\"godot:export:web\"}]}'"
+    printf 'printf "%%s\\n" "%s*" >>"%s"\nexit 1\n' "${dollar}" "${d}/calls"
+  } >"${d}/bin2/task"
+  chmod +x "${d}/bin2/task"
+  ! PATH="${d}/bin2:${PATH}" MECHAFIGHTER_LAN_OUT="${d}/out" scripts/dev/lan build >"${d}/log" 2>&1 || return 1
+  grep -qx 'godot:export:web' "${d}/calls" || return 1
+  grep -q 'task godot:export:web failed' "${d}/log" || return 1
+  cmp -s docker/lan/game-placeholder.html "${www}/new/game/index.html" || return 1
+  # The real task exports to build/web, which is where auto mode copies from.
+  grep -q 'scripts/godot-export-web build/web$' Taskfile.yml || return 1
+  grep -qF "src=\"${dollar}{repo_root}/build/web\"" scripts/dev/lan || return 1
+
   # A failed build leaves the last good tree in place: an export without
   # index.html, and one that carries a symlink, are both refused.
   rm -f "${d}/export/index.html"

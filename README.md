@@ -22,7 +22,7 @@ Run `task setup` once, then `task --list` for every target. `task ci` is the ful
 | `/` | An index that links the two sites |
 | `/current/` | The legacy site, as it is in production today (the 2022 Unity WebGL build on the `github-pages` branch, read straight from git) |
 | `/new/` | The Marketing Site, built with `baseURL` `/new/` |
-| `/new/game/` | The Godot web export (`task godot:export:web`), or a placeholder until that task exists |
+| `/new/game/` | The Godot web export (`lan:build` runs `task godot:export:web`), or a placeholder where that task is missing |
 
 - `task lan:up` assembles `build/lan/www/` (`task lan:build`), creates or reuses the self-signed certificate in `build/lan-tls/` (`scripts/dev/lan-cert`), starts nginx and prints the URLs.
 - `task lan:url` prints the URLs again, and `task lan:down` stops nginx.

@@ -420,7 +420,9 @@ tasks:
   ci:sandbox:
     desc: "Agent Loop session gate: task ci minus the localhost Chrome steps (site-observe, Lighthouse) and the Docker nginx test; the ci check runs them"
     cmds:
+      # ci:fast (lint, godot:check, test), but test runs with one exclusion.
       - task: lint
+      - task: godot:check
       # The sandbox denies unix sockets, so Docker is unreachable there and the
       # live nginx test (#77) cannot run. It is left out here only: excluded
       # tests are not reported, so they never count as passed, and the full
