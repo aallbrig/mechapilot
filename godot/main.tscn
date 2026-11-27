@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://main.gd" id="1_main"]
 [ext_resource type="PackedScene" path="res://ui/ui_root.tscn" id="2_ui"]
-[ext_resource type="Script" path="res://feedback/ui_sound_player.gd" id="3_sounds"]
+[ext_resource type="Script" path="res://feedback/feedback_rig.gd" id="3_feedback"]
 [ext_resource type="Script" path="res://game/attract/attract_dogfight.gd" id="4_attract"]
 [ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="5_stage"]
 [ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="6_mechfx"]
@@ -16,6 +16,9 @@ script = ExtResource("5_stage")
 
 [node name="MechFeedback" type="Node3D" parent="."]
 script = ExtResource("6_mechfx")
+
+[node name="Feedback" type="Node3D" parent="."]
+script = ExtResource("3_feedback")
 
 [node name="Attract" type="Node3D" parent="."]
 script = ExtResource("4_attract")
@@ -34,6 +37,3 @@ script = ExtResource("7_touch")
 layer = 10
 
 [node name="UiRoot" parent="Ui" instance=ExtResource("2_ui")]
-
-[node name="UiSounds" type="Node" parent="."]
-script = ExtResource("3_sounds")

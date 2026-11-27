@@ -39,7 +39,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 
 | Event | Payload | Announced by | Heard by |
 |---|---|---|---|
-| `start_requested` | | Boot screen (*intent*) | `GameStateMachine` (Boot to Title) |
+| `start_requested` | | Boot screen (*intent*) | `GameStateMachine` (Boot to Title); the Audio Unlock |
 | `play_requested` | | Title, Game Over, Victory, Scoreboard (*intent*) | `LevelProgression` (new Run) |
 | `pause_requested` | | input, pause button (*intent*) | `GameStateMachine` |
 | `resume_requested` | | Pause screen (*intent*) | `GameStateMachine` |
@@ -49,7 +49,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `title_requested` | | Scoreboard, Game Over, Victory (*intent*) | `GameStateMachine` |
 | `game_state_changed` | `from, to: GameState.Phase` (equal at boot) | `GameStateMachine` | every screen; `RunLedger`, `SpawnDirector`, `IntelCodex`, `LevelProgression` |
 | `input_device_changed` | `device: InputDevice.Kind` | player input (*reported*, `PlayerBusLink`) | prompts and glyphs (#75, #24) |
-| `ui_cue_requested` | `cue: UiCue.Cue` | every screen (focus, press, tally tick, pop, ...) | `feedback/UiSoundPlayer` |
+| `ui_cue_requested` | `cue: UiCue.Cue` | every screen (focus, press, tally tick, pop, ...) | `SfxDirector` (the UI bus); `AudioUnlock` (`START`) |
 
 ### `Events.run`
 
@@ -59,7 +59,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `level_intro_started` | `level_number, level_name, objective, duration` | `LevelProgression` | Level Intro card; `SpawnDirector` (loads the Level) |
 | `level_intro_completed` | `level_number` | `LevelProgression` | HUD, tutorial |
 | `boss_gauge_changed` | `points, threshold: int` | `LevelProgression` | HUD Boss Gauge, tutorial (25%) |
-| `level_cleared` | `tally: LevelTally` (bonus already scored) | `LevelProgression` | Level Clear and Victory tally |
+| `level_cleared` | `tally: LevelTally` (bonus already scored) | `LevelProgression` | Level Clear and Victory tally; the Level Clear sting |
 | `run_ended` | `summary: RunSummary` | `LevelProgression` (Game Over or Victory) | Game Over and Victory screens; `Scoreboard` |
 | `kill_scored` | `points, multiplier: int, position: Vector3` | `RunLedger` | score pop-ups, juice; `LevelProgression` (gauge) |
 | `score_changed` | `total, delta: int` | `RunLedger` | HUD |

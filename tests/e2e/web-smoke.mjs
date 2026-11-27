@@ -1,7 +1,8 @@
 // Web smoke test: serve an exported build, load it in headless Chromium
 // (Playwright, pinned in package-lock.json), and pass only if the canvas
 // appears, the game prints its boot marker (the Events bus round trip ran in
-// the browser), and there are no console errors, page errors or failed requests.
+// the browser), and there are no console errors, page errors or failed requests,
+// and no audio warning (audio started before the first user gesture, #26).
 //
 // Usage: node tests/e2e/web-smoke.mjs <export-dir>
 import { chromium } from "playwright";
@@ -10,6 +11,9 @@ import { serveStatic } from "../../scripts/serve-static.mjs";
 const BOOT_MARKER = "mechapilot: boot ok";
 const BOOT_TIMEOUT_MS = Number(process.env.E2E_BOOT_TIMEOUT_MS ?? "90000");
 const SETTLE_MS = 2_000;
+// Chromium's notices for audio started before a user gesture (autoplay policy),
+// at any console level: Chromium logs some of them as log or info, not warning.
+const AUDIO_WARNING = /AudioContext|autoplay|user gesture/i;
 
 const dir = process.argv[2];
 if (!dir) {
@@ -35,6 +39,7 @@ try {
     const text = msg.text();
     console.log(`[console.${msg.type()}] ${text}`);
     if (msg.type() === "error") problems.push(`console error: ${text}`);
+    if (AUDIO_WARNING.test(text)) problems.push(`audio warning (console.${msg.type()}): ${text}`);
   });
   page.on("pageerror", (err) => problems.push(`page error: ${err.message}`));
   await page.exposeFunction("__reportCspViolation", (v) => problems.push(`CSP violation: ${v}`));
