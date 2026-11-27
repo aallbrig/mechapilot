@@ -44,7 +44,7 @@ var _screens: Dictionary[StringName, UiScreen] = {}
 var _shown: Array[UiScreen] = []
 var _stack: Array[UiScreen] = []
 var _phase: GameState.Phase = GameState.Phase.BOOT
-var _dev_console: DevConsole = DevConsole.new()
+var _dev_console: DevConsole
 
 
 ## Use `bus` instead of the Events autoload. Call before adding to the tree.
@@ -65,6 +65,9 @@ func _ready() -> void:
 	_wire(_bus.flow.game_state_changed.connect(_on_game_state_changed))
 	_wire(_bus.flow.input_device_changed.connect(_on_input_device_changed))
 	_wire(_bus.profile.settings_changed.connect(_on_settings_changed))
+	# Built here, not as a member default, so a root that never enters the
+	# tree leaves no orphan node behind.
+	_dev_console = DevConsole.new()
 	add_child(_dev_console)
 	_dev_console.bind(_bus)
 
