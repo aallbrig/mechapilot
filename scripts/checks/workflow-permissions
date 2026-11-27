@@ -95,16 +95,89 @@ if [ -e "${dir}/deploy-qa.yml" ] || [ -L "${dir}/deploy-qa.yml" ]; then
   fi
 fi
 
-# The required ci check must not be cancelled by its own job timeout (#118).
+# The required ci check is split into parallel parts (#119); its shape is
+# fixed so that no part can be dropped, skipped or ignored:
+#   - jobs are exactly `part` (a matrix) and `ci` (the one required check);
+#   - `part` runs exactly the parts static, godot, web and shell 1/n .. n/n
+#     (n >= 1, each once, in that order), each by the one step
+#     `task "ci:part:${PART}" SHARD="${SHARD}"`, with no `if` on the job or
+#     that step, and its check name starts with "part", never "ci";
+#   - `ci` needs every other job, runs unless the run was cancelled
+#     (`if: ${{ !cancelled() }}`), fails unless every need succeeded (the
+#     "Every part passed" step, before the results are merged), and merges the
+#     parts' results with scripts/ci-merge-results;
+#   - only `ci` uploads the test-results artifact the merge gate reads;
+#   - no continue-on-error, no defaults and no per-step shell anywhere;
+#   - each job's timeout-minutes is an integer from 10 to 30: about 2x the
+#     measured runtime, and bounded so a hung part fails the check (#118).
 if [ -e "${dir}/ci.yml" ] || [ -L "${dir}/ci.yml" ]; then
   if [ -L "${dir}/ci.yml" ] || [ ! -f "${dir}/ci.yml" ]; then
     fail "ci.yml is a symlink or not a regular file"
   else
-    t="$(yq -o=json '.' "${dir}/ci.yml" | jq -r '.jobs.ci["timeout-minutes"] // "unset" | tojson')" || t="unparseable"
-    case "${t}" in
-      6[0-9] | [7-9][0-9] | 1[01][0-9] | 120) ;;
-      *) fail "ci.yml: the ci job's timeout-minutes must be an integer from 60 to 120, not ${t}" ;;
-    esac
+    problems="$(yq -o=json '.' "${dir}/ci.yml" | jq -r '
+      def steps_of($j): (.jobs[$j].steps // []) | if type == "array" then . else [] end;
+      def step_index($j; $name): [steps_of($j) | to_entries[] | select(.value.name == $name) | .key];
+      def uploads_results: (.uses // "" | tostring | test("^actions/upload-artifact@"))
+        and ((.with.name // "") | tostring | test("test-results"));
+      def timeout_ok: type == "number" and . == floor and . >= 10 and . <= 30;
+      (.jobs // {}) as $jobs
+      | (if ($jobs | type) != "object" or ($jobs | keys) != ["ci", "part"] then
+          "jobs must be exactly part and ci, not \($jobs | keys? // [] | join(", "))" else empty end),
+        (if [.. | objects | select(has("continue-on-error"))] | length > 0 then "continue-on-error is not allowed" else empty end),
+        (if [.. | objects | select(has("defaults"))] | length > 0 then "defaults are not allowed" else empty end),
+        (if [$jobs[]? | .steps? // [] | .[]? | select(type == "object" and has("shell"))] | length > 0 then
+          "a step may not choose its shell" else empty end),
+        (($jobs.part // {}) as $p
+        | (if ($p | has("if")) then "the part job may not have an if" else empty end),
+          (if ($p | has("needs")) then "the part job may not need another job" else empty end),
+          (if ($p.name | type) != "string" or ($p.name | test("^part[ (]") | not) then
+            "the part job name must start with \"part\", not \($p.name | tojson)" else empty end),
+          (if ($p["timeout-minutes"] | timeout_ok | not) then
+            "the part job timeout-minutes must be an integer from 10 to 30, not \($p["timeout-minutes"] | tojson)" else empty end),
+          (($p.strategy.matrix // {}) as $m
+          | ($m.include // []) as $inc
+          | ([$inc[]? | select(type == "object" and .part == "shell")] | length) as $n
+          | ([{"part": "static"}, {"part": "godot"}, {"part": "web"}]
+             + [range(1; $n + 1) | {"part": "shell", "shard": "\(.)/\($n)"}]) as $want
+          | if ($m | keys) != ["include"] or $n < 1 or $inc != $want then
+              "the part matrix must be exactly static, godot, web and shell 1/n .. n/n, not \($m | tojson)" else empty end),
+          ([steps_of("part") | .[] | select(.name == "Run the part")] as $run
+          | if ($run | length) != 1
+              or $run[0] != {"name": "Run the part",
+                             "env": {"PART": "${{ matrix.part }}", "SHARD": "${{ matrix.shard }}"},
+                             "run": "task \"ci:part:${PART}\" SHARD=\"${SHARD}\""} then
+              "the part job must run each part by exactly one unconditional \"Run the part\" step" else empty end)),
+        (($jobs.ci // {}) as $c
+        | (if $c.name != "ci" then "the ci job must be named ci" else empty end),
+          (if ($c.needs | if type == "string" then [.] else . end | if type == "array" then sort else null end)
+              != ($jobs | keys | map(select(. != "ci")) | sort) then
+            "the ci job must need every other job, not \($c.needs | tojson)" else empty end),
+          (if $c.if != "${{ !cancelled() }}" then
+            "the ci job must run unless the run was cancelled (if: ${{ !cancelled() }}), not \($c.if | tojson)" else empty end),
+          (if ($c["timeout-minutes"] | timeout_ok | not) then
+            "the ci job timeout-minutes must be an integer from 10 to 30, not \($c["timeout-minutes"] | tojson)" else empty end),
+          (step_index("ci"; "Every part passed") as $gate
+          | step_index("ci"; "Merge the parts'"'"' test results") as $merge
+          | [steps_of("ci") | to_entries[] | select(.value | uploads_results) | .key] as $ups
+          | (if ($gate | length) != 1
+                or steps_of("ci")[$gate[0]] != {"name": "Every part passed",
+                  "env": {"NEEDS": "${{ toJSON(needs) }}"},
+                  "run": "printf '"'"'%s\\n'"'"' \"${NEEDS}\" | jq -r '"'"'to_entries[] | \"\\(.key): \\(.value.result)\"'"'"'\nprintf '"'"'%s\\n'"'"' \"${NEEDS}\" | jq -e '"'"'length > 0 and all(.[]; .result == \"success\")'"'"' >/dev/null\n"} then
+              "the ci job must fail unless every part succeeded (the unconditional \"Every part passed\" step)" else empty end),
+            (if ($merge | length) != 1
+                or steps_of("ci")[$merge[0]] != {"name": "Merge the parts'"'"' test results",
+                  "run": "scripts/ci-merge-results \"${RUNNER_TEMP}/parts\" build/test-results"} then
+              "the ci job must merge the parts'"'"' results by exactly one unconditional scripts/ci-merge-results step" else empty end),
+            (if ($gate | length) == 1 and ($merge | length) == 1 and $gate[0] > $merge[0] then
+              "the ci job must check every part passed before it merges their results" else empty end),
+            (if ($ups | length) != 1 or (($merge | length) == 1 and $ups[0] < $merge[0]) then
+              "the ci job must upload test-results exactly once, after the merge" else empty end))),
+        ([steps_of("part")[] | select(uploads_results)] | if length > 0 then "only the ci job may upload test-results" else empty end)
+    ')" || problems="does not parse"
+    if [ -n "${problems}" ]; then
+      printf '%s\n' "${problems}" | while IFS= read -r p; do printf 'workflow-permissions: ci.yml: %s\n' "${p}"; done
+      failed=1
+    fi
   fi
 fi
 

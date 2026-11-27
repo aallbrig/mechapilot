@@ -1,0 +1,269 @@
+#!/bin/sh
+# Tests for the split ci check (#119): scripts/test-shell --shard,
+# scripts/ci-merge-results, the Taskfile's ci:part:* targets and the shape
+# scripts/checks/workflow-permissions keeps for .github/workflows/ci.yml.
+
+# A throwaway repository with the shell runner, the merger and a small suite
+# (two files, five tests, one failing); sets s.
+suite() {
+  s="$(mktemp -d)"
+  trap 'rm -rf "${s}"' EXIT
+  mkdir -p "${s}/scripts" "${s}/tests/shell" "${s}/parts/godot"
+  cp scripts/test-shell scripts/lib-tests scripts/ci-merge-results "${s}/scripts/"
+  printf 'test_a() { true; }\ntest_b() { echo "<b> & </testsuite>"; false; }\ntest_c() { true; }\n' >"${s}/tests/shell/test_one"
+  printf 'test_d() { true; }\ntest_e() { true; }\n' >"${s}/tests/shell/test_two"
+  printf '<testsuites/>\n' >"${s}/parts/godot/godot.xml"
+}
+
+# shards <n>: run shards 1..n of the suite into parts/shell-<k>.
+shards() {
+  k=1
+  while [ "${k}" -le "$1" ]; do
+    (cd "${s}" && scripts/test-shell --shard "${k}/$1" "parts/shell-${k}") >/dev/null 2>&1 || true
+    k=$((k + 1))
+  done
+}
+
+# merge: exit status of ci-merge-results on the suite's parts, into a fresh out.
+merge() {
+  rm -rf "${s}/out"
+  (cd "${s}" && scripts/ci-merge-results parts out) >"${s}/merge.log" 2>&1
+}
+
+# add_case <shard-file> <testcase-line>: the file with that case added before
+# </testsuite> and tests= raised to match, as a consistent forgery would be.
+add_case() {
+  cases="$(grep -c '^  <testcase ' "$1")" || return 1
+  awk -v l="$2" -v n="$((cases + 1))" '
+    /^<testsuite / { sub(/tests="[0-9]+"/, "tests=\"" n "\"") }
+    /^<\/testsuite>$/ { print l }
+    { print }
+  ' "$1"
+}
+
+test_shell_shards_partition_the_suite() {
+  suite
+  shards 3
+  # Round robin over the suite in discovery order: 1/3 runs cases 1 and 4.
+  grep -q '<testsuite name="shell" tests="2" failures="0" shard="1/3">' "${s}/parts/shell-1/shell.xml" || return 1
+  grep -q 'name="test_a"/>' "${s}/parts/shell-1/shell.xml" || return 1
+  grep -q 'name="test_d"/>' "${s}/parts/shell-1/shell.xml" || return 1
+  grep -q 'name="test_b">' "${s}/parts/shell-2/shell.xml" || return 1
+  merge || return 1
+  # The merged file is what an unsharded run writes: same cases, same verdicts.
+  (cd "${s}" && scripts/test-shell whole) >/dev/null 2>&1 || true
+  grep -q '<testsuite name="shell" tests="5" failures="1">' "${s}/out/shell.xml" || return 1
+  grep '<testcase' "${s}/out/shell.xml" | sort >"${s}/merged"
+  grep '<testcase' "${s}/whole/shell.xml" | sort >"${s}/unsharded"
+  cmp -s "${s}/merged" "${s}/unsharded" || return 1
+  ! grep -q shard= "${s}/out/shell.xml" || return 1
+  cmp -s "${s}/parts/godot/godot.xml" "${s}/out/godot.xml"
+}
+
+test_shell_shard_rejects_bad_specs() {
+  suite
+  for spec in 0/3 4/3 1/0 1/33 33/33 x/3 1/3x "" 1 /3; do
+    rc=0
+    (cd "${s}" && scripts/test-shell --shard "${spec}" out) >/dev/null 2>&1 || rc=$?
+    [ "${rc}" -eq 64 ] || return 1
+  done
+  # A shard is the whole suite's shard: no test files with it.
+  rc=0
+  (cd "${s}" && scripts/test-shell --shard 1/2 out tests/shell/test_one) >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 64 ] || return 1
+  # The sandbox-only exclusion still cannot hide a test under CI.
+  rc=0
+  (cd "${s}" && CI=true TEST_SHELL_EXCLUDE=test_a scripts/test-shell --shard 1/2 out) >/dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+}
+
+test_ci_merge_refuses_missing_or_duplicate_shards() {
+  suite
+  shards 3
+  merge || return 1
+  # A shard missing (its job uploaded nothing, or was skipped).
+  mv "${s}/parts/shell-2" "${s}/hidden"
+  ! merge || return 1
+  grep -q 'exactly 1/3 .. 3/3' "${s}/merge.log" || return 1
+  [ ! -e "${s}/out" ] || return 1
+  # The same shard twice in its place.
+  cp -R "${s}/parts/shell-1" "${s}/parts/shell-2"
+  ! merge || return 1
+  rm -rf "${s}/parts/shell-2"
+  mv "${s}/hidden" "${s}/parts/shell-2"
+  merge || return 1
+  # A shard from another split (2/4 among the 3s).
+  (cd "${s}" && scripts/test-shell --shard 2/4 parts/shell-x) >/dev/null 2>&1 || true
+  ! merge || return 1
+  grep -q 'disagree' "${s}/merge.log"
+}
+
+test_ci_merge_refuses_results_that_are_not_the_whole_suite() {
+  suite
+  tab="$(printf '\t')"
+  shards 2
+  merge || return 1
+  # A test the shards never ran (added after they ran, or dropped by one).
+  printf 'test_f() { true; }\n' >>"${s}/tests/shell/test_two"
+  ! merge || return 1
+  grep -q "missing: tests/shell/test_two${tab}test_f" "${s}/merge.log" || return 1
+  printf 'test_d() { true; }\ntest_e() { true; }\n' >"${s}/tests/shell/test_two"
+  merge || return 1
+  # A forged case (a passing test the suite does not define), with tests= kept in step.
+  f="${s}/parts/shell-1/shell.xml"
+  cp "${f}" "${s}/orig"
+  add_case "${s}/orig" '  <testcase classname="tests/shell/test_one" name="test_z"/>' >"${f}" || return 1
+  ! merge || return 1
+  grep -q "extra or duplicated: tests/shell/test_one${tab}test_z" "${s}/merge.log" || return 1
+  # A case reported twice: shard 2's passing test_d, also in shard 1.
+  line="$(grep 'name="test_d"/>' "${s}/parts/shell-2/shell.xml")" || return 1
+  add_case "${s}/orig" "${line}" >"${f}" || return 1
+  ! merge || return 1
+  grep -q "extra or duplicated: tests/shell/test_two${tab}test_d" "${s}/merge.log" || return 1
+  cp "${s}/orig" "${f}"
+  merge
+}
+
+test_ci_merge_refuses_tampered_or_stray_part_files() {
+  suite
+  shards 2
+  merge || return 1
+  f="${s}/parts/shell-1/shell.xml"
+  cp "${f}" "${s}/orig"
+  # tests= disagreeing with the cases.
+  sed 's|tests="[0-9]*"|tests="7"|' "${s}/orig" >"${f}"
+  ! merge || return 1
+  # Not a shard (an unsharded file has no shard attribute).
+  sed 's| shard="1/2"||' "${s}/orig" >"${f}"
+  ! merge || return 1
+  cp "${s}/orig" "${f}"
+  # A stray file next to the results, a second godot.xml, or a symlink.
+  printf 'x\n' >"${s}/parts/shell-1/junit.xml"
+  ! merge || return 1
+  rm -f "${s}/parts/shell-1/junit.xml"
+  cp "${s}/parts/godot/godot.xml" "${s}/parts/shell-1/godot.xml"
+  ! merge || return 1
+  rm -f "${s}/parts/shell-1/godot.xml"
+  mv "${f}" "${s}/real.xml"
+  ln -s "${s}/real.xml" "${f}"
+  ! merge || return 1
+  rm -f "${f}"
+  mv "${s}/real.xml" "${f}"
+  # No Godot results at all.
+  mv "${s}/parts/godot" "${s}/godot-hidden"
+  ! merge || return 1
+  mv "${s}/godot-hidden" "${s}/parts/godot"
+  # The output must not exist yet (nothing pre-seeded).
+  mkdir -p "${s}/out"
+  ! (cd "${s}" && scripts/ci-merge-results parts out) >/dev/null 2>&1 || return 1
+  merge
+}
+
+# The parts run exactly what `task ci` runs: the same targets, the whole test
+# suite, each under its own tree check, and `task ci` itself is unchanged.
+test_ci_parts_cover_task_ci() {
+  t=Taskfile.yml
+  cmds() { yq -o=json -I=0 ".tasks[\"$1\"].cmds" "${t}"; }
+  # is <task> <json>: the task's cmds are exactly <json>.
+  is() {
+    got="$(cmds "$1")" || return 1
+    [ "${got}" = "$2" ] || {
+      printf '%s cmds are %s\n' "$1" "${got}"
+      return 1
+    }
+  }
+  is ci '[{"task":"ci:guard:begin"},{"task":"ci:fast"},{"task":"site"},{"task":"e2e:web"},{"task":"pages:assemble"},{"task":"secrets"},{"task":"ci:guard:end"}]' || return 1
+  is ci:fast '[{"task":"lint"},{"task":"godot:check"},{"task":"test"}]' || return 1
+  is test '["rm -rf build/test-results","mkdir -p build/test-results","scripts/test-shell",{"task":"godot:test"},"scripts/checks/test-results-clean"]' || return 1
+  is ci:part:static '[{"task":"ci:guard:begin"},{"task":"lint"},{"task":"godot:check"},{"task":"secrets"},{"task":"ci:guard:end"}]' || return 1
+  is ci:part:shell '[{"task":"ci:guard:begin"},"rm -rf build/test-results","mkdir -p build/test-results","scripts/test-shell --shard \"{{.SHARD}}\" build/test-results","scripts/checks/test-results-clean",{"task":"ci:guard:end"}]' || return 1
+  is ci:part:godot '[{"task":"ci:guard:begin"},"rm -rf build/test-results","mkdir -p build/test-results",{"task":"godot:test"},"scripts/checks/test-results-clean",{"task":"ci:guard:end"}]' || return 1
+  is ci:part:web '[{"task":"ci:guard:begin"},{"task":"site"},{"task":"e2e:web"},{"task":"pages:assemble"},{"task":"ci:guard:end"}]' || return 1
+  # Nothing on a part that could skip it or run something else first.
+  for p in ci:part:static ci:part:shell ci:part:godot ci:part:web; do
+    keys="$(yq -o=json -I=0 ".tasks[\"${p}\"] | del(.desc) | del(.cmds) | keys" "${t}")"
+    case "${p}" in
+    ci:part:shell) [ "${keys}" = '["requires"]' ] || return 1 ;;
+    *) [ "${keys}" = '[]' ] || return 1 ;;
+    esac
+    defs="$(grep -c "^  ${p}:\$" "${t}")"
+    [ "${defs}" -eq 1 ] || return 1
+  done
+  # Every part the workflow runs is one of these, and all of them run.
+  parts="$(yq -r '.jobs.part.strategy.matrix.include[].part' .github/workflows/ci.yml | sort -u | tr '\n' ' ')"
+  [ "${parts}" = "godot shell static web " ]
+}
+
+# ci.yml's shape (#119): every part needed, judged and impossible to skip.
+test_workflow_permissions_keeps_the_split_ci_shape() {
+  scripts/checks/workflow-permissions >/dev/null || return 1
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  nl='\
+'
+  # shape <ci-sed>: exit 0 if workflow-permissions passes with that ci.yml variant.
+  shape() {
+    rm -rf "${d}/w"
+    mkdir -p "${d}/w"
+    cp .github/workflows/*.yml "${d}/w/"
+    sed "$1" .github/workflows/ci.yml >"${d}/w/ci.yml"
+    if [ -n "$1" ] && cmp -s "${d}/w/ci.yml" .github/workflows/ci.yml; then
+      printf 'mutation changed nothing: %s\n' "$1"
+      return 2
+    fi
+    # Refused for its shape, never only because the mutation broke the YAML.
+    yq '.' "${d}/w/ci.yml" >/dev/null 2>&1 || {
+      printf 'mutation does not parse: %s\n' "$1"
+      return 2
+    }
+    scripts/checks/workflow-permissions "${d}/w" >"${d}/out" 2>&1
+  }
+  # refused <ci-sed>: the mutation changed ci.yml and the check refuses it.
+  refused() {
+    rc=0
+    shape "$1" || rc=$?
+    [ "${rc}" -eq 1 ] || {
+      printf 'not refused (exit %s): %s\n' "${rc}" "$1"
+      return 1
+    }
+  }
+  shape "" || return 1
+  # The ci job stops waiting for the parts, or stops judging them.
+  refused '/^    needs: \[part\]$/d' || return 1
+  refused 's/^    needs: \[part\]$/    needs: []/' || return 1
+  # A third job the ci job does not wait for.
+  refused "s/^  ci:\$/  other:${nl}    name: part x${nl}    runs-on: ubuntu-latest${nl}    timeout-minutes: 10${nl}    permissions: {contents: read}${nl}    steps: [{run: \"true\"}]${nl}  ci:/" || return 1
+  refused "/^    if: \${{ !cancelled() }}\$/d" || return 1
+  refused "s/^    if: \${{ !cancelled() }}\$/    if: always() \\&\\& false/" || return 1
+  refused "s/^    if: \${{ !cancelled() }}\$/    if: success()/" || return 1
+  refused '/^      - name: Every part passed$/,/^$/d' || return 1
+  refused "s/^      - name: Every part passed\$/      - name: Every part passed${nl}        if: false/" || return 1
+  refused 's/all(.\[\]; .result == "success")/any(.[]; .result == "success")/' || return 1
+  refused "s/NEEDS: \${{ toJSON(needs) }}/NEEDS: \"{}\"/" || return 1
+  # Results merged without the completeness check, or before the parts are judged.
+  refused "s|run: scripts/ci-merge-results \"\${RUNNER_TEMP}/parts\" build/test-results|run: cp -R \"\${RUNNER_TEMP}/parts\" build/test-results|" || return 1
+  refused "s/^      - name: Merge the parts' test results\$/      - name: Merge the parts' test results${nl}        if: false/" || return 1
+  # A part skipped, dropped, renamed into the ci check, or allowed to fail.
+  refused '/^          - part: godot$/d' || return 1
+  refused '/^          - part: web$/d' || return 1
+  refused '/^            shard: 5\/5$/d' || return 1
+  refused 's/^            shard: 5\/5$/            shard: 4\/5/' || return 1
+  refused "s/^          - part: static\$/          - part: static${nl}            shard: 1\\/1/" || return 1
+  refused "s/^    strategy:\$/    if: false${nl}    strategy:/" || return 1
+  refused 's/^    name: part (/    name: ci (/' || return 1
+  refused "s/^    name: part (\${{ matrix.part }}.*\$/    name: ci/" || return 1
+  refused "s/^        include:\$/        exclude: [{part: web}]${nl}        include:/" || return 1
+  refused "s/^      - name: Run the part\$/      - name: Run the part${nl}        if: matrix.part != 'web'/" || return 1
+  refused "s/^      - name: Run the part\$/      - name: Run the part${nl}        continue-on-error: true/" || return 1
+  refused "s/^      - name: Run the part\$/      - name: Run the part${nl}        shell: 'true {0}'/" || return 1
+  refused "s/run: task \"ci:part:\${PART}\" SHARD=\"\${SHARD}\"/run: task \"ci:part:\${PART}\" SHARD=\"\${SHARD}\" || true/" || return 1
+  refused "s/^    runs-on: ubuntu-latest\$/    runs-on: ubuntu-latest${nl}    continue-on-error: true/" || return 1
+  refused "s/^permissions:\$/defaults: {run: {shell: 'true {0}'}}${nl}permissions:/" || return 1
+  # Only the ci job uploads the evidence the merge gate reads.
+  refused "s/name: part-results-\${{ strategy.job-index }}/name: test-results/" || return 1
+  # Bounded timeouts on both jobs (#118): a hung part fails the check.
+  refused 's/^    timeout-minutes: 15$/    timeout-minutes: 9/' || return 1
+  refused 's/^    timeout-minutes: 15$/    timeout-minutes: 31/' || return 1
+  refused 's/^    timeout-minutes: 15$/    timeout-minutes: 12.5/' || return 1
+  refused '/^    timeout-minutes: 15$/d' || return 1
+}
