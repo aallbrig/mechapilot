@@ -953,3 +953,147 @@ test_deploy_summary_fits_the_outcome() {
   grep -q 'back on the version it served before' "${w}/summary.md" || return 1
   rm -rf "${w}"
 }
+
+# toolchain_like_ci <ci.yml> <release.yml> <Taskfile>: exit 0 if release.yml's
+# build job sets up the toolchain by exactly ci.yml's path (#95): the three
+# steps from ci.yml's `Restore Godot` (restore the cache, `task
+# ci:toolchain`, save the cache) appear unchanged in release.yml, before the
+# step that runs Godot, with only actions (no run step) before them in either
+# workflow; ci:toolchain is defined once and has only a desc and exactly the
+# commands that install the pinned Godot and then the pinned bubblewrap (no
+# deps, platforms, status, preconditions, env or other key that could skip
+# the install or run something first); and no other step installs either by
+# itself.
+toolchain_like_ci() {
+  ci_json="$(yq -o=json '.' "$1")" || return 1
+  rel_json="$(yq -o=json '.' "$2")" || return 1
+  # Textually, so that a parser keeping only the last duplicate can't hide one.
+  defs="$(grep -c '^  ["'\'']\{0,1\}ci:toolchain["'\'']\{0,1\}[[:space:]]*:' "$3")" || return 1
+  if [ "${defs}" -ne 1 ]; then
+    printf 'ci:toolchain is defined %s times\n' "${defs}"
+    return 1
+  fi
+  task_def="$(yq -o=json -I=0 '.tasks["ci:toolchain"] | del(.desc)' "$3")" || return 1
+  if [ "${task_def}" != '{"cmds":["scripts/install-godot","scripts/install-bubblewrap"]}' ]; then
+    printf 'ci:toolchain is %s\n' "${task_def}"
+    return 1
+  fi
+  printf '%s' "${ci_json}" | jq -e --argjson rel "${rel_json}" '
+    # at: the index of the one step with id godot-cache; block: the three
+    # steps from it.
+    def at($steps): [$steps | to_entries[] | select(.value.id == "godot-cache") | .key]
+      | if length == 1 then .[0] else error("exactly one godot-cache step") end;
+    def block($steps): at($steps) as $i | $steps[$i:$i + 3];
+    def runs: (.run // "") | tostring;
+    # Before the block only actions run (checkout, mise): no repository
+    # script, so nothing can reach the cache before it is saved (GT-11).
+    def clean_before($steps): at($steps) as $i | all($steps[:$i][]; has("run") | not);
+    def single_path($steps): at($steps) as $i
+      | all(($steps[:$i] + $steps[$i + 3:])[];
+          (runs | test("install-godot|install-bubblewrap|bwrap|dpkg|ci:toolchain") | not)
+          and ((.uses // "") | test("^\\./") | not));
+    def after($steps; $pat): at($steps) as $i
+      | [$steps | to_entries[] | select(.value | runs | test($pat)) | .key]
+      | length > 0 and all(. > $i + 2);
+    .jobs.ci.steps as $c | $rel.jobs.build.steps as $r
+    | block($c) as $b
+    | ($b | length) == 3
+    and ($b[0].uses | test("^actions/cache/restore@[0-9a-f]{40}$"))
+    and ($b[1] == {"name": "Install the pinned Godot and bubblewrap", "run": "task ci:toolchain"})
+    and ($b[2].uses | test("^actions/cache/save@[0-9a-f]{40}$"))
+    and ($b[2].with.key == "${{ steps.godot-cache.outputs.cache-primary-key }}")
+    and block($r) == $b
+    and clean_before($c) and clean_before($r)
+    and single_path($c) and single_path($r)
+    and after($c; "^task ci$")
+    and after($r; "scripts/release/build")' >/dev/null || return 1
+}
+
+test_release_sets_up_godot_toolchain_like_ci() {
+  ci=.github/workflows/ci.yml
+  rel=.github/workflows/release.yml
+  toolchain_like_ci "${ci}" "${rel}" Taskfile.yml || return 1
+  d="$(mktemp -d)"
+  # mutant <ci|rel|task> <sed script>: exit 0 if the mutated copy still passes.
+  mutant() {
+    cp "${ci}" "${d}/ci.yml"
+    cp "${rel}" "${d}/release.yml"
+    cp Taskfile.yml "${d}/Taskfile.yml"
+    case "$1" in
+    ci) f="${d}/ci.yml" ;;
+    rel) f="${d}/release.yml" ;;
+    *) f="${d}/Taskfile.yml" ;;
+    esac
+    sed "$2" "${f}" >"${d}/m" || return 2
+    cmp -s "${d}/m" "${f}" && [ -n "$2" ] && return 2
+    cat "${d}/m" >"${f}"
+    toolchain_like_ci "${d}/ci.yml" "${d}/release.yml" "${d}/Taskfile.yml"
+  }
+  # refused <ci|rel|task> <sed script>: the mutation changed the file and the check refuses it.
+  refused() {
+    rc=0
+    mutant "$@" >/dev/null 2>&1 || rc=$?
+    [ "${rc}" -eq 1 ] || {
+      printf 'not refused (exit %s): %s %s\n' "${rc}" "$1" "$2"
+      return 1
+    }
+  }
+  # Unchanged copies pass, so every refusal below is the mutation's doing.
+  mutant rel "" || return 1
+  # release.yml without the toolchain (the #95 failure), or without its cache.
+  refused rel '/^      - name: Install the pinned Godot and bubblewrap$/,/^$/d' || return 1
+  refused rel '/^      - name: Restore Godot$/,/^$/d' || return 1
+  # A drifted copy: another cache key, or only the Godot half.
+  refused rel "s/'scripts\\/lib-godot') }}/'scripts\\/lib-godot', 'x') }}/" || return 1
+  refused rel 's/run: task ci:toolchain/run: scripts\/install-godot/' || return 1
+  # The toolchain made conditional in release.yml only.
+  refused rel '/run: task ci:toolchain/i\
+        if: steps.guard.outputs.release == '"'no'"'
+' || return 1
+  # Godot used before the toolchain.
+  refused rel '/^      - name: Restore Godot$/i\
+      - name: early\
+        run: scripts/release/build x\
+
+' || return 1
+  # Any repository script before the cache is saved (the guard, here).
+  refused rel '/^      - name: Guard (a green ci push run on a main commit not yet released)$/,/^$/d
+/^      - name: Restore Godot$/i\
+      - name: Guard\
+        id: guard\
+        run: scripts/release/guard\
+
+' || return 1
+  # A second, private installer next to the shared path.
+  refused rel '/^      - name: Build and package$/i\
+      - name: extra\
+        run: sudo dpkg -i x.deb\
+
+' || return 1
+  refused ci '/^      - name: task ci$/i\
+      - name: extra\
+        run: scripts/install-bubblewrap\
+
+' || return 1
+  # ci:toolchain that drops bubblewrap or also runs something else.
+  refused task '/^      - scripts\/install-bubblewrap$/d' || return 1
+  refused task '/^      - scripts\/install-bubblewrap$/a\
+      - curl -o x https://example.invalid/x
+' || return 1
+  # Any other key on the task: project code first (deps), or a skipped
+  # install on Linux (platforms, status, preconditions), or a changed env.
+  for key in 'deps: [godot:import]' 'platforms: [darwin]' 'status: ["true"]' \
+    'preconditions: ["false"]' 'env: {MECHAPILOT_TOOLS: /tmp/x}' 'dir: godot' 'run: once'; do
+    refused task "/^  ci:toolchain:\$/a\\
+    ${key}
+" || return 1
+  done
+  # A second definition, which a YAML parser may silently prefer.
+  refused task '/^  godot:import:$/i\
+  ci:toolchain:\
+    cmds:\
+      - "true"\
+
+' || return 1
+  rm -rf "${d}"
+}

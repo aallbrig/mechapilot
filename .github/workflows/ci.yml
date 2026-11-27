@@ -40,10 +40,15 @@ jobs:
         with:
           cache: true
 
-      # The pinned editor and the two web templates (about 100 MB). Restore, install
-      # (which re-hashes every installed file against .godot-sha512sums, and
-      # reinstalls from verified downloads on any mismatch), then save at once,
-      # before any project code runs, so nothing a test does can enter the cache.
+      # The pinned toolchain, by the one path release.yml also takes (#95):
+      # `task ci:toolchain` installs the pinned editor and the two web templates
+      # (about 100 MB; scripts/install-godot re-hashes every installed file
+      # against .godot-sha512sums and reinstalls from verified downloads on any
+      # mismatch), then the pinned bubblewrap .deb (scripts/install-bubblewrap)
+      # that scripts/godot-run requires on Linux CI. The cache is restored
+      # before and saved right after, before any project code runs, so nothing
+      # a test does can enter it. tests/shell/test_release checks that
+      # release.yml carries these three steps unchanged.
       - name: Restore Godot
         id: godot-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -51,8 +56,8 @@ jobs:
           path: ~/.cache/mechapilot/godot
           key: godot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.godot-version', '.godot-sha512sums', 'scripts/install-godot', 'scripts/lib-godot') }}
 
-      - name: Install Godot
-        run: scripts/install-godot
+      - name: Install the pinned Godot and bubblewrap
+        run: task ci:toolchain
 
       - name: Save Godot
         if: steps.godot-cache.outputs.cache-hit != 'true'
@@ -80,28 +85,6 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
-
-      # scripts/godot-test runs every Godot test process under bubblewrap on Linux
-      # (read-only filesystem, private user:// and report dir, no network).
-      # Pinned by version and SHA-256 as a .deb from the Ubuntu archive, so it does not
-      # depend on which Ubuntu release ubuntu-latest is or on apt index state. Its
-      # dependencies (libc6, libcap2, libselinux1) are on every image.
-      - name: Install bubblewrap
-        env:
-          BWRAP_DEB_URL: https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3_amd64.deb
-          BWRAP_DEB_SHA256: 2461f1beee9cb04c8942739fe1a2b37e7b7c2a3d518f0779dc75f9245baa3094
-        run: |
-          deb="${RUNNER_TEMP}/bubblewrap.deb"
-          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "${deb}" "${BWRAP_DEB_URL}"
-          echo "${BWRAP_DEB_SHA256}  ${deb}" | sha256sum -c -
-          sudo dpkg -i "${deb}"
-          bwrap --version
-          # Ubuntu can restrict unprivileged user namespaces through AppArmor;
-          # this throwaway runner allows them so bwrap can sandbox without setuid.
-          if ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true
 
       - name: task ci
         run: task ci

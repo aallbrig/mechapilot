@@ -1,0 +1,56 @@
+#!/bin/sh
+# Install the pinned bubblewrap on a GitHub-hosted Ubuntu runner (#95).
+#
+# scripts/godot-run runs every Godot process that loads project code (tests,
+# import, the web export) under bubblewrap on Linux, and refuses to run without
+# it in CI. ci.yml and release.yml both install it through `task ci:toolchain`,
+# so the release's export runs in the same sandbox CI tested.
+#
+# Pinned by version and SHA-256 as a .deb from the Ubuntu archive, so it does
+# not depend on which Ubuntu release ubuntu-latest is or on apt index state.
+# Its dependencies (libc6, libcap2, libselinux1) are on every image. The URL
+# and checksum are constants here, never read from the environment.
+#
+# Runner only: it installs system-wide with sudo and may relax the AppArmor
+# restriction on unprivileged user namespaces, so it refuses to run outside
+# GitHub Actions or on anything but Linux x86_64.
+#
+# Usage: scripts/install-bubblewrap
+set -eu
+LC_ALL=C
+export LC_ALL
+
+deb_url=https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3_amd64.deb
+deb_sha256=2461f1beee9cb04c8942739fe1a2b37e7b7c2a3d518f0779dc75f9245baa3094
+
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  printf 'install-bubblewrap: runs only on a GitHub Actions runner (it installs with sudo)\n' >&2
+  exit 1
+fi
+kernel="$(uname -s)"
+arch="$(uname -m)"
+platform="${kernel} ${arch}"
+if [ "${platform}" != "Linux x86_64" ]; then
+  printf 'install-bubblewrap: the pinned .deb is for Linux x86_64, not %s\n' "${platform}" >&2
+  exit 1
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+deb="${work}/bubblewrap.deb"
+curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "${deb}" "${deb_url}"
+have="$(sha256sum "${deb}" | cut -d ' ' -f 1)"
+if [ "${have}" != "${deb_sha256}" ]; then
+  printf 'install-bubblewrap: SHA-256 mismatch for %s (got %s)\n' "${deb_url}" "${have}" >&2
+  exit 1
+fi
+sudo dpkg -i "${deb}"
+bwrap --version
+
+# Ubuntu can restrict unprivileged user namespaces through AppArmor; this
+# throwaway runner allows them so bwrap can sandbox without setuid.
+if ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true; then
+  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+fi
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true
+printf 'install-bubblewrap: ok\n'

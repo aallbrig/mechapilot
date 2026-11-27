@@ -1,0 +1,125 @@
+#!/bin/sh
+# Tests for scripts/install-bubblewrap (#95), with curl, sudo, uname, bwrap
+# and (for the success path) sha256sum stubbed on PATH: nothing is downloaded
+# or installed. Every stub logs to ${STUB_DIR}/log, so a refusal by a guard
+# can be told apart from a later checksum refusal: a guard refuses before
+# anything is called.
+
+pinned_sha256=2461f1beee9cb04c8942739fe1a2b37e7b7c2a3d518f0779dc75f9245baa3094
+
+# stubs <dir> <deb-content> [kernel] [arch]: curl logs and writes
+# <deb-content> to its -o file; uname reports <kernel> <arch> (default Linux
+# x86_64); sudo and bwrap log what they were asked to do. If <dir>/userns-off
+# exists, the first sandbox probe fails (as under Ubuntu's AppArmor default).
+stubs() {
+  mkdir -p "$1/bin"
+  printf '%s' "$2" >"$1/deb"
+  printf '%s\n' "${3:-Linux}" >"$1/kernel"
+  printf '%s\n' "${4:-x86_64}" >"$1/arch"
+  cat >"$1/bin/curl" <<'STUB'
+#!/bin/sh
+printf 'curl %s\n' "$*" >>"${STUB_DIR}/log"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) cp "${STUB_DIR}/deb" "$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+STUB
+  cat >"$1/bin/sudo" <<'STUB'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >>"${STUB_DIR}/log"
+STUB
+  cat >"$1/bin/bwrap" <<'STUB'
+#!/bin/sh
+printf 'bwrap %s\n' "$*" >>"${STUB_DIR}/log"
+if [ "$1" = --ro-bind ] && [ -e "${STUB_DIR}/userns-off" ]; then
+  rm -f "${STUB_DIR}/userns-off"
+  exit 1
+fi
+STUB
+  cat >"$1/bin/uname" <<'STUB'
+#!/bin/sh
+case "$1" in
+  -s) cat "${STUB_DIR}/kernel" ;;
+  -m) cat "${STUB_DIR}/arch" ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$1/bin/curl" "$1/bin/sudo" "$1/bin/bwrap" "$1/bin/uname"
+  : >"$1/log"
+}
+
+# install <dir> [env assignments...]: run the script with the stubs first on PATH.
+install() {
+  stub_dir="$1"
+  shift
+  env STUB_DIR="${stub_dir}" PATH="${stub_dir}/bin:${PATH}" "$@" scripts/install-bubblewrap
+}
+
+test_install_bubblewrap_refuses_a_wrong_checksum() {
+  d="$(mktemp -d)"
+  stubs "${d}" "not the pinned deb"
+  ! install "${d}" GITHUB_ACTIONS=true 2>/dev/null || return 1
+  # It downloaded, then refused: nothing was installed or run.
+  grep -q '^curl ' "${d}/log" || return 1
+  ! grep -qv '^curl ' "${d}/log" || return 1
+  rm -rf "${d}"
+}
+
+test_install_bubblewrap_runs_only_on_github_actions() {
+  d="$(mktemp -d)"
+  stubs "${d}" "x"
+  ! install "${d}" -u GITHUB_ACTIONS 2>/dev/null || return 1
+  ! install "${d}" GITHUB_ACTIONS=1 2>/dev/null || return 1
+  ! install "${d}" GITHUB_ACTIONS= 2>/dev/null || return 1
+  # Refused before any download.
+  [ ! -s "${d}/log" ] || return 1
+  rm -rf "${d}"
+}
+
+test_install_bubblewrap_runs_only_on_linux_x86_64() {
+  for platform in Darwin/arm64 Darwin/x86_64 Linux/aarch64 Linux/arm64; do
+    d="$(mktemp -d)"
+    stubs "${d}" "x" "${platform%/*}" "${platform#*/}"
+    ! install "${d}" GITHUB_ACTIONS=true 2>/dev/null || return 1
+    [ ! -s "${d}/log" ] || {
+      printf 'not refused before download on %s\n' "${platform}"
+      return 1
+    }
+    rm -rf "${d}"
+  done
+}
+
+# The success path: a download with the pinned checksum is installed with
+# dpkg, and the AppArmor restriction is relaxed only when the first sandbox
+# probe fails. sha256sum is stubbed to report the pinned sum.
+test_install_bubblewrap_installs_a_verified_deb() {
+  for userns in on off; do
+    d="$(mktemp -d)"
+    stubs "${d}" "deb"
+    cat >"${d}/bin/sha256sum" <<STUB
+#!/bin/sh
+printf '%s  %s\n' "${pinned_sha256}" "\$1"
+STUB
+    chmod +x "${d}/bin/sha256sum"
+    if [ "${userns}" = off ]; then : >"${d}/userns-off"; fi
+    install "${d}" GITHUB_ACTIONS=true >/dev/null 2>&1 || return 1
+    cut -d ' ' -f 1-3 "${d}/log" >"${d}/calls"
+    {
+      echo "curl --proto =https"
+      echo "sudo dpkg -i"
+      echo "bwrap --version"
+      echo "bwrap --ro-bind /"
+      if [ "${userns}" = off ]; then echo "sudo sysctl -w"; fi
+      # The final probe always runs and must pass.
+      echo "bwrap --ro-bind /"
+    } >"${d}/want"
+    cmp -s "${d}/calls" "${d}/want" || {
+      printf 'calls with userns %s:\n' "${userns}"
+      cat "${d}/calls"
+      return 1
+    }
+    rm -rf "${d}"
+  done
+}
