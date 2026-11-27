@@ -1,5 +1,7 @@
 # Credits
 
+Created by Andrew Allbright.
+
 Every third-party or openly licensed asset used by Mecha Fighter and its sites is listed here with its source and license. Add a row whenever you add an asset.
 
 ## Game (`godot/`)

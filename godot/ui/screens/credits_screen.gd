@@ -6,14 +6,22 @@ extends UiScreen
 ## credit shows the asset's name, its author and its licence (file paths are
 ## for the asset-credits check, not for players). The full SIL Open Font
 ## Licence of each bundled font follows the list: the OFL requires it to ship
-## with the font, and the Web export includes those files too.
+## with the font, and the Web export includes those files too. The list opens
+## with the game's creator (#105), read from the same file's "Created by" line.
 
 const SCROLL_SPEED: float = 40.0
 const SCROLL_START_DELAY: float = 1.5
 const LIST_HEIGHT: float = 360.0
+const CREATOR_PREFIX: String = "Created by "
+const CREATOR_GAP: int = 4
+const CREATOR_POP_FROM: float = 0.85
+const CREATOR_POP_DELAY: float = 0.1
 
 var _scroll: ScrollContainer
 var _list: VBoxContainer
+var _opening: VBoxContainer
+var _creator_name: Label
+
 var _back: Button
 var _scroll_tween: Tween
 var _credits: Array[PackedStringArray] = []
@@ -30,6 +38,7 @@ func _ready() -> void:
 	_list = UiBuild.column(18)
 	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_scroll.add_child(_list)
+	_add_opening(read_creator())
 	_credits = read_credits()
 	for credit: PackedStringArray in _credits:
 		var entry: VBoxContainer = UiBuild.column(2)
@@ -65,6 +74,21 @@ func handle_cancel() -> bool:
 	return true
 
 
+## The labels of the entry the list opens with: "Created by", then the
+## creator's name in the title style.
+func opening() -> Array[Label]:
+	var labels: Array[Label] = []
+	if _opening != null:
+		for child: Node in _opening.get_children():
+			labels.append(child as Label)
+	return labels
+
+
+## Where the creator entry sits in the list (0: before every other entry).
+func opening_index() -> int:
+	return _opening.get_index() if _opening != null else -1
+
+
 ## The credits shown: [asset, source, licence] per row of CREDITS.md.
 func credits() -> Array[PackedStringArray]:
 	return _credits.duplicate()
@@ -87,6 +111,21 @@ static func read_font_licences() -> PackedStringArray:
 			continue
 		var _added: bool = texts.append(file.get_as_text().strip_edges())
 	return texts
+
+
+## The creator named on the "Created by <name>." line of res://CREDITS.md,
+## or "" when the file has no such line.
+static func read_creator() -> String:
+	var file: FileAccess = FileAccess.open("res://CREDITS.md", FileAccess.READ)
+	if file == null:
+		push_error("CreditsScreen: res://CREDITS.md is missing")
+		return ""
+	while not file.eof_reached():
+		var line: String = file.get_line().strip_edges()
+		if line.begins_with(CREATOR_PREFIX) and line.ends_with("."):
+			return line.trim_prefix(CREATOR_PREFIX).trim_suffix(".").strip_edges()
+	push_error('CreditsScreen: res://CREDITS.md has no "Created by" line')
+	return ""
 
 
 ## The rows of the asset table in res://CREDITS.md, as plain text cells.
@@ -129,8 +168,22 @@ static func plain_text(cell: String) -> String:
 	return text.replace(" ,", ",").strip_edges().trim_prefix(",").strip_edges()
 
 
+func _add_opening(creator: String) -> void:
+	if creator.is_empty():
+		return
+	_opening = UiBuild.column(CREATOR_GAP)
+	var by: Label = UiBuild.label(CREATOR_PREFIX.strip_edges(), &"ComboLabel")
+	by.uppercase = true
+	_opening.add_child(by)
+	_creator_name = UiBuild.paragraph(creator, &"TitleLabel")
+	_opening.add_child(_creator_name)
+	_list.add_child(_opening)
+
+
 func _on_enter() -> void:
 	_scroll.scroll_vertical = 0
+	if _creator_name != null:
+		TweenFx.pop(_creator_name, CREATOR_POP_FROM, TweenFx.POP_TIME, CREATOR_POP_DELAY)
 	if _scroll_tween != null:
 		_scroll_tween.kill()
 	if TweenFx.reduced_motion:
