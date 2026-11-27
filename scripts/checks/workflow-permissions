@@ -95,6 +95,19 @@ if [ -e "${dir}/deploy-qa.yml" ] || [ -L "${dir}/deploy-qa.yml" ]; then
   fi
 fi
 
+# The required ci check must not be cancelled by its own job timeout (#118).
+if [ -e "${dir}/ci.yml" ] || [ -L "${dir}/ci.yml" ]; then
+  if [ -L "${dir}/ci.yml" ] || [ ! -f "${dir}/ci.yml" ]; then
+    fail "ci.yml is a symlink or not a regular file"
+  else
+    t="$(yq -o=json '.' "${dir}/ci.yml" | jq -r '.jobs.ci["timeout-minutes"] // "unset" | tojson')" || t="unparseable"
+    case "${t}" in
+      6[0-9] | [7-9][0-9] | 1[01][0-9] | 120) ;;
+      *) fail "ci.yml: the ci job's timeout-minutes must be an integer from 60 to 120, not ${t}" ;;
+    esac
+  fi
+fi
+
 # Every *.yml and *.yaml directly in the directory, dotfiles included.
 list="$(mktemp)"
 trap 'rm -f "${list}"' EXIT
