@@ -13,6 +13,7 @@ extends Node
 ##              player.player_destroyed        -> PlayerMech.destroy()
 ##              player.player_respawned        -> PlayerMech.respawn() where it fell
 ##              run.run_started                -> end_guard(), then respawn() at the origin
+##              flow.game_state_changed        -> PlayerMech.drop_queued_tap()
 ##
 ## Once linked, the mech stops guarding itself: the RunLedger owns the window.
 
@@ -37,6 +38,7 @@ func link(bus: EventBus, player: PlayerMech, input: PlayerInput) -> void:
 	_check(bus.player.player_destroyed.connect(_on_player_destroyed) as Error)
 	_check(bus.player.player_respawned.connect(_on_player_respawned) as Error)
 	_check(bus.run.run_started.connect(_on_run_started) as Error)
+	_check(bus.flow.game_state_changed.connect(_on_game_state_changed) as Error)
 
 
 ## Connections that failed (0 when fully linked).
@@ -69,3 +71,8 @@ func _check(err: Error) -> void:
 	if err != OK:
 		_errors += 1
 		push_error("PlayerBusLink: could not connect: %s" % error_string(err))
+
+
+## A Tap Shot from before a Pause (or any change of Game State) never fires after it.
+func _on_game_state_changed(_from: GameState.Phase, _to: GameState.Phase) -> void:
+	_player.drop_queued_tap()

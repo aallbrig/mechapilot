@@ -61,9 +61,10 @@ var _cooldown: float = 0.0
 var _since_shot: float = INF
 var _was_firing: bool = false
 ## A Tap Shot waiting for the cooldown (the latest tap wins), so tapping never
-## beats the hold rate and never banks a burst.
+## beats the hold rate and never banks a burst. Its target is the world point
+## under the tap when it was tapped, so a moving camera can't shift it.
 var _tap_queued: bool = false
-var _tap_point: Vector2 = Vector2.ZERO
+var _tap_target: Vector3 = Vector3.ZERO
 var _flash_left: float = 0.0
 var _alive: bool = true
 var _last_hit_direction: Vector3 = Vector3.ZERO
@@ -115,9 +116,9 @@ func tick(delta: float, intent: PilotIntent) -> void:
 	if absf(velocity.x) > tuning.facing_speed and _since_shot > tuning.facing_fire_hold:
 		facing = signf(velocity.x)
 	_update_aim(intent)
-	if intent.has_tap:
+	if intent.has_tap and view != null:
 		_tap_queued = true
-		_tap_point = intent.tap_point
+		_tap_target = view.screen_to_play_plane(intent.tap_point)
 	if intent.firing:
 		_tap_queued = false
 		_face_aim()
@@ -125,7 +126,7 @@ func tick(delta: float, intent: PilotIntent) -> void:
 			_fire()
 	elif _tap_queued and _cooldown <= FIRE_EPSILON:
 		_tap_queued = false
-		if _aim_at_point(_tap_point):
+		if _aim_at_world(_tap_target):
 			_face_aim()
 			_fire()
 
@@ -139,6 +140,12 @@ func tick(delta: float, intent: PilotIntent) -> void:
 		. orthonormalized()
 	)
 	motion_sampled.emit(_sample(delta))
+
+
+## Forget a Tap Shot waiting for the cooldown. PlayerBusLink calls this on every
+## Game State change, so a tap from before a Pause never fires after it.
+func drop_queued_tap() -> void:
+	_tap_queued = false
 
 
 ## Report a hit from `source` travelling along `direction`. Returns false (and
@@ -252,7 +259,12 @@ func _update_aim(intent: PilotIntent) -> void:
 func _aim_at_point(screen_point: Vector2) -> bool:
 	if view == null:
 		return false
-	var to_point: Vector3 = view.screen_to_play_plane(screen_point) - global_position
+	return _aim_at_world(view.screen_to_play_plane(screen_point))
+
+
+## Aim at a point on the play plane. False when it is too close to the mech.
+func _aim_at_world(point: Vector3) -> bool:
+	var to_point: Vector3 = point - global_position
 	to_point.z = 0.0
 	if to_point.length() < MIN_POINT_AIM:
 		return false

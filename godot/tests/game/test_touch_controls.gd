@@ -106,14 +106,36 @@ func test_tap_shots_respect_the_fire_cooldown() -> void:
 func test_slow_or_moved_tap_is_not_a_shot() -> void:
 	_h.start()
 	_h.press(FINGER, RIGHT_POINT)
-	_h.fly(TouchSticks.TAP_TIME + 0.05)
+	_h.fly(0.2)
 	_h.release(FINGER, RIGHT_POINT)
 	_h.press(OTHER_FINGER, RIGHT_POINT)
-	_h.drag(OTHER_FINGER, RIGHT_POINT + Vector2(0.0, TouchSticks.TAP_SLOP + 1.0))
+	_h.drag(OTHER_FINGER, RIGHT_POINT + Vector2(0.0, 13.0))
 	_h.drag(OTHER_FINGER, RIGHT_POINT)
 	_h.release(OTHER_FINGER, RIGHT_POINT)
 	_h.fly(0.5)
 	var _no_shots: GdUnitAssert = assert_int(_h.shots.size()).is_equal(0)
+
+
+## True when a right-half touch held `seconds` that travelled `pixels` is a tap.
+## The clock starts at 0, so the elapsed times are exact.
+func _is_tap(seconds: float, pixels: float) -> bool:
+	var sticks: TouchSticks = TouchSticks.new()
+	sticks.split_x = TouchHarness.SCREEN.x * 0.5
+	sticks.press(FINGER, RIGHT_POINT, 0.0)
+	sticks.drag(FINGER, RIGHT_POINT + Vector2(pixels, 0.0), 0.0)
+	sticks.update(seconds)
+	sticks.release(FINGER, RIGHT_POINT, seconds)
+	return sticks.take_taps().size() == 1
+
+
+func test_tap_thresholds_are_180_ms_and_12_px() -> void:
+	# Under 180 ms and under 12 px is a tap; 180 ms or 12 px, or more, is not.
+	var _quick_short: GdUnitAssert = assert_bool(_is_tap(0.17, 11.0)).is_true()
+	var _quick_still: GdUnitAssert = assert_bool(_is_tap(0.0, 0.0)).is_true()
+	var _at_time: GdUnitAssert = assert_bool(_is_tap(0.18, 0.0)).is_false()
+	var _past_time: GdUnitAssert = assert_bool(_is_tap(0.19, 0.0)).is_false()
+	var _at_slop: GdUnitAssert = assert_bool(_is_tap(0.0, 12.0)).is_false()
+	var _past_slop: GdUnitAssert = assert_bool(_is_tap(0.0, 13.0)).is_false()
 
 
 func test_right_hold_without_drag_fires_nothing() -> void:
@@ -209,6 +231,44 @@ func test_two_touches_tracked_independently() -> void:
 	var _still_moves: GdUnitAssert = assert_vector(move_only.move).is_equal_approx(
 		Vector2.RIGHT, EPS2
 	)
+
+
+func test_extra_left_finger_never_takes_the_move_stick() -> void:
+	_h.start()
+	_h.press(FINGER, LEFT_POINT)
+	_h.drag(FINGER, LEFT_POINT + Vector2(TouchSticks.STICK_RANGE, 0.0))
+	_h.press(OTHER_FINGER, Vector2(100.0, 100.0))
+	_h.drag(OTHER_FINGER, Vector2(100.0, 100.0 + TouchSticks.STICK_RANGE))
+	var during: PilotIntent = _h.input.read_intent()
+	_h.release(OTHER_FINGER, Vector2(100.0, 100.0))
+	var later: PilotIntent = _h.input.read_intent()
+	var _owner_steers: GdUnitAssert = assert_vector(during.move).is_equal_approx(
+		Vector2.RIGHT, EPS2
+	)
+	var _still_held: GdUnitAssert = assert_vector(later.move).is_equal_approx(Vector2.RIGHT, EPS2)
+
+
+func test_tap_before_pause_never_fires_after_resume() -> void:
+	_h.start()
+	var tap: Vector2 = Vector2(800.0, 150.0)
+	# A tap the mech queued behind the cooldown.
+	_h.tap(FINGER, tap)
+	_h.fly(TouchHarness.TICK)
+	_h.tap(FINGER, tap)
+	_h.fly(TouchHarness.TICK)
+	var before_pause: int = _h.shots.size()
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.PAUSED)
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.PAUSED, GameState.Phase.SKIRMISH)
+	_h.fly(0.3)
+	var after_queued: int = _h.shots.size() - before_pause
+	# A tap still pending in PlayerInput when the pause lands (same tick).
+	_h.tap(FINGER, tap)
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.PAUSED)
+	_h.bus.flow.announce_game_state_changed(GameState.Phase.PAUSED, GameState.Phase.SKIRMISH)
+	var resumed: PilotIntent = _h.input.read_intent()
+	var _fired_once: GdUnitAssert = assert_int(before_pause).is_equal(1)
+	var _queued_dropped: GdUnitAssert = assert_int(after_queued).is_equal(0)
+	var _pending_dropped: GdUnitAssert = assert_bool(resumed.has_tap).is_false()
 
 
 func test_leaving_play_releases_the_sticks() -> void:

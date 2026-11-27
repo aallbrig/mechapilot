@@ -4,7 +4,8 @@ extends RefCounted
 ## PlayerInput, the TouchControls on a 1000x600 screen, and a player mech (no
 ## shot spread) with a camera rig, so a test can synthesize InputEventScreenTouch
 ## and InputEventScreenDrag on a controlled clock and count the shots that leave
-## the muzzle. The suite adds `holder` to its tree and calls dispose() at the end.
+## the muzzle. The mech is linked to the bus by the game's PlayerBusLink. The
+## suite adds `holder` to its tree and calls dispose() at the end.
 
 const TICK: float = 1.0 / 60.0
 const START: float = 10.0
@@ -16,8 +17,11 @@ var input: PlayerInput = PlayerInput.new()
 var controls: TouchControls = TouchControls.new()
 var mech: PlayerMech = PlayerMech.new()
 var rig: CameraRig = CameraRig.new()
+var link: PlayerBusLink = PlayerBusLink.new()
 ## The direction of every shot fired, in order.
 var shots: Array[Vector3] = []
+## How many times pause_requested was announced on `bus`.
+var pauses: int = 0
 var now: float = START
 
 
@@ -31,8 +35,13 @@ func _init() -> void:
 	holder.add_child(controls)
 	holder.add_child(rig)
 	holder.add_child(mech)
+	holder.add_child(link)
 	controls.size = SCREEN
-	Subscriptions.require_ok("TouchHarness", [mech.fired.connect(_on_fired)])
+	link.link(bus, mech, input)
+	Subscriptions.require_ok(
+		"TouchHarness",
+		[mech.fired.connect(_on_fired), bus.flow.pause_requested.connect(_on_pause_requested)]
+	)
 
 
 ## Call once the suite has added `holder` to its tree: centres the camera on the mech.
@@ -64,6 +73,12 @@ func press(index: int, at: Vector2) -> void:
 
 func release(index: int, at: Vector2) -> void:
 	controls.handle_event(_touch(index, at, false), now)
+
+
+## A quick tap: down and up at `at` in the same instant.
+func tap(index: int, at: Vector2) -> void:
+	press(index, at)
+	release(index, at)
 
 
 ## The OS took the touch away (a system gesture): released without a tap.
@@ -106,3 +121,7 @@ func _touch(index: int, at: Vector2, pressed: bool) -> InputEventScreenTouch:
 
 func _on_fired(_origin: Vector3, direction: Vector3) -> void:
 	shots.append(direction)
+
+
+func _on_pause_requested() -> void:
+	pauses += 1

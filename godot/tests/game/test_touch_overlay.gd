@@ -111,6 +111,59 @@ func test_pause_button_is_clear_of_the_sticks() -> void:
 	var _no_shots: GdUnitAssert = assert_int(_h.shots.size()).is_equal(0)
 
 
+func test_second_finger_on_pause_button_never_fires() -> void:
+	_h.start()
+	var center: Vector2 = _h.controls.pause_button_rect().get_center()
+	_h.press(FINGER, center)
+	_h.press(OTHER_FINGER, center + Vector2(-5.0, 5.0))
+	_h.release(OTHER_FINGER, center + Vector2(-5.0, 5.0))
+	_h.fly(0.3)
+	var held_stick: bool = _h.controls.is_aim_stick_shown()
+	var _no_shots: GdUnitAssert = assert_int(_h.shots.size()).is_equal(0)
+	var _no_stick: GdUnitAssert = assert_bool(held_stick).is_false()
+	var _no_pause_yet: GdUnitAssert = assert_int(_h.pauses).is_equal(0)
+
+
+func test_pause_button_guard_band_belongs_to_the_button() -> void:
+	_h.start()
+	var button: Rect2 = _h.controls.pause_button_rect()
+	var inside_guard: Vector2 = Vector2(button.position.x - 15.0, button.get_center().y)
+	var past_guard: Vector2 = Vector2(button.position.x - 17.0, button.get_center().y)
+	_h.tap(FINGER, inside_guard)
+	var guard_pauses: int = _h.pauses
+	_h.tap(FINGER, past_guard)
+	_h.fly(0.3)
+	var _guard_is_the_button: GdUnitAssert = assert_int(guard_pauses).is_equal(1)
+	var _past_is_a_tap: GdUnitAssert = assert_int(_h.pauses).is_equal(1)
+	var _past_fires: GdUnitAssert = assert_int(_h.shots.size()).is_equal(1)
+
+
+func test_pause_button_pauses_on_lift_not_press() -> void:
+	_h.start()
+	var center: Vector2 = _h.controls.pause_button_rect().get_center()
+	_h.press(FINGER, center)
+	var on_press: int = _h.pauses
+	_h.release(FINGER, center)
+	var _not_on_press: GdUnitAssert = assert_int(on_press).is_equal(0)
+	var _on_lift: GdUnitAssert = assert_int(_h.pauses).is_equal(1)
+
+
+func test_pause_lift_outside_or_cancel_does_nothing() -> void:
+	_h.start()
+	var button: Rect2 = _h.controls.pause_button_rect()
+	var outside: Vector2 = button.get_center() + Vector2(-button.size.x * 2.0, 0.0)
+	_h.press(FINGER, button.get_center())
+	_h.drag(FINGER, outside)
+	_h.release(FINGER, outside)
+	var slid_off: int = _h.pauses
+	_h.press(FINGER, button.get_center())
+	_h.cancel(FINGER, button.get_center())
+	_h.fly(0.2)
+	var _slide_off_cancels: GdUnitAssert = assert_int(slid_off).is_equal(0)
+	var _cancel_cancels: GdUnitAssert = assert_int(_h.pauses).is_equal(0)
+	var _no_shots: GdUnitAssert = assert_int(_h.shots.size()).is_equal(0)
+
+
 func test_emulated_mouse_from_a_touch_never_fires() -> void:
 	InputBindings.install()
 	var click: InputEventMouseButton = InputEventMouseButton.new()

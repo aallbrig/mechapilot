@@ -13,9 +13,10 @@ extends Control
 ##   stick or a shot; lifting it on the button announces pause_requested.
 ##
 ## Everything shows only on a touch screen and only in play (Level Intro to Boss
-## Fight). Leaving play drops every touch and zeroes the sticks, so no finger
-## keeps steering after Pause or Game Over. The node reads screen events in
-## _unhandled_input, so a touch on any UI control (a HUD button) never steers.
+## Fight). Leaving play drops every touch, zeroes the sticks and clears any
+## pending tap, so no finger keeps steering and no tap fires after Pause or Game
+## Over. The node reads screen events in _unhandled_input, so a touch on any UI
+## control (a HUD button) never steers.
 ## It never takes mouse input itself: menus get taps as emulated clicks.
 ## main.tscn anchors it to the full screen; the halves split at its centre.
 
@@ -163,9 +164,11 @@ func _draw() -> void:
 func _on_press(index: int, at: Vector2, now: float) -> void:
 	if _sticks.is_tracking(index) or index == _pause_finger:
 		return
-	if _pause_finger == TouchSticks.NO_TOUCH and _pause_hit_rect().has_point(at):
-		_pause_finger = index
-		_pause_pressed = true
+	# Any touch on the button is the button's, even while another finger holds it.
+	if _pause_hit_rect().has_point(at):
+		if _pause_finger == TouchSticks.NO_TOUCH:
+			_pause_finger = index
+			_pause_pressed = true
 		return
 	_sticks.split_x = size.x * 0.5
 	_sticks.press(index, at, now)
@@ -213,7 +216,7 @@ func _refresh_visibility() -> void:
 		_move_was_shown = false
 		_aim_was_shown = false
 		if _input != null:
-			_input.set_touch_sticks(Vector2.ZERO, Vector2.ZERO)
+			_input.clear_touch()
 	queue_redraw()
 
 
