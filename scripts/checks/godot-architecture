@@ -1,0 +1,179 @@
+#!/bin/sh
+# Architecture fitness check for the Godot project (decided in #9).
+#
+#   layout     every .gd is main.gd or lives in autoload/ types/ core/ game/ ui/
+#              feedback/ tests/
+#   pure       types/ (shared enums and value classes) and core/ (rules) are
+#              `extends RefCounted` and deterministic: no scene tree (Node,
+#              SceneTree, get_node, $Path, get_tree, add_child, ...), no engine
+#              or host access (Engine, OS, Input, Time, ClassDB), no global
+#              randomness (randi, randf, randomize, ...; inject a
+#              RandomNumberGenerator so runs can be replayed), no runtime
+#              load(), no autoload names
+#   imports    types/ <- autoload/ <- ui/, feedback/
+#              types/ <- core/ <- game/ <- main.gd
+#                types/     may use nothing else
+#                core/      may not use autoload/ game/ ui/ feedback/ main (the bus is injected)
+#                autoload/  may not use core/ game/ ui/ feedback/ main
+#                game/      may not use ui/ feedback/ main
+#                ui/        may not use core/ game/ feedback/ main
+#                feedback/  may not use core/ game/ ui/ main
+#              "use" = a class_name declared in that layer, or a res:// path into it.
+#              core/ may name the bus's class (EventBus) for injection, never `Events`.
+#   wiring     only main.gd (and tests) construct core classes (`CoreClass.new(`)
+#   events     Game Events are emitted only through the bus's typed announce_* methods:
+#              `Events.<signal>.emit(` is rejected outside autoload/events.gd
+#
+# Comments are ignored and strings are blanked before matching (scripts/lib-gdscript),
+# so neither can hide code or trip a rule.
+#
+# Usage: scripts/checks/godot-architecture [project-dir]   (default: godot)
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../lib-gdscript
+. "$(dirname "$0")/../lib-gdscript"
+
+root="${1:-godot}"
+if [ ! -f "${root}/project.godot" ]; then
+  printf 'godot-architecture: no project.godot in %s\n' "${root}" >&2
+  exit 1
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+status=0
+
+# fail <file> <message> [hit]: with "hit", the first matching line is appended.
+fail() {
+  detail=""
+  if [ "${3:-}" = hit ]; then
+    IFS= read -r detail <"${work}/hits" || true
+    detail=": ${detail}"
+  fi
+  printf 'godot-architecture: %s: %s%s\n' "$1" "$2" "${detail}" >&2
+  status=1
+}
+
+# Project-relative .gd paths, vendored addons and the editor cache excluded.
+(cd "${root}" && find . -type f -iname '*.gd' ! -path './addons/*' ! -path './.godot/*') |
+  sed 's|^\./||' | sort >"${work}/files"
+
+layer_of() {
+  case "$1" in
+    main.gd) printf 'main' ;;
+    autoload/*) printf 'autoload' ;;
+    types/*) printf 'types' ;;
+    core/*) printf 'core' ;;
+    game/*) printf 'game' ;;
+    ui/*) printf 'ui' ;;
+    feedback/*) printf 'feedback' ;;
+    tests/*) printf 'tests' ;;
+    *) printf 'none' ;;
+  esac
+}
+
+# class_name declarations per layer: "<layer> <ClassName>".
+: >"${work}/classes"
+while IFS= read -r f; do
+  layer="$(layer_of "${f}")"
+  gd_code blank "${root}/${f}" | sed -n 's/^class_name[[:space:]]\{1,\}\([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' |
+    while IFS= read -r cls; do printf '%s %s\n' "${layer}" "${cls}"; done >>"${work}/classes"
+done <"${work}/files"
+
+# Autoload singleton names from project.godot.
+sed -n '/^\[autoload\]/,/^\[/p' "${root}/project.godot" |
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' >"${work}/autoloads"
+
+forbidden_layers() {
+  case "$1" in
+    types) printf 'autoload core game ui feedback main' ;;
+    core) printf 'autoload game ui feedback main' ;;
+    autoload) printf 'core game ui feedback main' ;;
+    game) printf 'ui feedback main' ;;
+    ui) printf 'core game feedback main' ;;
+    feedback) printf 'core game ui main' ;;
+    *) printf '' ;;
+  esac
+}
+
+# Words a pure layer (types/, core/) must not use, matched as whole words.
+impure_words='(Node|Node2D|Node3D|SceneTree|Viewport|Window|PackedScene|get_node|get_node_or_null|get_tree|get_parent|get_children|get_viewport|get_window|add_child|remove_child|queue_free|find_child|owner|Engine|OS|Input|Time|ClassDB|ResourceLoader|load|randi|randf|randomize|randi_range|randf_range|randfn|seed|rand_from_seed)'
+
+while IFS= read -r f; do
+  layer="$(layer_of "${f}")"
+  gd_code blank "${root}/${f}" >"${work}/code"
+  gd_code keep "${root}/${f}" >"${work}/code-strings"
+
+  if [ "${layer}" = none ]; then
+    fail "${f}" "outside the layout (main.gd, autoload/, types/, core/, game/, ui/, feedback/, tests/)"
+    continue
+  fi
+
+  case "${layer}" in
+    core | types)
+      if ! grep -Eq '^extends[[:space:]]+RefCounted[[:space:]]*$' "${work}/code"; then
+        fail "${f}" "${layer}/ classes must extend RefCounted"
+      fi
+      if grep -Ewn "${impure_words}" "${work}/code" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must stay pure and deterministic (no scene tree, engine, host, global RNG or load)" hit
+      fi
+      if grep -En 'RandomNumberGenerator[[:space:]]*\.[[:space:]]*new' "${work}/code" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must receive its RandomNumberGenerator by injection" hit
+      fi
+      if grep -En '\$' "${work}/code" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must not use \$NodePath" hit
+      fi
+      if grep -En '\.tscn' "${work}/code-strings" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must not load scenes" hit
+      fi
+      while IFS= read -r name; do
+        if grep -Ewn "${name}" "${work}/code" >"${work}/hits"; then
+          fail "${f}" "${layer}/ must not use the ${name} autoload (inject it)" hit
+        fi
+      done <"${work}/autoloads"
+      ;;
+    *) ;;
+  esac
+
+  for other in $(forbidden_layers "${layer}"); do
+    if [ "${other}" = main ]; then
+      path_re='res://main\.(gd|tscn)'
+    else
+      path_re="res://${other}/"
+    fi
+    if grep -En "${path_re}" "${work}/code-strings" >"${work}/hits"; then
+      fail "${f}" "${layer}/ must not use ${other}" hit
+    fi
+    awk -v l="${other}" '$1 == l { print $2 }' "${work}/classes" >"${work}/other-classes"
+    while IFS= read -r cls; do
+      # core/ may name the bus's class to receive it by injection.
+      if [ "${layer}" = core ] && [ "${other}" = autoload ]; then continue; fi
+      if grep -Ewn "${cls}" "${work}/code" >"${work}/hits"; then
+        fail "${f}" "${layer}/ must not use ${other}/ class ${cls}" hit
+      fi
+    done <"${work}/other-classes"
+  done
+
+  case "${layer}" in
+    core | main | tests) ;;
+    *)
+      awk '$1 == "core" { print $2 }' "${work}/classes" >"${work}/core-classes"
+      while IFS= read -r cls; do
+        if grep -Ewn "${cls}[[:space:]]*\\.[[:space:]]*new" "${work}/code" >"${work}/hits"; then
+          fail "${f}" "only main.gd constructs core classes" hit
+        fi
+      done <"${work}/core-classes"
+      ;;
+  esac
+
+  if [ "${f}" != autoload/events.gd ] && grep -En '(^|[^A-Za-z0-9_])Events[[:space:]]*\.[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*emit[^A-Za-z0-9_]' "${work}/code" >"${work}/hits"; then
+    fail "${f}" "emit Game Events through Events.announce_*, not .emit()" hit
+  fi
+done <"${work}/files"
+
+if [ "${status}" -eq 0 ]; then
+  count="$(wc -l <"${work}/files" | tr -d ' ')"
+  printf 'godot-architecture: ok (%s scripts)\n' "${count}"
+fi
+exit "${status}"

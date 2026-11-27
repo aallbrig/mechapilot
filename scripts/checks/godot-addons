@@ -1,0 +1,48 @@
+#!/bin/sh
+# godot/addons/ holds only vendored code (GdUnit4 6.2.3), and that code is
+# exempt from our warnings, lint and architecture rules. So nothing may hide
+# there: every file under it must be listed, with its SHA-256, in
+# godot/addons.sha256, and every listed file must exist unchanged.
+#
+# Usage: scripts/checks/godot-addons [project-dir] [manifest]
+#   To re-pin after a deliberate upgrade: scripts/checks/godot-addons --print
+set -eu
+LC_ALL=C
+export LC_ALL
+
+if [ "${1:-}" = --print ]; then
+  print_only=yes
+  shift
+else
+  print_only=no
+fi
+root="${1:-godot}"
+manifest="${2:-${root}/addons.sha256}"
+
+sha256_list() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    xargs sha256sum
+  else
+    xargs shasum -a 256
+  fi
+}
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+(cd "${root}" && find addons -type f -print | sort | sha256_list) | sed 's/ [ *]/  /' >"${work}/actual"
+
+if [ "${print_only}" = yes ]; then
+  cat "${work}/actual"
+  exit 0
+fi
+if [ ! -f "${manifest}" ]; then
+  printf 'godot-addons: no manifest at %s\n' "${manifest}" >&2
+  exit 1
+fi
+if ! diff -u "${manifest}" "${work}/actual" >"${work}/diff"; then
+  sed -n '3,$p' "${work}/diff" | grep -E '^[-+]' | sed 's/^/godot-addons: /' >&2
+  printf 'godot-addons: godot/addons/ differs from the pinned vendored files\n' >&2
+  exit 1
+fi
+count="$(wc -l <"${work}/actual" | tr -d ' ')"
+printf 'godot-addons: ok (%s vendored files)\n' "${count}"

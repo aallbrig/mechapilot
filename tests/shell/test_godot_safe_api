@@ -1,0 +1,290 @@
+#!/bin/sh
+# Tests for scripts/checks/godot-safe-api (run by scripts/test-shell), including
+# the gate-bypass reviewer's proof of concept against PR #49.
+
+# A throwaway project with a stand-in vendored addon; sets d and cleans it up on exit.
+safe_project() {
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  printf '[application]\n' >"${d}/project.godot"
+  mkdir -p "${d}/addons/fake" "${d}/tests" "${d}/core"
+  printf 'class_name GdUnitTestSuite\nextends Node\n' >"${d}/addons/fake/suite.gd"
+  printf 'class_name GdUnitTestCIRunner\nextends Node\n' >"${d}/addons/fake/runner.gd"
+  printf 'class_name GdUnitSignals\nextends RefCounted\n' >"${d}/addons/fake/signals.gd"
+}
+
+# write_suite <name> <body lines...>: a suite whose one test has the given body.
+write_suite() {
+  name="$1"
+  shift
+  {
+    printf 'extends GdUnitTestSuite\n\n\nfunc test_probe() -> void:\n'
+    for line in "$@"; do printf '\t%s\n' "${line}"; done
+  } >"${d}/tests/${name}.gd"
+}
+
+# rejects <reason>: the check fails, and for that reason.
+rejects() {
+  out="$(scripts/checks/godot-safe-api "${d}" 2>&1)" && return 1
+  case "${out}" in
+  *"$1"*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+test_safe_api_accepts_plain_test() {
+  safe_project
+  write_suite test_ok 'var n: int = 1 + 1' 'var _ok: GdUnitAssert = assert_int(n).is_equal(2)'
+  scripts/checks/godot-safe-api "${d}"
+}
+
+test_safe_api_rejects_reviewer_forgery_poc() {
+  safe_project
+  write_suite test_zz_forger \
+    'var runner: Node = get_tree().root.get_node("GdUnitTestCIRunner")' \
+    'var reporter: Object = runner.get("_console_reporter")' \
+    'var _s: Object = reporter.get("_reporter").get("_summary")' \
+    'var args: PackedStringArray = OS.get_cmdline_args()' \
+    'var _pid: int = OS.create_process("/bin/sh", ["-c", "cp forged " + args[0]])' \
+    'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "tests may not leave their suite"
+}
+
+test_safe_api_rejects_tree_walk_in_tests() {
+  safe_project
+  write_suite test_walk 'var _r: Node = get_tree().root' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "tests may not leave their suite"
+}
+
+test_safe_api_rejects_parent_climb_in_tests() {
+  safe_project
+  write_suite test_climb 'var _r: Node = get_node("../..")' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "node paths that climb the tree"
+}
+
+test_safe_api_rejects_string_reflection() {
+  safe_project
+  write_suite test_get 'var o: Object = Object.new()' 'var _v: Variant = o.get("x")' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "no reflection"
+}
+
+test_safe_api_rejects_gdunit_internals() {
+  safe_project
+  write_suite test_signals 'var _s: GdUnitSignals = null' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "vendored internal GdUnitSignals"
+}
+
+test_safe_api_rejects_process_spawn_anywhere() {
+  safe_project
+  printf 'class_name Spawner\nextends RefCounted\n\n\nfunc f() -> void:\n\tvar _p: int = OS.create_process("sh", [])\n' >"${d}/core/spawner.gd"
+  rejects "no process or host access"
+}
+
+test_safe_api_rejects_file_write_outside_user() {
+  safe_project
+  write_suite test_write 'var _f: FileAccess = FileAccess.open("/tmp/results.xml", FileAccess.WRITE)' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "FileAccess only"
+}
+
+test_safe_api_rejects_res_write() {
+  safe_project
+  write_suite test_write 'var _f: FileAccess = FileAccess.open("res://x.txt", FileAccess.WRITE)' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "FileAccess only"
+}
+
+test_safe_api_accepts_user_write_and_res_read() {
+  safe_project
+  write_suite test_files \
+    'var _w: FileAccess = FileAccess.open("user://x.txt", FileAccess.WRITE)' \
+    'var _r: FileAccess = FileAccess.open("res://project.godot", FileAccess.READ)' \
+    'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  scripts/checks/godot-safe-api "${d}"
+}
+
+test_safe_api_rejects_non_res_load() {
+  safe_project
+  write_suite test_load 'var p: String = "/tmp/x.gd"' 'var _s: Resource = load(p)' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "load() only"
+}
+
+test_safe_api_rejects_code_hidden_after_hash_in_string() {
+  safe_project
+  write_suite test_hash 'print("#"); var _r: Node = get_tree().root' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "tests may not leave their suite"
+}
+
+test_safe_api_ignores_banned_words_in_strings_and_comments() {
+  safe_project
+  write_suite test_words 'print("OS.create_process get_tree")  # get_tree().root' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  scripts/checks/godot-safe-api "${d}"
+}
+
+test_safe_api_rejects_test_without_assertion() {
+  safe_project
+  write_suite test_empty 'pass'
+  rejects "every test must assert"
+}
+
+test_safe_api_rejects_parameterized_test() {
+  safe_project
+  printf 'extends GdUnitTestSuite\n\n\nfunc test_p(n: int, test_parameters: Array = [[1], [2]]) -> void:\n\tvar _ok: GdUnitAssert = assert_int(n).is_greater(0)\n' \
+    >"${d}/tests/test_param.gd"
+  rejects "parameterized"
+}
+
+test_safe_api_rejects_embedded_scene_script() {
+  safe_project
+  printf '[gd_scene format=3]\n\n[sub_resource type="GDScript" id="1"]\nscript/source = "extends Node"\n' >"${d}/evil.tscn"
+  rejects "embedded scripts"
+}
+
+test_safe_api_passes_on_real_project() {
+  scripts/checks/godot-safe-api
+}
+
+# ---- Gate-bypass re-review PoCs (PR #49 at aee9f7d) ----
+
+# A vendored runner with internal members, so string literals can be checked.
+add_fake_internals() {
+  printf 'class_name GdUnitTestCIRunner\nextends Node\n\nvar _console_reporter: Object\nvar _summary: Object\n' >"${d}/addons/fake/runner.gd"
+}
+
+test_safe_api_rejects_method_reference_reflection() {
+  safe_project
+  write_suite test_poc 'var c: Object = Object.new()' 'var _r: Array = ["x"].map(c.get)' 'var _ok: GdUnitAssert = assert_bool(false).is_true()'
+  rejects "no reflection"
+}
+
+test_safe_api_rejects_literal_naming_vendored_internal() {
+  safe_project
+  add_fake_internals
+  write_suite test_poc 'var names: Array[String] = ["_console_reporter"]' 'var _ok: GdUnitAssert = assert_int(names.size()).is_equal(1)'
+  rejects "vendored internal members"
+}
+
+test_safe_api_rejects_literal_naming_gdunit() {
+  safe_project
+  write_suite test_poc 'var n: String = "GdUnitTestCIRunner"' 'var _ok: GdUnitAssert = assert_str(n).is_not_empty()'
+  rejects "naming GdUnit4 internals"
+}
+
+test_safe_api_rejects_helper_walking_from_root() {
+  safe_project
+  mkdir -p "${d}/game"
+  printf 'class_name Probe\nextends RefCounted\n\n\nstatic func tamper(n: Node) -> void:\n\tfor c: Node in n.get_tree().root.get_children():\n\t\tprint(c)\n' \
+    >"${d}/game/probe.gd"
+  write_suite test_poc 'Probe.tamper(self)' 'var _ok: GdUnitAssert = assert_bool(false).is_true()'
+  rejects "no access to the scene root"
+}
+
+test_safe_api_rejects_helper_climbing_to_parent() {
+  safe_project
+  mkdir -p "${d}/game"
+  printf 'class_name Probe\nextends RefCounted\n\n\nstatic func tamper(n: Node) -> void:\n\tprint(n.get_parent())\n' >"${d}/game/probe.gd"
+  rejects "no reaching nodes you were not given"
+}
+
+test_safe_api_rejects_frame_hook_on_root() {
+  safe_project
+  mkdir -p "${d}/game"
+  printf 'class_name Probe\nextends RefCounted\n\n\nstatic func hook(n: Node) -> void:\n\tvar tree: SceneTree = n.get_tree()\n\tvar _e: int = tree.process_frame.connect(print.bind(tree.root))\n' \
+    >"${d}/game/probe.gd"
+  rejects "no access to the scene root"
+}
+
+test_safe_api_rejects_dir_access_instance_copy() {
+  safe_project
+  write_suite test_poc 'var _e: Error = DirAccess.open("user://").copy("user://forged.xml", "user://results.xml")' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "banned API"
+}
+
+test_safe_api_rejects_double_underscore_internals() {
+  safe_project
+  write_suite test_poc '__is_skipped = false' 'var _ok: GdUnitAssert = assert_bool(true).is_true()'
+  rejects "no __ identifiers"
+}
+
+test_safe_api_allows_property_accessors() {
+  safe_project
+  printf 'class_name Health\nextends RefCounted\n\nvar hp: int = 3:\n\tget:\n\t\treturn hp\n\tset(value):\n\t\thp = maxi(value, 0)\n' >"${d}/core/health.gd"
+  scripts/checks/godot-safe-api "${d}"
+}
+
+# ---- Correctness re-review PoC: overwrite scripts/godot from a test ----
+
+test_safe_api_rejects_user_path_escape_by_concatenation() {
+  safe_project
+  write_suite test_a_probe \
+    'var dot: String = "."' \
+    'var up: String = dot + dot + "/"' \
+    'var f: FileAccess = FileAccess.open("user://" + up + up + "repo/scripts/godot", FileAccess.WRITE)' \
+    'var _ok: GdUnitAssert = assert_object(f).is_not_null()'
+  rejects "FileAccess only on one literal"
+}
+
+test_safe_api_rejects_user_path_escape_by_globalize() {
+  safe_project
+  write_suite test_a_probe \
+    'var base: String = ProjectSettings.globalize_path("res://")' \
+    'var _ok: GdUnitAssert = assert_str(base).is_not_empty()'
+  rejects "banned API"
+}
+
+test_safe_api_rejects_user_data_dir_lookup() {
+  safe_project
+  write_suite test_a_probe 'var depth: int = OS.get_user_data_dir().count("/")' 'var _ok: GdUnitAssert = assert_int(depth).is_greater(0)'
+  rejects "banned API"
+}
+
+test_safe_api_rejects_tool_scripts() {
+  safe_project
+  printf '@tool\nclass_name Sneaky\nextends RefCounted\n' >"${d}/core/sneaky.gd"
+  rejects "no @tool scripts"
+}
+
+# The exact probe suite that tests/shell/test_godot_test replays at run time.
+test_safe_api_rejects_harness_rewrite_probe() {
+  safe_project
+  printf 'extends GdUnitTestSuite\n\n\nfunc _escape(abs_path: String) -> String:\n\tvar up: String = ""\n\tfor _i: int in OS.get_user_data_dir().count("/"):\n\t\tup += "../"\n\treturn "user://" + up + abs_path.trim_prefix("/")\n\n\nfunc test_probe() -> void:\n\tvar dst: FileAccess = FileAccess.open(_escape("/repo/scripts/godot"), FileAccess.WRITE)\n\tvar _ok: GdUnitAssert = assert_object(dst).is_not_null()\n' \
+    >"${d}/tests/test_a_probe.gd"
+  rejects "FileAccess only on one literal"
+}
+
+# ---- Gate-bypass round 3: a committed .pck loaded during the compile check ----
+
+test_safe_api_rejects_resource_pack_loading() {
+  safe_project
+  printf 'class_name Loader\nextends RefCounted\n\nstatic var _loaded: bool = ProjectSettings.load_resource_pack("res://evil.pck")\n' \
+    >"${d}/core/loader.gd"
+  rejects "banned API"
+}
+
+test_safe_api_rejects_pack_path_literals() {
+  safe_project
+  write_suite test_pack 'var p: String = "res://extra.pck"' 'var _ok: GdUnitAssert = assert_str(p).is_not_empty()'
+  rejects "no resource packs or archives"
+}
+
+test_safe_api_rejects_committed_packs() {
+  for ext in pck zip scn res gdextension so; do
+    safe_project
+    printf 'GDPC' >"${d}/evil.${ext}"
+    rejects "binary packs, archives" || return 1
+    rm -rf "${d}"
+  done
+}
+
+test_safe_api_rejects_get_path_escape() {
+  safe_project
+  mkdir -p "${d}/game"
+  printf 'class_name Probe\nextends RefCounted\n\n\nstatic func where(n: Node) -> NodePath:\n\treturn n.get_path()\n' >"${d}/game/probe.gd"
+  rejects "banned API"
+}
+
+# ---- Gate-bypass round 4: Godot loads X.GD; lowercase-only scans skipped it ----
+
+test_safe_api_scans_uppercase_gd_extension() {
+  safe_project
+  printf 'class_name Sneaky\nextends RefCounted\n\n\nfunc f() -> void:\n\tvar _p: int = OS.create_process("sh", [])\n' >"${d}/core/sneaky.GD"
+  rejects "Godot file extensions must be lowercase" && rejects "no process or host access"
+}

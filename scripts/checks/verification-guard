@@ -24,6 +24,7 @@ while IFS="${tab}" read -r change path; do
     .github/* | .githooks/* | scripts/* | schemas/* | .claude/* | Taskfile.yml | Taskfile.yaml | \
       .mise.toml | mise.toml | mise.lock | .mise.lock | package.json | package-lock.json | \
       CODEOWNERS | */CODEOWNERS | godot/project.godot | godot/addons/* | godot/export_presets.cfg | \
+      .godot-version | .godot-sha512sums | godot/addons.sha256 | \
       .mise/* | */.mise/* | mise/* | */mise/* | .config/mise.toml | */.config/mise.toml | \
       AGENTS.md | CLAUDE.md | */AGENTS.md | */CLAUDE.md | docs/agents/* | docs/threat-models/* | .gitmodules | GLOSSARY.md)
       why="verification path"

@@ -1,0 +1,149 @@
+#!/bin/sh
+# Run the pinned Godot binary on project code, sandboxed on Linux.
+#
+# Every step that loads project code (import, compile check, tests, web export)
+# goes through this, because loading a script can already run its code (static
+# initialisers, resource packs) before any test guard applies.
+#
+# Usage: scripts/godot-run <box-dir> <project-dir> [--writable <dir>]... [--readable <path>]...
+#                          [--exec] -- <godot args...>
+#
+# Runs `godot --headless --path <project> <godot args...>` with a private HOME,
+# XDG dirs and TMPDIR under <box-dir>. --exec runs the arguments as a command in
+# the same sandbox instead (used by tests to probe it).
+#
+# On Linux with bubblewrap (required in CI) the root is built, not inherited:
+# read-only /usr, /lib*, /bin, /sbin and the few /etc files a dynamically linked
+# program needs; the Godot install (read-only, with a private editor_data/);
+# each --readable path (read-only); <box-dir> and each --writable dir. /tmp, /run
+# and /var/run are empty tmpfs, /dev and /proc are private, and every namespace
+# (network included) is unshared. Nothing else of the host is visible, so no
+# host Unix socket (Docker, D-Bus, an SSH agent, ...) can be reached. Godot works
+# on a private copy of the project inside <box-dir>, with <box-dir>/dotgodot as
+# its .godot/.
+#
+# Elsewhere there is no sandbox: Godot uses the project and its .godot/ directly.
+# Prints "godot-run: sandbox: bwrap|none" on stderr. Exits with the command's
+# status (non-zero on timeout: GODOT_RUN_TIMEOUT seconds, default 600).
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=lib-godot
+. "${here}/lib-godot"
+
+usage='usage: godot-run <box-dir> <project-dir> [--writable <dir>]... [--readable <path>]... [--exec] -- <args...>'
+box="${1:?${usage}}"
+project="${2:?${usage}}"
+shift 2
+mkdir -p "${box}/home" "${box}/data" "${box}/config" "${box}/cache" "${box}/tmp" "${box}/dotgodot"
+box="$(cd "${box}" && pwd -P)"
+project="$(cd "${project}" && pwd -P)"
+timeout_secs="${GODOT_RUN_TIMEOUT:-600}"
+
+writable=""
+readable=""
+exec_mode=no
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --writable)
+      dir="$(cd "${2:?--writable needs a directory}" && pwd -P)"
+      writable="${writable} ${dir}"
+      shift 2
+      ;;
+    --readable)
+      path="${2:?--readable needs a path}"
+      case "${path}" in
+        /*) ;;
+        *) path="$(pwd -P)/${path}" ;;
+      esac
+      readable="${readable} ${path}"
+      shift 2
+      ;;
+    --exec)
+      exec_mode=yes
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      printf 'godot-run: unexpected argument %s (missing --?)\n' "$1" >&2
+      exit 64
+      ;;
+  esac
+done
+if [ ! -x "${godot_bin}" ]; then
+  printf 'godot-run: pinned Godot %s is not installed (run: task setup)\n' "${godot_tag}" >&2
+  exit 127
+fi
+
+sandbox=none
+if [ "${godot_os}" = Linux ]; then
+  if command -v bwrap >/dev/null 2>&1; then
+    sandbox=bwrap
+  elif [ -n "${CI:-}" ]; then
+    printf 'godot-run: bubblewrap (bwrap) is required on Linux CI\n' >&2
+    exit 1
+  else
+    printf 'godot-run: warning: bwrap not found; running without the filesystem sandbox\n' >&2
+  fi
+fi
+printf 'godot-run: sandbox: %s\n' "${sandbox}" >&2
+
+if [ "${sandbox}" = none ]; then
+  if [ "${exec_mode}" = yes ]; then
+    exec "${here}/run-with-timeout" "${timeout_secs}" "$@"
+  fi
+  HOME="${box}/home" XDG_DATA_HOME="${box}/data" XDG_CONFIG_HOME="${box}/config" \
+    XDG_CACHE_HOME="${box}/cache" TMPDIR="${box}/tmp" MECHAPILOT_TOOLS="${godot_tools}" \
+    exec "${here}/run-with-timeout" "${timeout_secs}" "${godot_bin}" --headless --path "${project}" "$@"
+fi
+
+# Godot works on a private copy of the project in the box (re-copied on every
+# call, .godot/ excluded, regular files only), with <box>/dotgodot as its .godot/:
+# the editor rewrites .import files and caches, and nothing outside the box may
+# change. res:// paths are the same in the copy.
+work_project="${box}/project"
+rm -rf "${work_project}"
+mkdir -p "${work_project}"
+(cd "${project}" && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
+  mkdir -p "${work_project}/${f%/*}"
+  cp -p "${project}/${f}" "${work_project}/${f}"
+done
+mkdir -p "${work_project}/.godot"
+
+if [ "${exec_mode}" = yes ]; then
+  set -- -- "$@"
+else
+  set -- -- "${godot_bin}" --headless --path "${work_project}" "$@"
+fi
+for dir in ${writable}; do
+  set -- --bind "${dir}" "${dir}" "$@"
+done
+for path in ${readable}; do
+  set -- --ro-bind "${path}" "${path}" "$@"
+done
+# The editor (import, export) saves settings and caches into the self-contained
+# editor_data/: a private copy, with the export templates bound back read-only.
+tpl_rel="export_templates/${godot_dir_version}"
+mkdir -p "${box}/editor_data/${tpl_rel}"
+set -- --ro-bind "${godot_home}" "${godot_home}" \
+  --bind "${box}/editor_data" "${godot_home}/editor_data" \
+  --ro-bind "${godot_templates}" "${godot_home}/editor_data/${tpl_rel}" \
+  --bind "${box}" "${box}" --bind "${box}/dotgodot" "${work_project}/.godot" \
+  --setenv HOME "${box}/home" --setenv XDG_DATA_HOME "${box}/data" \
+  --setenv XDG_CONFIG_HOME "${box}/config" --setenv XDG_CACHE_HOME "${box}/cache" \
+  --setenv TMPDIR "${box}/tmp" --unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv SSH_AUTH_SOCK \
+  --unsetenv DOCKER_HOST --unsetenv XDG_RUNTIME_DIR "$@"
+# A built root: system directories read-only, a handful of /etc files, empty
+# /tmp, /run and /var/run, private /dev and /proc.
+for etc in ld.so.cache ld.so.conf ld.so.conf.d fonts ssl alternatives localtime passwd group nsswitch.conf; do
+  set -- --ro-bind-try "/etc/${etc}" "/etc/${etc}" "$@"
+done
+set -- --ro-bind /usr /usr --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --ro-bind-try /lib32 /lib32 \
+  --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
+  --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run --dir /var --tmpfs /var/run "$@"
+exec "${here}/run-with-timeout" "${timeout_secs}" bwrap --die-with-parent --new-session --unshare-all \
+  --clearenv --setenv PATH /usr/bin:/bin --setenv LC_ALL C "$@"

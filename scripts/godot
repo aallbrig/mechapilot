@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run the pinned Godot editor installed by scripts/install-godot.
+# It never falls back to a godot found on PATH.
+set -eu
+# shellcheck source=lib-godot
+. "$(dirname "$0")/lib-godot"
+
+if [ ! -x "${godot_bin}" ] || [ ! -f "${godot_home}/.installed" ]; then
+  printf 'godot: pinned Godot %s is not installed (run: task setup)\n' "${godot_tag}" >&2
+  exit 127
+fi
+exec "${godot_bin}" "$@"

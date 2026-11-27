@@ -4,6 +4,14 @@ version: "3"
 # Every verification step is a task. Git hooks and CI call these same targets,
 # so local runs and CI can't drift apart.
 
+vars:
+  # Godot editor ports for this repo. Another Godot project on the same machine
+  # keeps the defaults (6005 LSP, 6006 DAP, 6007 debugger). See godot/README.md.
+  GODOT_LSP_PORT: "6305"
+  GODOT_DAP_PORT: "6306"
+  GODOT_DEBUG_PORT: "6307"
+  SERVE_PORT: "8060"
+
 tasks:
   default:
     desc: List tasks
@@ -18,6 +26,9 @@ tasks:
       - mise install
       - git config core.hooksPath .githooks
       - scripts/agent-loop-supervisor alias >/dev/null
+      - scripts/install-godot
+      - npm ci --ignore-scripts --no-audit --no-fund
+      - npx playwright install --only-shell chromium
       - task: doctor
 
   doctor:
@@ -32,6 +43,18 @@ tasks:
         for t in $tools; do
           command -v "$t" >/dev/null 2>&1 || { echo "missing: $t"; missing=1; }
         done
+        scripts/godot --headless --version >/dev/null 2>&1 || { echo "missing: pinned Godot (run: task setup)"; missing=1; }
+        [ -d node_modules/playwright ] || { echo "missing: Playwright (run: task setup)"; missing=1; }
+        # Ports in use are only a warning: it may be this repo's own editor.
+        if command -v nc >/dev/null 2>&1; then
+          for p in {{.GODOT_LSP_PORT}} {{.GODOT_DAP_PORT}} {{.GODOT_DEBUG_PORT}}; do
+            if nc -z 127.0.0.1 "$p" >/dev/null 2>&1; then
+              echo "warning: port $p is already in use (godot:editor needs it; is the mechapilot editor already open?)"
+            fi
+          done
+        else
+          echo "warning: nc not found, cannot check the Godot editor ports"
+        fi
         if [ -z "${CI:-}" ] && [ "$(git config core.hooksPath)" != ".githooks" ]; then
           echo "git hooks not enabled (run: task setup)"; missing=1
         fi
@@ -67,7 +90,7 @@ tasks:
   lint:js:
     desc: Syntax-check the Node scripts (strict ES modules)
     cmds:
-      - for f in scripts/*.mjs scripts/*/*.mjs; do node --check "$f" || exit 1; done
+      - for f in scripts/*.mjs scripts/*/*.mjs tests/e2e/*.mjs; do node --check "$f" || exit 1; done
 
   lint:yaml:
     desc: yamllint (strict)
@@ -142,6 +165,8 @@ tasks:
       - check-jsonschema --schemafile schemas/site-home.schema.json site/data/home.yaml
       # Vendored: https://www.schemastore.org/web-manifest.json
       - check-jsonschema --schemafile schemas/web-manifest.schema.json site/static/site.webmanifest
+      - check-jsonschema --check-metaschema schemas/level.schema.json
+      - check-jsonschema --schemafile schemas/level.schema.json godot/levels/*.json
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -166,6 +191,9 @@ tasks:
       - scripts/checks/threat-models
       - scripts/checks/workflow-permissions
       - scripts/checks/production-dispatch-only
+      - scripts/checks/godot-architecture
+      - scripts/checks/godot-safe-api
+      - scripts/checks/godot-addons
 
   infra:validate:
     desc: OpenTofu fmt -check, then offline init (-backend=false) and validate for every module and stack
@@ -192,6 +220,47 @@ tasks:
     cmds:
       - scripts/infra apply {{.CLI_ARGS}}
 
+  godot:install:
+    desc: Install the pinned Godot editor and web export templates (checksum-verified)
+    cmds:
+      - scripts/install-godot
+
+  godot:import:
+    desc: Import the Godot project headless (fills godot/.godot on a fresh clone)
+    cmds:
+      - scripts/godot-import godot
+
+  godot:check:
+    desc: Compile every project script and scene under maximum GDScript strictness
+    cmds:
+      - scripts/godot-compile-check
+
+  godot:test:
+    desc: GdUnit4 suites headless (JUnit in build/test-results/godot.xml)
+    cmds:
+      - scripts/godot-test build/test-results
+
+  godot:export:web:
+    desc: Headless single-threaded Web export to build/web
+    cmds:
+      - scripts/godot-export-web build/web
+
+  godot:editor:
+    desc: "Open the pinned Godot editor on this repo's own ports (see vars; `-- --dry-run` prints the command)"
+    cmds:
+      - scripts/godot-editor {{.CLI_ARGS}} {{.GODOT_LSP_PORT}} {{.GODOT_DAP_PORT}} {{.GODOT_DEBUG_PORT}}
+
+  serve:
+    desc: "Serve build/ at http://127.0.0.1:{{.SERVE_PORT}}/ (the game is at /web/)"
+    cmds:
+      - node scripts/serve-static.mjs build {{.SERVE_PORT}}
+
+  e2e:web:
+    desc: Export, then boot build/web in headless Chromium (no console errors allowed)
+    cmds:
+      - task: godot:export:web
+      - scripts/e2e-web build/web
+
   secrets:
     desc: gitleaks over the full git history
     cmds:
@@ -203,9 +272,8 @@ tasks:
       - rm -rf build/test-results
       - mkdir -p build/test-results
       - scripts/test-shell
-      - |
-        if [ ! -d godot ]; then echo "test: no Godot project yet"; exit 0; fi
-        task godot:test
+      # scripts/godot-test also fails the run if shell.xml changes while it runs.
+      - task: godot:test
       - scripts/checks/test-results-clean
 
   test:shell:
@@ -312,9 +380,10 @@ tasks:
       - scripts/website-eval/collect {{.CLI_ARGS}}
 
   ci:fast:
-    desc: Pre-push gate (lint + tests)
+    desc: Pre-push gate (lint, strict compile, tests)
     cmds:
       - task: lint
+      - task: godot:check
       - task: test
 
   ci:sandbox:
@@ -328,10 +397,42 @@ tasks:
   ci:
     desc: The full gate (the required `ci` status check runs exactly this)
     cmds:
+      # The whole run is wrapped in a tree check: anything tracked or untracked (not
+      # gitignored) that changed outside build/ and godot/.godot/ fails the gate.
+      - task: ci:guard:begin
       - task: ci:fast
       - task: site
+      - task: e2e:web
       - task: secrets
+      - task: ci:guard:end
 
+  ci:guard:begin:
+    desc: "Internal to `task ci`: snapshot the tree with a private copy of scripts/tree-guard"
+    vars:
+      GUARD_DIR:
+        sh: printf '%s/mechapilot-ci-guard-%s' "${TMPDIR:-/tmp}" "$(pwd -P | cksum | cut -d ' ' -f 1)"
+    cmds:
+      # A private copy, so a run that rewrote scripts/tree-guard can't vouch for itself.
+      - |
+        set -e
+        rm -rf "{{.GUARD_DIR}}"
+        mkdir -p "{{.GUARD_DIR}}/scripts"
+        cp scripts/tree-guard scripts/lib-godot "{{.GUARD_DIR}}/scripts/"
+        cp .godot-version "{{.GUARD_DIR}}/"
+        "{{.GUARD_DIR}}/scripts/tree-guard" snapshot "{{.GUARD_DIR}}/tree.before" "$(pwd -P)"
+
+  ci:guard:end:
+    desc: "Internal to `task ci`: fail if the tree changed since ci:guard:begin"
+    vars:
+      GUARD_DIR:
+        sh: printf '%s/mechapilot-ci-guard-%s' "${TMPDIR:-/tmp}" "$(pwd -P | cksum | cut -d ' ' -f 1)"
+    cmds:
+      - |
+        set -e
+        rc=0
+        "{{.GUARD_DIR}}/scripts/tree-guard" verify "{{.GUARD_DIR}}/tree.before" "$(pwd -P)" || rc=$?
+        rm -rf "{{.GUARD_DIR}}"
+        exit "${rc}"
   dev:
     desc: Start the tmux dev session (.tmuxinator.yml), or attach if it is already running
     interactive: true
