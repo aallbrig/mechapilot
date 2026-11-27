@@ -25,7 +25,7 @@ Fixed tuning lives in `run_rules.gd` (`RunRules`); per-Level tuning lives in `le
 | `RunRules` | The fixed tuning constants of #73. | `static kill_points(kind)`, `static damage_for(source, attack_damage)`, `static boss_points(level)` |
 | `DataReader`, `Subscriptions` | Helpers: validating reads of JSON data; one check of a class's bus connections. | |
 
-Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `InputDevice.Kind`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry` and `GameSettings`.
+Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `DamageSource.Source`, `EnemyKind.Kind`, `TutorialPrompt.Id`, `InputDevice.Kind`, `UiCue.Cue`, `SpawnOrder`, `LevelTally`, `RunSummary`, `ScoreEntry` and `GameSettings`.
 
 ### Wiring and ticking
 
@@ -49,6 +49,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `title_requested` | | Scoreboard, Game Over, Victory (*intent*) | `GameStateMachine` |
 | `game_state_changed` | `from, to: GameState.Phase` (equal at boot) | `GameStateMachine` | every screen; `RunLedger`, `SpawnDirector`, `IntelCodex`, `LevelProgression` |
 | `input_device_changed` | `device: InputDevice.Kind` | player input (*reported*, `PlayerBusLink`) | prompts and glyphs (#75, #24) |
+| `ui_cue_requested` | `cue: UiCue.Cue` | every screen (focus, press, tally tick, pop, ...) | `feedback/UiSoundPlayer` |
 
 ### `Events.run`
 
@@ -68,7 +69,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 
 | Event | Payload | Announced by | Heard by |
 |---|---|---|---|
-| `player_fired` | `origin, direction: Vector3` | player mech (*reported*, `PlayerBusLink`) | muzzle juice, SFX; `RunLedger` (accuracy) |
+| `player_fired` | `origin, direction: Vector3` | player mech (*reported*) | muzzle juice, SFX; `RunLedger` (accuracy) |
 | `player_hit` | `source: DamageSource.Source, position: Vector3, attack_damage: int` (boss attacks only) | player mech (*reported*) | `RunLedger` |
 | `armor_changed` | `armor, max_armor, delta: int` | `RunLedger` | HUD armor bar, hit flash, vignette, shake, rumble |
 | `invulnerability_started` | `duration: float` | `RunLedger` | player mech (blink) |
