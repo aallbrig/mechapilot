@@ -103,7 +103,6 @@ func _wire_feedback() -> void:
 	_check(_feedback.camera.fov_punch_requested.connect(rig.punch_fov) as Error)
 
 
-
 func _store(slot: LocalDocumentStore.Slot) -> DocumentStore:
 	if memory_stores:
 		return MemoryDocumentStore.new()
