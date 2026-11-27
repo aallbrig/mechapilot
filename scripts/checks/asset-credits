@@ -6,11 +6,12 @@
 #            extension is one Godot can import or load as media (images, audio,
 #            video, models, fonts, textures and every binary resource format;
 #            tests/shell/test_asset_credits asks the pinned Godot for its list),
-#            or a text resource or scene (.tres, .tscn, .escn) that embeds media:
-#            a resource of a MEDIA_TYPES class (one that can carry image, audio,
-#            font or mesh data inline, such as an SVG in a DPITexture), or any
-#            PackedByteArray data. Plain-text code and data (.gd, .gdshader,
-#            .glsl, .csv, .json, ...) are not assets.
+#            or a text resource or scene (.tres, .tscn, .escn) unless it parses
+#            and declares only PROCEDURAL_TYPES and PLAIN_TYPES resources and no
+#            PackedByteArray (fail closed: media embedded inline, such as an SVG
+#            in a DPITexture, or any class not on those lists makes it an
+#            asset). Plain-text code and data (.gd, .gdshader, .glsl, .csv,
+#            .json, ...) are not assets.
 #            Every Godot subclass of Texture, AudioStream, Font, Mesh and Image
 #            is in exactly one of MEDIA_TYPES and PROCEDURAL_TYPES (parameters
 #            only, references to other resources that are checked on their own,
@@ -54,9 +55,21 @@ SphereMesh TorusMesh TextMesh RibbonTrailMesh TubeTrailMesh ImmediateMesh Placeh
 FontVariation SystemFont AudioStreamGenerator AudioStreamInteractive AudioStreamMicrophone
 AudioStreamPlaylist AudioStreamPolyphonic AudioStreamRandomizer AudioStreamSynchronized'
 
+# Resource classes that are not media at all, allowed in text resources and
+# scenes: materials, environments, styles, shapes and other parameter sets.
+# Anything else declared in a .tres, .tscn or .escn makes the file an asset
+# (fail closed): Animation, Shader, Curve3D, MultiMesh, ImporterMesh, collision
+# shapes built from arrays and every unknown class need a credit row.
+PLAIN_TYPES='StandardMaterial3D ORMMaterial3D ShaderMaterial CanvasItemMaterial
+ParticleProcessMaterial Environment Sky ProceduralSkyMaterial PhysicalSkyMaterial
+LabelSettings Theme StyleBoxFlat StyleBoxEmpty StyleBoxLine Gradient Curve
+BoxShape3D SphereShape3D CapsuleShape3D CylinderShape3D CircleShape2D
+RectangleShape2D CapsuleShape2D PhysicsMaterial AudioBusLayout'
+
 if [ "${1:-}" = "--list-types" ]; then
   for t in ${MEDIA_TYPES}; do printf 'media %s\n' "${t}"; done
   for t in ${PROCEDURAL_TYPES}; do printf 'procedural %s\n' "${t}"; done
+  for t in ${PLAIN_TYPES}; do printf 'plain %s\n' "${t}"; done
   exit 0
 fi
 
@@ -89,14 +102,100 @@ media_ext="${media_ext}|res|scn|mesh|anim|material|theme|stylebox|shape|phymat|o
 media_ext="${media_ext}|translation|atlastex|curvetex|dpitex|meshtex|tex|fontdata|meshlib|multimesh"
 media_ext="${media_ext}|mp3str|oggvorbisstr|sample"
 grep -Ei "\\.(${media_ext})\$" "${work}/files" >"${work}/assets" || true
-# Text resources and scenes that embed media (samples, pixels, glyphs or mesh
-# data) are assets too: a sound saved inside a .tres is still a sound.
-media_alternation="$(printf '%s' "${MEDIA_TYPES}" | tr -s ' \n' '||')"
-embedded="^\\[(gd_resource|sub_resource)[[:space:]][^]]*type=\"(${media_alternation})\"|PackedByteArray\\("
+# Text resources and scenes (.tres, .tscn, .escn) fail closed: one is an asset
+# unless it parses and every resource it declares ([gd_resource] and
+# [sub_resource] tags) is of a class in PROCEDURAL_TYPES or PLAIN_TYPES, and it
+# holds no PackedByteArray. A sound, image, font or mesh saved inside a text
+# file is still a sound, image, font or mesh. scan_tags reads the file the way
+# Godot's parser does, so spacing, line breaks and indentation can't hide a tag:
+# it prints "TYPE <class>" per declared resource, and "BAD <why>" for anything
+# it can't account for (an unknown tag, an untyped resource, unbalanced text).
+scan_tags() {
+  awk '
+{ text = text $0 "\n" }
+function emit(tag,    name, rest, found, t) {
+  gsub(/[ \t\r\n]+/, " ", tag)
+  sub(/^ /, "", tag)
+  name = tag
+  sub(/ .*/, "", name)
+  if (name == "gd_resource" || name == "sub_resource") {
+    rest = " " tag
+    found = 0
+    while (match(rest, /[^A-Za-z0-9_]type ?= ?[&^]?"[^"]*"/)) {
+      t = substr(rest, RSTART, RLENGTH)
+      sub(/^[^"]*"/, "", t)
+      sub(/"$/, "", t)
+      print "TYPE " t
+      found = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    if (!found) print "BAD untyped " name
+  } else if (name != "gd_scene" && name != "ext_resource" && name != "node" && name != "resource" && name != "connection" && name != "editable") {
+    print "BAD tag " name
+  }
+}
+END {
+  n = length(text); i = 1; word = ""; depth = 0; tdepth = 0; instr = 0; intag = 0; prev = ""; tag = ""; tags = 0
+  while (i <= n) {
+    c = substr(text, i, 1)
+    if (instr) {
+      if (intag) tag = tag c
+      if (c == "\\") { if (intag) tag = tag substr(text, i + 1, 1); i += 2; continue }
+      if (c == "\"") instr = 0
+      i++
+      continue
+    }
+    if (c == "\"") { instr = 1; word = ""; if (intag) tag = tag c; i++; continue }
+    # Godot starts a comment at ";" and Godot never writes ";", "#" or a single
+    # quote outside a string, so any of them is something this scan cannot
+    # follow: fail closed.
+    if (c == ";" || c == "#" || c == "\047") print "BAD comment or quote outside a string"
+    if (intag) {
+      if (c == "]" && tdepth == 0) { emit(tag); tags++; intag = 0; tag = ""; prev = "]"; i++; continue }
+      if (c == "[" || c == "(" || c == "{") tdepth++
+      else if (c == "]" || c == ")" || c == "}") tdepth--
+      tag = tag c
+      i++
+      continue
+    }
+    if (c ~ /[A-Za-z0-9_]/) { word = word c; prev = c; i++; continue }
+    if (c == "[" && (word == "Array" || word == "Dictionary")) { word = ""; depth++; prev = c; i++; continue }
+    word = ""
+    if (c == " " || c == "\t" || c == "\r" || c == "\n") { i++; continue }
+    if (c == "[" && depth == 0 && prev != "=") { intag = 1; tdepth = 0; tag = ""; i++; continue }
+    if (c == "[" || c == "(" || c == "{") depth++
+    else if (c == "]" || c == ")" || c == "}") { depth--; if (depth < 0) print "BAD unbalanced" }
+    prev = c
+    i++
+  }
+  if (instr || intag || depth != 0) print "BAD unterminated"
+  if (tags == 0) print "BAD no tags"
+}' "$1"
+}
 
-grep -Ei '\.(tres|tscn|escn)$' "${work}/files" | while IFS= read -r f; do
-  if grep -Eq "${embedded}" "${root}/${f}"; then printf '%s\n' "${f}"; fi
-done >>"${work}/assets" || true
+allowed_types=" $(printf '%s %s' "${PROCEDURAL_TYPES}" "${PLAIN_TYPES}" | tr -s ' \n' '  ') "
+
+grep -Ei '\.(tres|tscn|escn)$' "${work}/files" >"${work}/text-files" || true
+while IFS= read -r f; do
+  if grep -Eq 'PackedByteArray[[:space:]]*\(' "${root}/${f}"; then
+    printf '%s\n' "${f}"
+    continue
+  fi
+  scan_tags "${root}/${f}" >"${work}/tags"
+  clear=yes
+  while IFS=' ' read -r kind detail; do
+    case "${kind}" in
+      TYPE)
+        case "${allowed_types}" in
+          *" ${detail} "*) ;;
+          *) clear=no ;;
+        esac
+        ;;
+      *) clear=no ;;
+    esac
+  done <"${work}/tags"
+  if [ "${clear}" = no ]; then printf '%s\n' "${f}"; fi
+done <"${work}/text-files" >>"${work}/assets"
 sort -u -o "${work}/assets" "${work}/assets"
 
 # Credit rows: "<paths>\t<licence>\t<origin>", one row per line. The licence is
