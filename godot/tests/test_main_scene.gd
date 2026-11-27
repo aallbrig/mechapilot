@@ -99,7 +99,18 @@ func _calibrate(clock: TickClock) -> void:
 		Input.parse_input_event(move)
 		await _wait(clock, INPUT_TICKS)
 		seen.append(input.read_intent().aim_point)
-	_window_scale = (seen[1] - seen[0]) / (sent[1] - sent[0])
+	var spread: Vector2 = seen[1] - seen[0]
+	var measured: bool = absf(spread.x) > 0.0 and absf(spread.y) > 0.0
+	var _calibrated: GdUnitAssert = (
+		assert_bool(measured)
+		. override_failure_message(
+			"input calibration read %s for both mouse moves: the engine saw no movement" % [seen]
+		)
+		. is_true()
+	)
+	if not measured:
+		return
+	_window_scale = spread / (sent[1] - sent[0])
 	_window_offset = seen[0] - sent[0] * _window_scale
 
 

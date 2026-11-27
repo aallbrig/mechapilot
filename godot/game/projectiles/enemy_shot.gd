@@ -3,8 +3,10 @@ extends Node3D
 ## One enemy or boss projectile in flight: it falls under its spec's gravity,
 ## homes if its spec says so, and points along its velocity. EnemyShotPool owns
 ## and recycles it and steps it from its own tick, so motion is deterministic.
+## It draws nothing itself: the pool draws every live shot of a style as one
+## MultiMesh (one draw per style, #84's draw-call budget).
 
-## Glowing colours per style, and the mesh size per style (units).
+## Glowing colours per style, and the drawn size per style (units).
 const STYLE_COLORS: Dictionary[ShotSpec.Style, Color] = {
 	ShotSpec.Style.BULLET: Color(1.0, 0.35, 0.2),
 	ShotSpec.Style.SHELL: Color(1.0, 0.6, 0.1),
@@ -23,19 +25,15 @@ const GLOW: float = 4.0
 ## Below this speed (units/s) the shot keeps its last orientation.
 const MIN_ORIENT_SPEED: float = 1e-3
 
-static var _meshes: Dictionary[ShotSpec.Style, BoxMesh] = {}
-static var _materials: Dictionary[ShotSpec.Style, StandardMaterial3D] = {}
+static var _mesh: BoxMesh
+static var _material: StandardMaterial3D
 
 var spec: ShotSpec
 var velocity: Vector3 = Vector3.ZERO
 var life_left: float = 0.0
 
-var _body: MeshInstance3D = MeshInstance3D.new()
-
 
 func _init() -> void:
-	_body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(_body)
 	park()
 
 
@@ -45,8 +43,6 @@ func launch(shot_spec: ShotSpec, origin: Vector3, launch_velocity: Vector3) -> v
 	position = Vector3(origin.x, origin.y, 0.0)
 	velocity = Vector3(launch_velocity.x, launch_velocity.y, 0.0)
 	life_left = shot_spec.life
-	_body.mesh = _mesh_for(shot_spec.style)
-	_body.material_override = _material_for(shot_spec.style)
 	visible = true
 	_orient()
 
@@ -83,21 +79,25 @@ func _orient() -> void:
 		basis = Basis.looking_at(velocity.normalized(), Vector3.BACK)
 
 
-static func _mesh_for(style: ShotSpec.Style) -> BoxMesh:
-	if not _meshes.has(style):
-		var mesh: BoxMesh = BoxMesh.new()
-		mesh.size = STYLE_SIZES[style]
-		_meshes[style] = mesh
-	return _meshes[style]
+## The unit box every shot is drawn with (the pool scales it per style).
+static func unit_mesh() -> BoxMesh:
+	if _mesh == null:
+		_mesh = BoxMesh.new()
+		_mesh.size = Vector3.ONE
+	return _mesh
 
 
-static func _material_for(style: ShotSpec.Style) -> StandardMaterial3D:
-	if not _materials.has(style):
-		var mat: StandardMaterial3D = StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.albedo_color = STYLE_COLORS[style]
-		mat.emission_enabled = true
-		mat.emission = STYLE_COLORS[style]
-		mat.emission_energy_multiplier = GLOW
-		_materials[style] = mat
-	return _materials[style]
+## The glowing material every shot shares: unshaded, coloured per instance.
+static func shared_material() -> StandardMaterial3D:
+	if _material == null:
+		_material = StandardMaterial3D.new()
+		_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_material.vertex_color_use_as_albedo = true
+	return _material
+
+
+## A style's colour at its glow (HDR, so the Environment's glow blooms it).
+static func shine(style: ShotSpec.Style) -> Color:
+	var lit: Color = STYLE_COLORS[style] * GLOW
+	lit.a = 1.0
+	return lit

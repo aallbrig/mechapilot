@@ -283,3 +283,30 @@ func test_idle_cooldown_never_banks_a_burst() -> void:
 	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
 	# One shot at once and the next a whole interval later: idling banks nothing.
 	var _one: GdUnitAssert = assert_int(_fired.size()).is_equal(1)
+
+
+func test_death_ragdoll_keeps_glowing_parts_visible() -> void:
+	# The baked hull marks glow in vertex alpha (0 = full glow): a ragdoll
+	# material that read that alpha as opacity would drop the eyes and nozzles.
+	var mech: PlayerMech = _mech()
+	var debris: MechDebris = MechDebris.new()
+	add_child(debris)
+	mech.debris = debris
+	mech.destroy()
+	var materials: Array[Material] = debris.piece_materials()
+	var fading: int = 0
+	var opaque_at_start: bool = true
+	for material: Material in materials:
+		var shaded: ShaderMaterial = material as ShaderMaterial
+		if shaded != null and shaded.shader == MechDebris.FADE_SHADER:
+			fading += 1
+			var opacity: float = shaded.get_shader_parameter(MechDebris.FADE_PARAM)
+			opaque_at_start = opaque_at_start and is_equal_approx(opacity, 1.0)
+	var glow_reads_alpha: bool = MechDebris.FADE_SHADER.code.contains("1.0 - COLOR.a")
+	var alpha_is_fade: bool = MechDebris.FADE_SHADER.code.contains("ALPHA = fade")
+	mech.free()
+	debris.free()
+	var _baked: GdUnitAssert = assert_int(fading).is_equal(materials.size())
+	var _some: GdUnitAssert = assert_int(fading).is_greater(0)
+	var _opaque: GdUnitAssert = assert_bool(opaque_at_start).is_true()
+	var _glow_kept: GdUnitAssert = assert_bool(glow_reads_alpha and alpha_is_fade).is_true()

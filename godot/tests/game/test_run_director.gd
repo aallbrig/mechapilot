@@ -100,9 +100,10 @@ func test_player_shot_damages_the_boss_through_the_referee() -> void:
 		_h.advance(STEP)
 		entry += STEP
 	var full: int = _h.run.boss_health.health()
-	# Point blank: the mech sits just left of the boss's weak point, firing right.
+	# Point blank: the mech sits just left of the boss's drawn hull, firing right.
+	var clear_of_hull: float = -boss.look().hull_rect().position.x * 1.2
 	for i: int in roundi(0.5 / STEP):
-		_h.mech.position = boss.weak_point() + Vector3.LEFT * boss.profile.hit_radius * 1.5
+		_h.mech.position = boss.weak_point() + Vector3.LEFT * clear_of_hull
 		_h.mech.velocity = Vector3.ZERO
 		_h.advance(STEP, _firing_right())
 	var _damaged: GdUnitAssert = assert_int(_h.run.boss_health.health()).is_less(full)

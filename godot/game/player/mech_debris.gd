@@ -18,13 +18,15 @@ const DEPTH_SCATTER: float = 2.0
 const SPIN: Vector2 = Vector2(5.0, 16.0)
 ## Pieces closer than this to the centre burst straight up.
 const CENTRE_RADIUS: float = 0.05
+const FADE_SHADER: Shader = preload("res://game/player/debris_fade.gdshader")
+const FADE_PARAM: StringName = &"fade"
 
 var _pieces: Array[Piece] = []
 
 
 class Piece:
 	var node: MeshInstance3D
-	var material: StandardMaterial3D
+	var material: Material
 	var velocity: Vector3 = Vector3.ZERO
 	var axis: Vector3 = Vector3.UP
 	var spin: float = 0.0
@@ -73,18 +75,29 @@ func burst(
 
 
 ## A fading material for a piece drawn with `source`: a copy of a standard
-## material, or, for a baked model piece (the shared hull shader), one that
-## takes its colours from the mesh's vertex colours as the hull does.
-static func _fading_copy(source: Material) -> StandardMaterial3D:
+## material, or, for a baked model piece (the shared hull shader, whose vertex
+## alpha marks glow), the debris fade shader, so glowing parts stay visible.
+static func _fading_copy(source: Material) -> Material:
 	var standard: StandardMaterial3D = source as StandardMaterial3D
-	var out: StandardMaterial3D = null
 	if standard != null:
-		out = standard.duplicate() as StandardMaterial3D
-	else:
-		out = StandardMaterial3D.new()
-		out.vertex_color_use_as_albedo = true
-	out.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	return out
+		var copy: StandardMaterial3D = standard.duplicate() as StandardMaterial3D
+		copy.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		return copy
+	var fading: ShaderMaterial = ShaderMaterial.new()
+	fading.shader = FADE_SHADER
+	fading.set_shader_parameter(FADE_PARAM, 1.0)
+	return fading
+
+
+## Set a piece material's opacity (0..1).
+static func set_fade(material: Material, opacity: float) -> void:
+	var standard: StandardMaterial3D = material as StandardMaterial3D
+	if standard != null:
+		standard.albedo_color.a = opacity
+		return
+	var shaded: ShaderMaterial = material as ShaderMaterial
+	if shaded != null:
+		shaded.set_shader_parameter(FADE_PARAM, opacity)
 
 
 func step(delta: float) -> void:
@@ -98,9 +111,17 @@ func step(delta: float) -> void:
 		piece.velocity *= 1.0 - DRAG * delta
 		piece.node.global_position += piece.velocity * delta
 		piece.node.global_basis = Basis(piece.axis, piece.spin * delta) * piece.node.global_basis
-		piece.material.albedo_color.a = clampf(piece.life, 0.0, 1.0)
+		set_fade(piece.material, clampf(piece.life, 0.0, 1.0))
 		kept.append(piece)
 	_pieces = kept
+
+
+## Each piece's material, for tests.
+func piece_materials() -> Array[Material]:
+	var out: Array[Material] = []
+	for piece: Piece in _pieces:
+		out.append(piece.material)
+	return out
 
 
 func piece_count() -> int:
