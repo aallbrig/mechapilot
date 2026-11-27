@@ -165,3 +165,39 @@ func test_collected_repair_kit_restores_ledger_armor() -> void:
 		mini(hurt + RunRules.REPAIR_ARMOR, RunRules.MAX_ARMOR)
 	)
 	var _was_hurt: GdUnitAssert = assert_int(hurt).is_less(RunRules.MAX_ARMOR)
+
+
+func test_linked_respawn_blinks_for_the_ledger_window() -> void:
+	# The real rules, in LevelProgression's order: ledger.respawn() opens the 2 s
+	# window, then player_respawned resets the mech. The window must survive.
+	var run: RunHarness = RunHarness.new()
+	var mech: PlayerMech = PlayerMech.new()
+	add_child(mech)
+	var input: PlayerInput = PlayerInput.new()
+	add_child(input)
+	var link: PlayerBusLink = PlayerBusLink.new()
+	add_child(link)
+	link.link(run.bus, mech, input)
+	run.reach_skirmish()
+	run.lose_life()
+	var down: bool = not mech.is_alive()
+	run.advance(RunRules.RESPAWN_DELAY + RunHarness.STEP)
+	var back: bool = mech.is_alive() and run.respawns == 1
+	var ledger_guarded: bool = run.ledger.is_invulnerable()
+	var hidden_frames: int = 0
+	for _i: int in 60:
+		mech.tick(TICK, PilotIntent.new())
+		if not mech.model().visible:
+			hidden_frames += 1
+	var guarded: bool = mech.is_invulnerable()
+	var ignored: bool = not mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	link.free()
+	input.free()
+	mech.free()
+	run.dispose()
+	var _down: GdUnitAssert = assert_bool(down).is_true()
+	var _back: GdUnitAssert = assert_bool(back).is_true()
+	var _ledger: GdUnitAssert = assert_bool(ledger_guarded).is_true()
+	var _guarded: GdUnitAssert = assert_bool(guarded).is_true()
+	var _blinks: GdUnitAssert = assert_int(hidden_frames).is_greater(10)
+	var _no_reports: GdUnitAssert = assert_bool(ignored).is_true()

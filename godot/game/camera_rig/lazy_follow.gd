@@ -58,8 +58,9 @@ func step(target: Vector3, velocity: Vector3, dead_zone: Vector2, delta: float) 
 	calm = maxf(calm, 1.0 - clampf(velocity.length() / CALM_SPEED, 0.0, 1.0))
 	_steady = lerpf(_steady, calm, 1.0 - exp(-STEADY_RATE * delta))
 	# The steady share of the velocity moves the goal and feeds the spring, so
-	# neither trails a mech cruising at constant speed.
-	var feed: Vector3 = _smooth_velocity * _steady
+	# neither trails a mech cruising at constant speed. It never exceeds the
+	# mech's own velocity, so the feed dies the moment the mech brakes.
+	var feed: Vector3 = _within(_smooth_velocity * _steady, velocity)
 	_goal += feed * delta
 
 	var desired: Vector3 = target + velocity * LOOKAHEAD
@@ -70,9 +71,43 @@ func step(target: Vector3, velocity: Vector3, dead_zone: Vector2, delta: float) 
 
 	var w: float = FOLLOW
 	_focus_velocity += ((w * w * (_goal - _focus) + 2.0 * w * (feed - _focus_velocity)) * delta)
+	# The focus may not outrun the mech when it is past its goal, or ahead of a
+	# braking mech: a braking mech is never overtaken, and the camera eases back
+	# instead of swinging past it.
+	_focus_velocity.x = _held_back(
+		_focus_velocity.x, _focus.x, _goal.x, target.x, velocity.x, _smooth_velocity.x
+	)
+	_focus_velocity.y = _held_back(
+		_focus_velocity.y, _focus.y, _goal.y, target.y, velocity.y, _smooth_velocity.y
+	)
 	_focus += _focus_velocity * delta
 	_focus.z = 0.0
 	return _focus
+
+
+## One axis of the focus velocity `fv`, limited to the mech's velocity `v` while
+## the focus is past its goal, or ahead of a mech that is braking (its velocity
+## has dropped below its smoothed velocity `smooth`).
+func _held_back(
+	fv: float, focus_at: float, goal_at: float, target_at: float, v: float, smooth: float
+) -> float:
+	var past_goal: bool = (goal_at - focus_at) * fv < 0.0
+	var braking: bool = absf(v) < absf(smooth) or v * smooth < 0.0
+	var ahead: bool = (focus_at - target_at) * fv > 0.0
+	if past_goal or (braking and ahead):
+		return _within_axis(fv, v)
+	return fv
+
+
+## `v` limited, per axis, to the direction and size of `limit`.
+func _within(v: Vector3, limit: Vector3) -> Vector3:
+	return Vector3(_within_axis(v.x, limit.x), _within_axis(v.y, limit.y), 0.0)
+
+
+func _within_axis(value: float, limit: float) -> float:
+	if value * limit <= 0.0:
+		return 0.0
+	return signf(value) * minf(absf(value), absf(limit))
 
 
 func _excess(d: float, half: float) -> float:

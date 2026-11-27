@@ -59,6 +59,7 @@ var _animator: MechAnimator
 var _guard: InvulnerabilityWindow = InvulnerabilityWindow.new()
 var _cooldown: float = 0.0
 var _since_shot: float = INF
+var _was_firing: bool = false
 var _flash_left: float = 0.0
 var _alive: bool = true
 var _last_hit_direction: Vector3 = Vector3.ZERO
@@ -98,7 +99,14 @@ func tick(delta: float, intent: PilotIntent) -> void:
 	position += velocity * delta
 	position.z = 0.0
 
-	_cooldown = maxf(_cooldown - delta, 0.0)
+	# While fire stays held, the cooldown carries its leftover time, so the rate
+	# is exact at any tick rate. Otherwise it rests at 0: idling banks no burst,
+	# and the first shot of a burst starts the cadence.
+	if intent.firing and _was_firing:
+		_cooldown -= delta
+	else:
+		_cooldown = maxf(_cooldown - delta, 0.0)
+	_was_firing = intent.firing
 	_since_shot += delta
 	if absf(velocity.x) > tuning.facing_speed and _since_shot > tuning.facing_fire_hold:
 		facing = signf(velocity.x)
@@ -109,6 +117,7 @@ func tick(delta: float, intent: PilotIntent) -> void:
 			_fire()
 	elif intent.has_tap and _aim_at_point(intent.tap_point):
 		_face_aim()
+		_cooldown = maxf(_cooldown, 0.0)
 		_fire()
 
 	_animator.step(_model, delta, velocity, facing, thrust)
@@ -178,7 +187,10 @@ func destroy() -> void:
 	destroyed.emit(global_position)
 
 
-## Back in play at `at`, at rest, with the respawn invulnerability.
+## Back in play at `at`, at rest. Standalone it opens the respawn window itself;
+## linked, it keeps the window the RunLedger opened just before (LevelProgression
+## calls ledger.respawn(), which announces invulnerability_started, and only then
+## announces player_respawned).
 func respawn(at: Vector3) -> void:
 	_alive = true
 	position = Vector3(at.x, at.y, 0.0)
@@ -186,13 +198,14 @@ func respawn(at: Vector3) -> void:
 	facing = 1.0
 	aim_direction = Vector3.RIGHT
 	_cooldown = 0.0
+	_was_firing = false
 	_since_shot = INF
 	_flash_left = 0.0
 	_model.set_flash(false)
 	_model.visible = true
 	_animator.reset(_model)
-	_guard.clear()
 	if self_guarding:
+		_guard.clear()
 		guard_for(tuning.respawn_invulnerability)
 	respawned.emit(global_position)
 
@@ -243,7 +256,8 @@ func _face_aim() -> void:
 
 
 func _fire() -> void:
-	_cooldown += tuning.fire_interval
+	# Carry at most one interval of debt, so a long frame can't queue a burst.
+	_cooldown = maxf(_cooldown, -tuning.fire_interval) + tuning.fire_interval
 	_since_shot = 0.0
 	var spread: float = rng.randf_range(-tuning.shot_spread, tuning.shot_spread)
 	var dir: Vector3 = aim_direction.rotated(Vector3.BACK, spread)

@@ -249,3 +249,37 @@ func test_mech_model_has_the_original_flight_design() -> void:
 	var _wing_thrusters: GdUnitAssert = assert_int(mains).is_equal(2)
 	var _foot_thrusters: GdUnitAssert = assert_int(feet).is_equal(2)
 	var _tips: GdUnitAssert = assert_int(tips).is_equal(2)
+
+
+## Shots fired while holding fire for `seconds` at a physics rate of `rate` Hz.
+func _shots_in(seconds: float, rate: float) -> int:
+	_fired.clear()
+	var mech: PlayerMech = _mech()
+	var err: Error = mech.fired.connect(_on_fired) as Error
+	var ticks: int = roundi(seconds * rate)
+	for _i: int in ticks:
+		mech.tick(1.0 / rate, _intent(Vector2.ZERO, Vector2.RIGHT, true))
+	mech.free()
+	return _fired.size() if err == OK else -1
+
+
+func test_fire_rate_holds_at_any_tick_rate() -> void:
+	var at_144: int = _shots_in(10.0, 144.0)
+	var at_50: int = _shots_in(10.0, 50.0)
+	var at_60: int = _shots_in(10.0, 60.0)
+	var _fast: GdUnitAssert = assert_int(at_144).is_equal(100)
+	var _slow: GdUnitAssert = assert_int(at_50).is_equal(100)
+	var _fixed: GdUnitAssert = assert_int(at_60).is_equal(100)
+
+
+func test_idle_cooldown_never_banks_a_burst() -> void:
+	var mech: PlayerMech = _mech()
+	var err: Error = mech.fired.connect(_on_fired) as Error
+	for _i: int in 120:
+		mech.tick(TICK, PilotIntent.new())
+	for _i: int in 6:
+		mech.tick(TICK, _intent(Vector2.ZERO, Vector2.RIGHT, true))
+	mech.free()
+	var _connected: GdUnitAssert = assert_int(err).is_equal(OK)
+	# One shot at once and the next a whole interval later: idling banks nothing.
+	var _one: GdUnitAssert = assert_int(_fired.size()).is_equal(1)

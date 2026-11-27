@@ -99,3 +99,52 @@ func test_camera_rig_frames_the_side_view() -> void:
 	var _framed: GdUnitAssert = assert_vector(cam_pos).is_equal_approx(
 		Vector3(5.0, 3.0, CameraRig.DISTANCE), Vector3.ONE * 1e-3
 	)
+
+
+## Cruise at full thrust for 4 s, then brake with `brake` (zero: stop dead), and
+## return the camera's lead over the mech (focus x minus mech x) on every tick
+## after braking starts.
+func _leads_after_braking(brake: Vector2) -> Array[float]:
+	var follow: LazyFollow = LazyFollow.new()
+	follow.snap(Vector3.ZERO)
+	var dz: Vector2 = CameraRig.dead_zone_for(CameraRig.DISTANCE, 16.0 / 9.0)
+	var v: Vector3 = Vector3.ZERO
+	var p: Vector3 = Vector3.ZERO
+	for _i: int in 240:
+		v = FlightModel.step_velocity(v, Vector2.RIGHT, TICK, _tuning)
+		p += v * TICK
+		var _cruising: Vector3 = follow.step(p, v, dz, TICK)
+	var leads: Array[float] = []
+	for _i: int in 240:
+		if brake == Vector2.ZERO or v.x <= 0.0:
+			v = Vector3.ZERO
+		else:
+			# Reverse thrust brakes to a stop, never past it.
+			v = FlightModel.step_velocity(v, brake, TICK, _tuning)
+			v = Vector3(maxf(v.x, 0.0), 0.0, 0.0)
+		p += v * TICK
+		leads.append(follow.step(p, v, dz, TICK).x - p.x)
+	return leads
+
+
+func _growth_steps(leads: Array[float]) -> int:
+	var grew: int = 0
+	for i: int in range(1, leads.size()):
+		if leads[i] > leads[i - 1] + 1e-5:
+			grew += 1
+	return grew
+
+
+func test_camera_does_not_overshoot_a_braking_mech() -> void:
+	var cruise_lead: float = _tuning.speed * LazyFollow.LOOKAHEAD
+	var stop_dead: Array[float] = _leads_after_braking(Vector2.ZERO)
+	var reverse: Array[float] = _leads_after_braking(Vector2.LEFT)
+	# The camera never runs further ahead of a braking mech than its cruise
+	# lookahead, and once braking starts its lead only shrinks.
+	var stop_peak: float = stop_dead.max()
+	var reverse_peak: float = reverse.max()
+	var _stop_bound: GdUnitAssert = assert_float(stop_peak).is_less_equal(cruise_lead + 0.05)
+	var _stop_shrinks: GdUnitAssert = assert_int(_growth_steps(stop_dead)).is_equal(0)
+	var _reverse_bound: GdUnitAssert = assert_float(reverse_peak).is_less_equal(cruise_lead + 0.05)
+	var _reverse_shrinks: GdUnitAssert = assert_int(_growth_steps(reverse)).is_equal(0)
+	var _settles: GdUnitAssert = assert_float(absf(stop_dead[-1])).is_less(0.5)
