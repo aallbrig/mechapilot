@@ -245,3 +245,76 @@ func test_dev_channel_is_typed_announced_and_unique() -> void:
 			problems.append("duplicate %s" % sig_name)
 	var _three: GdUnitAssert = assert_int(signals.size()).is_equal(3)
 	var _clean: GdUnitAssert = assert_array(problems).is_empty()
+
+
+func test_developer_mode_off_clears_invulnerability() -> void:
+	_developer_mode(true)
+	_run.machine.boot()
+	_run.bus.flow.announce_start_requested()
+	_command(DevCommand.Command.TOGGLE_INVULNERABILITY)
+	_developer_mode(false)
+	var status_after_off: Array = _statuses.back()
+	_command(DevCommand.Command.TOGGLE_INVULNERABILITY)
+	_run.bus.flow.announce_play_requested()
+	_run.advance(_run.levels[0].intro_duration + RunHarness.STEP)
+	_run.bus.player.announce_player_hit(DamageSource.Source.ENEMY_COLLISION, Vector3.ZERO, 0)
+	var _off: GdUnitAssert = assert_array(status_after_off).is_equal([false, false])
+	var _hit: GdUnitAssert = assert_int(_run.ledger.armor()).is_equal(
+		RunRules.MAX_ARMOR - RunRules.COLLISION_DAMAGE
+	)
+	var _clean: GdUnitAssert = assert_bool(_run.ledger.is_dev_assisted()).is_false()
+
+
+func test_skip_level_withholds_the_boss_score() -> void:
+	_developer_mode(true)
+	_run.reach_skirmish()
+	_run.fill_gauge()
+	_run.advance(RunRules.BOSS_WARNING_DURATION + RunHarness.STEP)
+	var fighting: GameState.Phase = _run.machine.state()
+	var score_before: int = _run.ledger.score()
+	_command(DevCommand.Command.SKIP_LEVEL)
+	var tally: LevelTally = _run.tallies.back()
+	var _fight: GdUnitAssert = assert_int(fighting).is_equal(GameState.Phase.BOSS_FIGHT)
+	var _clear: GdUnitAssert = assert_int(_run.machine.state()).is_equal(
+		GameState.Phase.LEVEL_CLEAR
+	)
+	var _no_boss: GdUnitAssert = assert_int(_run.ledger.score()).is_equal(
+		score_before + tally.bonus_total()
+	)
+
+
+func test_skip_on_the_last_level_marks_the_run_before_victory() -> void:
+	_run.reach_skirmish()
+	for level: int in _run.levels.size() - 1:
+		_run.reach_boss_fight()
+		_run.defeat_boss()
+		_run.bus.flow.announce_continue_requested()
+		_run.advance(_run.levels[level + 1].intro_duration + RunHarness.STEP)
+	var last_level: int = _run.progression.level_number()
+	var clean_so_far: bool = not _run.ledger.is_dev_assisted()
+	_developer_mode(true)
+	_command(DevCommand.Command.SKIP_LEVEL)
+	var _last: GdUnitAssert = assert_int(last_level).is_equal(_run.levels.size())
+	var _clean: GdUnitAssert = assert_bool(clean_so_far).is_true()
+	var _victory: GdUnitAssert = assert_int(_run.machine.state()).is_equal(GameState.Phase.VICTORY)
+	var _marked: GdUnitAssert = assert_bool(_run.run_summaries.back().dev_assisted).is_true()
+
+
+func test_kill_all_with_no_enemies_leaves_the_run_clean() -> void:
+	var field: EnemyField = EnemyField.new()
+	add_child(field)
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = 7
+	field.setup(_run.bus, rng, _run.levels, StandInTarget.new(_run.bus))
+	_developer_mode(true)
+	_run.reach_skirmish()
+	_command(DevCommand.Command.KILL_ALL_ENEMIES)
+	var clean_when_empty: bool = not _run.ledger.is_dev_assisted()
+	var _enemy: Enemy = field.launch(
+		EnemyKind.Kind.FIGHTER, Vector3(30.0, 0.0, 0.0), Vector3.LEFT, 0.0
+	)
+	_command(DevCommand.Command.KILL_ALL_ENEMIES)
+	var marked_when_killed: bool = _run.ledger.is_dev_assisted()
+	field.free()
+	var _clean: GdUnitAssert = assert_bool(clean_when_empty).is_true()
+	var _marked: GdUnitAssert = assert_bool(marked_when_killed).is_true()

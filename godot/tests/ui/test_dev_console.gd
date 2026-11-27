@@ -127,13 +127,28 @@ func test_console_unreachable_when_developer_mode_off() -> void:
 	var console: DevConsole = h.ui.dev_console()
 	var button: Button = console.dev_button()
 	var button_shown: bool = button.is_visible_in_tree()
+	var centre: Vector2 = button.get_global_rect().get_center()
+	# Each way in is tried on its own and checked at once, so two that worked
+	# could never cancel each other out.
+	var opened_by: Array[String] = []
 	console._input(_key(KEY_QUOTELEFT))
+	if console.is_open():
+		opened_by.append("backquote")
 	console._input(_select_button())
-	_click(viewport, button.get_global_rect().get_center())
-	_click(viewport, button.get_global_rect().get_center(), InputEvent.DEVICE_ID_EMULATION)
+	if console.is_open():
+		opened_by.append("select")
+	_click(viewport, centre)
+	if console.is_open():
+		opened_by.append("click")
+	_tap(viewport, centre, 0, true)
+	if console.is_open():
+		opened_by.append("tap")
 	button.pressed.emit()
+	if console.is_open():
+		opened_by.append("pressed")
 	console.toggle()
-	var opened_while_off: bool = console.is_open()
+	if console.is_open():
+		opened_by.append("toggle")
 	_turn_developer_mode(h, true)
 	console.toggle()
 	var opened_on: bool = console.is_open()
@@ -143,7 +158,7 @@ func test_console_unreachable_when_developer_mode_off() -> void:
 	h.dispose()
 	viewport.free()
 	var _no_button: GdUnitAssert = assert_bool(button_shown).is_false()
-	var _never: GdUnitAssert = assert_bool(opened_while_off).is_false()
+	var _never: GdUnitAssert = assert_array(opened_by).is_empty()
 	var _on: GdUnitAssert = assert_bool(opened_on).is_true()
 	var _closed: GdUnitAssert = assert_bool(closed_by_off).is_true()
 	var _hidden: GdUnitAssert = assert_bool(hidden_again).is_true()

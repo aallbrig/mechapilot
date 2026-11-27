@@ -12,7 +12,11 @@ extends RefCounted
 ## never saved to the Scoreboard. Developer invulnerability may be toggled at
 ## any time; a Run started with it on is dev-assisted from the start.
 ##
-## Listens: dev.dev_command_requested, profile.settings_changed, run.run_started.
+## Turning Developer mode off also turns developer invulnerability off.
+## "Kill all enemies" marks the Run only when it destroyed at least one enemy.
+##
+## Listens: dev.dev_command_requested, profile.settings_changed, run.run_started,
+## enemy.enemy_destroyed (counted only during a purge it ordered).
 ## Announces: dev.dev_status_changed (after every accepted command and at each
 ## Run start) and dev.enemies_purge_ordered.
 
@@ -25,6 +29,8 @@ var _ledger: RunLedger
 var _progression: LevelProgression
 var _enabled: bool = false
 var _invulnerable: bool = false
+var _purging: bool = false
+var _purged: int = 0
 
 
 func _init(
@@ -38,6 +44,7 @@ func _init(
 		_events.dev.dev_command_requested.connect(run_command),
 		_events.profile.settings_changed.connect(_on_settings_changed),
 		_events.run.run_started.connect(_on_run_started),
+		_events.enemy.enemy_destroyed.connect(_on_enemy_destroyed),
 	]
 	Subscriptions.require_ok("DevCommands", subscribed)
 
@@ -79,12 +86,22 @@ func _run_command(command: DevCommand.Command) -> bool:
 			_ledger.mark_dev_assisted()
 			done = _progression.skip_level()
 		DevCommand.Command.KILL_ALL_ENEMIES:
-			_events.dev.announce_enemies_purge_ordered()
+			done = _purge() > 0
 		_:
 			done = false
 	if done:
 		_ledger.mark_dev_assisted()
 	return done
+
+
+## Orders every enemy destroyed and returns how many the field destroyed
+## (the field reports each one synchronously while the order is announced).
+func _purge() -> int:
+	_purged = 0
+	_purging = true
+	_events.dev.announce_enemies_purge_ordered()
+	_purging = false
+	return _purged
 
 
 func _in_play() -> bool:
@@ -99,6 +116,16 @@ func _announce_status() -> void:
 
 func _on_settings_changed(settings: GameSettings) -> void:
 	_enabled = settings.developer_mode
+	if not _enabled and _invulnerable:
+		_invulnerable = _ledger.toggle_dev_invulnerability()
+		_announce_status()
+
+
+func _on_enemy_destroyed(
+	_enemy_id: int, _kind: EnemyKind.Kind, _position: Vector3, _cause: DestroyCause.Cause
+) -> void:
+	if _purging:
+		_purged += 1
 
 
 func _on_run_started(_level_number: int) -> void:

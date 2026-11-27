@@ -35,6 +35,7 @@ var _settings: Settings
 var _intel: IntelCodex
 var _tutorial: TutorialProgress
 var _coach: TutorialCoach
+var _dev: DevCommands
 
 @onready var _ui: UiRoot = $Ui/UiRoot
 @onready var _stage: FlightStage = $FlightStage
@@ -73,6 +74,8 @@ func _ready() -> void:
 	)
 	_wire_feedback()
 	_coach = TutorialCoach.new(Events, _tutorial)
+	# Before the restore, so a saved Developer mode reaches it (#116).
+	_dev = DevCommands.new(Events, _machine, _ledger, _progression)
 	_settings.restore()
 	_scoreboard.restore()
 	_intel.restore()
