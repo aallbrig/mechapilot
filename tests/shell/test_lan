@@ -1,0 +1,347 @@
+#!/bin/sh
+# Tests for the LAN preview (#77): scripts/dev/lan, scripts/dev/lan-cert,
+# compose.yaml, docker/lan/nginx.conf and scripts/checks/nginx-config.
+# Run by scripts/test-shell from the repo root; each test_* function is one case.
+# Addresses are from TEST-NET-1 (192.0.2.0/24), never a real network.
+#
+# test_lan_nginx_routes_and_mime runs the pinned nginx image and fails, saying
+# why, wherever Docker is not usable: there is no skip. It publishes no port;
+# every request is made with curl inside the container.
+
+# A stub `docker` that always fails, so Docker looks absent.
+no_docker_bin() {
+  mkdir -p "$1"
+  printf '#!/bin/sh\nexit 1\n' >"$1/docker"
+  chmod +x "$1/docker"
+}
+
+# Succeeds when directory $1 holds exactly one entry, www.
+only_www() {
+  entries="$(ls -A "$1")" || return 1
+  [ "${entries}" = www ] || {
+    printf 'left behind in %s: %s\n' "$1" "${entries}"
+    return 1
+  }
+}
+
+# A stub `task` whose task list has no godot:export:web.
+stub_task_bin() {
+  mkdir -p "$1"
+  {
+    printf '#!/bin/sh\n'
+    printf '%s\n' "printf '%s\\n' '{\"tasks\":[{\"name\":\"lint\"}]}'"
+  } >"$1/task"
+  chmod +x "$1/task"
+}
+
+# Prints the subjectAltName line of certificate $1, whitespace removed.
+cert_sans() {
+  openssl x509 -in "$1" -noout -text | awk '/X509v3 Subject Alternative Name/ { getline; gsub(/[[:space:]]/, ""); print; exit }'
+}
+
+test_lan_cert_sans_and_reuse() {
+  d="$(mktemp -d)"
+  MECHAFIGHTER_LAN_IP=192.0.2.10 scripts/dev/lan-cert "${d}/tls" | grep -q 'wrote a new certificate' || return 1
+  sans="$(cert_sans "${d}/tls/cert.pem")" || return 1
+  [ "${sans}" = "DNS:localhost,IPAddress:127.0.0.1,IPAddress:192.0.2.10" ] || {
+    echo "unexpected SANs: ${sans}"
+    return 1
+  }
+  # The key is private to its owner.
+  loose="$(find "${d}/tls/key.pem" -perm -u=r ! -perm -g=r ! -perm -o=r ! -perm -u=x)" || return 1
+  [ "${loose}" = "${d}/tls/key.pem" ] || return 1
+  # Same IP, valid cert: reused byte for byte, never overwritten.
+  before="$(cat "${d}/tls/cert.pem" "${d}/tls/key.pem" | cksum)" || return 1
+  MECHAFIGHTER_LAN_IP=192.0.2.10 scripts/dev/lan-cert "${d}/tls" | grep -q 'reusing the valid certificate' || return 1
+  after="$(cat "${d}/tls/cert.pem" "${d}/tls/key.pem" | cksum)" || return 1
+  [ "${before}" = "${after}" ] || return 1
+  # A new LAN IP: a new certificate that names it, and not the old one.
+  MECHAFIGHTER_LAN_IP=192.0.2.11 scripts/dev/lan-cert "${d}/tls" | grep -q 'wrote a new certificate' || return 1
+  sans="$(cert_sans "${d}/tls/cert.pem")" || return 1
+  [ "${sans}" = "DNS:localhost,IPAddress:127.0.0.1,IPAddress:192.0.2.11" ] || return 1
+  # Near expiry (397-day certs, so "fewer than 400 days left" is always near).
+  LAN_CERT_MIN_DAYS=400 MECHAFIGHTER_LAN_IP=192.0.2.11 scripts/dev/lan-cert "${d}/tls" | grep -q 'wrote a new certificate' || return 1
+  # A key that does not match the certificate.
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${d}/tls/key.pem" 2>/dev/null || return 1
+  MECHAFIGHTER_LAN_IP=192.0.2.11 scripts/dev/lan-cert "${d}/tls" | grep -q 'wrote a new certificate' || return 1
+  MECHAFIGHTER_LAN_IP=192.0.2.11 scripts/dev/lan-cert "${d}/tls" | grep -q 'reusing the valid certificate' || return 1
+  # A symlinked cert is refused, and its target is left alone.
+  printf 'untouched\n' >"${d}/target"
+  rm -f "${d}/tls/cert.pem"
+  ln -s "${d}/target" "${d}/tls/cert.pem"
+  ! MECHAFIGHTER_LAN_IP=192.0.2.11 scripts/dev/lan-cert "${d}/tls" 2>/dev/null || return 1
+  target="$(cat "${d}/target")" || return 1
+  [ "${target}" = untouched ] || return 1
+  # Only a dotted-quad IPv4 address is accepted.
+  for bad in 192.0.2 192.0.2.256 192.0.2.1.5 192.0.2.x "192.0.2.1;id" ""; do
+    if [ -z "${bad}" ]; then continue; fi
+    ! MECHAFIGHTER_LAN_IP="${bad}" scripts/dev/lan-cert ip 2>/dev/null || {
+      echo "accepted bad IP: ${bad}"
+      return 1
+    }
+  done
+  ip="$(MECHAFIGHTER_LAN_IP=192.0.2.10 scripts/dev/lan-cert ip)" || return 1
+  [ "${ip}" = 192.0.2.10 ] || return 1
+  rm -rf "${d}"
+}
+
+test_lan_build_assembles_three_roots() {
+  d="$(mktemp -d)"
+  MECHAFIGHTER_LAN_OUT="${d}/out" MECHAFIGHTER_LAN_GAME=placeholder scripts/dev/lan build >"${d}/log" 2>&1 || {
+    cat "${d}/log"
+    return 1
+  }
+  www="${d}/out/www"
+  for page in index.html current/index.html new/index.html new/game/index.html; do
+    [ -f "${www}/${page}" ] || {
+      echo "missing ${page}"
+      return 1
+    }
+  done
+  cmp -s docker/lan/index.html "${www}/index.html" || return 1
+  # /current/: the legacy Unity WebGL build from the github-pages branch.
+  grep -q '<title>Unity WebGL Player | Mecha Pilot</title>' "${www}/current/index.html" || return 1
+  [ -s "${www}/current/Build/WebGL.wasm" ] || return 1
+  # /new/: the Marketing Site rooted at /new/, linking the game at /new/game/.
+  grep -q 'href="/new/game/"' "${www}/new/index.html" || return 1
+  grep -q 'href="/new/site.webmanifest"' "${www}/new/index.html" || return 1
+  # /new/game/: the placeholder until there is an export.
+  cmp -s docker/lan/game-placeholder.html "${www}/new/game/index.html" || return 1
+  # Nothing but the tree is left behind (no staging directory).
+  only_www "${d}/out" || return 1
+
+  # An existing web export is copied in as /new/game/.
+  mkdir -p "${d}/export"
+  printf '<!DOCTYPE html><title>godot</title>\n' >"${d}/export/index.html"
+  printf 'wasm' >"${d}/export/index.wasm"
+  MECHAFIGHTER_LAN_OUT="${d}/out" MECHAFIGHTER_LAN_GAME="${d}/export" scripts/dev/lan build >/dev/null 2>&1 || return 1
+  cmp -s "${d}/export/index.html" "${www}/new/game/index.html" || return 1
+  [ -f "${www}/new/game/index.wasm" ] || return 1
+
+  # auto: without a godot:export:web task, the placeholder.
+  stub_task_bin "${d}/bin"
+  PATH="${d}/bin:${PATH}" MECHAFIGHTER_LAN_OUT="${d}/out" scripts/dev/lan build >"${d}/log" 2>&1 || {
+    cat "${d}/log"
+    return 1
+  }
+  grep -q 'a placeholder (no task godot:export:web yet)' "${d}/log" || return 1
+  cmp -s docker/lan/game-placeholder.html "${www}/new/game/index.html" || return 1
+
+  # A failed build leaves the last good tree in place: an export without
+  # index.html, and one that carries a symlink, are both refused.
+  rm -f "${d}/export/index.html"
+  ! MECHAFIGHTER_LAN_OUT="${d}/out" MECHAFIGHTER_LAN_GAME="${d}/export" scripts/dev/lan build >/dev/null 2>&1 || return 1
+  printf '<!DOCTYPE html><title>godot</title>\n' >"${d}/export/index.html"
+  ln -s /etc/passwd "${d}/export/leak"
+  ! MECHAFIGHTER_LAN_OUT="${d}/out" MECHAFIGHTER_LAN_GAME="${d}/export" scripts/dev/lan build >"${d}/log" 2>&1 || return 1
+  grep -q 'contains symlinks' "${d}/log" || return 1
+  cmp -s docker/lan/game-placeholder.html "${www}/new/game/index.html" || return 1
+  only_www "${d}/out" || return 1
+  rm -rf "${d}"
+}
+
+test_lan_tasks_fail_clearly_without_docker() {
+  d="$(mktemp -d)"
+  no_docker_bin "${d}/bin"
+  for cmd in up down; do
+    err="$(PATH="${d}/bin:${PATH}" MECHAFIGHTER_LAN_IP=192.0.2.10 MECHAFIGHTER_LAN_OUT="${d}/out" scripts/dev/lan "${cmd}" 2>&1 >/dev/null)" && return 1
+    printf '%s\n' "${err}" | grep -q 'docker is installed but its daemon is not reachable' || return 1
+  done
+  # Nothing was built before Docker was found missing.
+  [ ! -e "${d}/out" ] || return 1
+  # The serve pane waits, saying why, instead of exiting.
+  out="$(PATH="${d}/bin:${PATH}" SERVE_ONCE=1 scripts/dev/serve lan)" || return 1
+  printf '%s\n' "${out}" | grep -q '^serve lan: waiting: docker is installed but its daemon is not reachable' || return 1
+  # A loopback LAN address would publish 127.0.0.1 twice.
+  rc=0
+  scripts/dev/lan doctor >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    err="$(MECHAFIGHTER_LAN_IP=127.0.0.1 MECHAFIGHTER_LAN_OUT="${d}/out" scripts/dev/lan up 2>&1 >/dev/null)" && return 1
+    printf '%s\n' "${err}" | grep -q 'not loopback' || return 1
+  fi
+  ! MECHAFIGHTER_LAN_PORT=80 scripts/dev/lan url 2>/dev/null || return 1
+  ! MECHAFIGHTER_LAN_PORT=8471x scripts/dev/lan url 2>/dev/null || return 1
+  urls="$(MECHAFIGHTER_LAN_IP=192.0.2.10 MECHAFIGHTER_LAN_PORT=9443 scripts/dev/lan url)" || return 1
+  printf "%s\n" "${urls}" | grep -qx "  https://192.0.2.10:9443/new/game/" || return 1
+  rm -rf "${d}"
+}
+
+test_nginx_config_check_skips_only_outside_ci() {
+  d="$(mktemp -d)"
+  no_docker_bin "${d}/bin"
+  out="$(env -u CI -u GITHUB_ACTIONS PATH="${d}/bin:${PATH}" scripts/checks/nginx-config 2>&1)" || {
+    echo "${out}"
+    return 1
+  }
+  printf '%s\n' "${out}" | grep -q '^nginx-config: SKIPPED, not verified here' || return 1
+  for var in CI GITHUB_ACTIONS; do
+    out="$(env -u CI -u GITHUB_ACTIONS "${var}=true" PATH="${d}/bin:${PATH}" scripts/checks/nginx-config 2>&1)" && return 1
+    printf '%s\n' "${out}" | grep -q 'docker is required in CI' || return 1
+  done
+  rm -rf "${d}"
+}
+
+test_compose_schema_rejects_unknown_keys() {
+  d="$(mktemp -d)"
+  check-jsonschema --schemafile schemas/compose-spec.schema.json compose.yaml >/dev/null || return 1
+  yq '.services.lan.read_onyl = true' compose.yaml >"${d}/compose.yaml" || return 1
+  ! check-jsonschema --schemafile schemas/compose-spec.schema.json "${d}/compose.yaml" >/dev/null 2>&1 || return 1
+  rm -rf "${d}"
+}
+
+# ---- nginx in the pinned image (needs Docker) ----
+
+lan_fixture() {
+  www="$1/root/www"
+  mkdir -p "${www}/current/Build" "${www}/new/game"
+  printf '<!DOCTYPE html><title>index</title>\n' >"${www}/index.html"
+  printf '<!DOCTYPE html><title>legacy</title>\n' >"${www}/current/index.html"
+  printf '<!DOCTYPE html><title>marketing</title>\n' >"${www}/new/index.html"
+  printf '<!DOCTYPE html><title>godot game</title>\n' >"${www}/new/game/index.html"
+  # Big enough to be gzipped (gzip_min_length 512).
+  awk 'BEGIN { for (i = 0; i < 200; i++) print "var x" i " = " i ";" }' >"${www}/new/game/index.js"
+  cp "${www}/new/game/index.js" "${www}/new/game/index.wasm"
+  cp "${www}/new/game/index.js" "${www}/current/Build/WebGL.wasm"
+  printf 'pck' >"${www}/new/game/index.pck"
+  printf 'secret\n' >"${www}/new/.env"
+  ln -s /etc/passwd "${www}/new/passwd"
+  MECHAFIGHTER_LAN_IP=192.0.2.1 scripts/dev/lan-cert "$1/tls" >/dev/null
+}
+
+# curl inside the container: prints status, then lower-cased headers.
+lan_get() {
+  path="$1"
+  shift
+  docker exec "${lan_container}" curl -sk -o /dev/null -D - "$@" "https://127.0.0.1:8443${path}" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]*$//'
+}
+
+lan_body() {
+  docker exec "${lan_container}" curl -sk "https://127.0.0.1:8443$1"
+}
+
+# $1: path, $2: the exact body it must serve.
+body_is() {
+  body="$(lan_body "$1")" || return 1
+  [ "${body}" = "$2" ] || {
+    printf '%s served: %s\n' "$1" "${body}"
+    return 1
+  }
+}
+
+# $1: response, $2: a header line it must contain exactly.
+has_header() {
+  printf '%s\n' "$1" | grep -qxF "$2" || {
+    printf 'missing header "%s" in:\n%s\n' "$2" "$1"
+    return 1
+  }
+}
+
+lan_assertions() {
+  # The container runs as the invoking user, on a read-only root.
+  inside="$(docker exec "${lan_container}" id -u)" || return 1
+  me="$(id -u)" || return 1
+  [ "${inside}" = "${me}" ] || return 1
+  ! docker exec "${lan_container}" touch /etc/nginx/x 2>/dev/null || return 1
+
+  r="$(lan_get /new/game/index.wasm)"
+  has_header "${r}" 'http/2 200' || return 1
+  has_header "${r}" 'content-type: application/wasm' || return 1
+  printf '%s\n' "${r}" | grep -q "^content-security-policy: .*'wasm-unsafe-eval'" || return 1
+  has_header "${r}" 'cache-control: no-cache' || return 1
+  body_is /new/game/ '<!DOCTYPE html><title>godot game</title>' || return 1
+  r="$(lan_get /new/game/index.pck)"
+  has_header "${r}" 'content-type: application/octet-stream' || return 1
+
+  r="$(lan_get /current/Build/WebGL.wasm)"
+  has_header "${r}" 'content-type: application/wasm' || return 1
+  has_header "${r}" 'cache-control: public, max-age=86400' || return 1
+  body_is /current/ '<!DOCTYPE html><title>legacy</title>' || return 1
+
+  # The Marketing Site keeps the strict CSP: no inline script, no wasm.
+  r="$(lan_get /new/)"
+  has_header "${r}" 'content-type: text/html; charset=utf-8' || return 1
+  csp="$(printf '%s\n' "${r}" | sed -n 's/^content-security-policy: //p')"
+  case "${csp}" in
+  *"frame-ancestors 'none'"*) ;;
+  *) return 1 ;;
+  esac
+  case "${csp}" in
+  *unsafe* | "") return 1 ;;
+  *) ;;
+  esac
+  body_is /new/ '<!DOCTYPE html><title>marketing</title>' || return 1
+  body_is / '<!DOCTYPE html><title>index</title>' || return 1
+
+  # Every response carries the Production security headers, and no HSTS.
+  r="$(lan_get /)"
+  has_header "${r}" 'x-content-type-options: nosniff' || return 1
+  has_header "${r}" 'x-frame-options: deny' || return 1
+  has_header "${r}" 'referrer-policy: strict-origin-when-cross-origin' || return 1
+  has_header "${r}" 'permissions-policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()' || return 1
+  has_header "${r}" 'cross-origin-opener-policy: same-origin' || return 1
+  has_header "${r}" 'server: nginx' || return 1
+  ! printf '%s\n' "${r}" | grep -q '^strict-transport-security:' || return 1
+
+  # gzip for text and wasm.
+  r="$(lan_get /new/game/index.js -H 'Accept-Encoding: gzip')"
+  has_header "${r}" 'content-encoding: gzip' || return 1
+  r="$(lan_get /new/game/index.wasm -H 'Accept-Encoding: gzip')"
+  has_header "${r}" 'content-encoding: gzip' || return 1
+
+  # Redirects keep the client's port: relative directory slashes, and plain
+  # HTTP to the HTTPS port goes to HTTPS.
+  r="$(lan_get /new/game)"
+  has_header "${r}" 'location: /new/game/' || return 1
+  r="$(docker exec "${lan_container}" curl -s -o /dev/null -D - -H 'Host: 192.0.2.1:8471' http://127.0.0.1:8443/new/ | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]*$//')"
+  has_header "${r}" 'location: https://192.0.2.1:8471/new/' || return 1
+
+  # No dotfiles, no symlinks out of the tree, no listings, no missing pages.
+  for path in /new/.env /new/passwd /current/Build/ /nope; do
+    r="$(lan_get "${path}")"
+    case "${r}" in
+    "http/2 200"*)
+      echo "served ${path}"
+      return 1
+      ;;
+    *) ;;
+    esac
+  done
+}
+
+test_lan_nginx_routes_and_mime() {
+  rc=0
+  why="$(scripts/dev/lan doctor 2>&1 >/dev/null)" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    printf 'this test needs Docker: %s\n' "${why}"
+    return 1
+  fi
+  d="$(mktemp -d)"
+  lan_fixture "${d}" || return 1
+  lan_container="mf-lan-test-$$"
+  COMPOSE_PROJECT_NAME="mf-lan-test-$$"
+  MECHAFIGHTER_LAN_OUT="${d}/root"
+  MECHAFIGHTER_LAN_TLS="${d}/tls"
+  export COMPOSE_PROJECT_NAME MECHAFIGHTER_LAN_OUT MECHAFIGHTER_LAN_TLS
+  # `compose run` publishes no ports: nothing on the host is bound.
+  scripts/dev/lan compose --progress quiet run --detach --name "${lan_container}" --no-deps lan >/dev/null || return 1
+  ready=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if docker exec "${lan_container}" curl -fsk -o /dev/null https://127.0.0.1:8443/healthz 2>/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  rc=0
+  if [ -n "${ready}" ]; then
+    lan_assertions || rc=1
+  else
+    echo "nginx never became ready"
+    docker logs "${lan_container}" 2>&1 | tail -n 20
+    rc=1
+  fi
+  docker rm -f "${lan_container}" >/dev/null 2>&1 || true
+  scripts/dev/lan compose --progress quiet down --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "${d}"
+  return "${rc}"
+}

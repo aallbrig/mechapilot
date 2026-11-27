@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=schemas/compose-spec.schema.json
+# The LAN preview (#77): nginx serves build/lan/www/ over HTTPS on localhost and
+# the machine's LAN IP, so phones on the same network get a secure context.
+# Run it through `task lan:up` / `task lan:down` (scripts/dev/lan), which sets
+# every variable below; compose refuses to start without them.
+name: mechafighter-lan
+
+services:
+  lan:
+    # Pinned by version and by the multi-platform index digest.
+    image: nginx:1.31.10-alpine@sha256:7fc0fb4af7bf006aeb31aea88069976060f8f0a0a86b667126742cc17f4e31ae
+    # Run nginx itself: the image's entrypoint scripts would try to edit the
+    # (read-only) config.
+    entrypoint: ["nginx", "-c", "/etc/nginx/lan/nginx.conf", "-g", "daemon off;"]
+    user: "${MECHAFIGHTER_LAN_UID:?run through scripts/dev/lan}:${MECHAFIGHTER_LAN_GID:?run through scripts/dev/lan}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # Published only on loopback and the LAN address, never on every interface.
+    ports:
+      - "127.0.0.1:${MECHAFIGHTER_LAN_PORT:?run through scripts/dev/lan}:8443"
+      - "${MECHAFIGHTER_LAN_IP:?run through scripts/dev/lan}:${MECHAFIGHTER_LAN_PORT:?run through scripts/dev/lan}:8443"
+    volumes:
+      - type: bind
+        source: ./docker/lan
+        target: /etc/nginx/lan
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MECHAFIGHTER_LAN_TLS:?run through scripts/dev/lan}"
+        target: /etc/nginx/tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MECHAFIGHTER_LAN_OUT:?run through scripts/dev/lan}"
+        target: /srv/lan
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "-o", "/dev/null", "https://127.0.0.1:8443/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+      start_interval: 1s
+    restart: "no"

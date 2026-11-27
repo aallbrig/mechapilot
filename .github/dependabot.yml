@@ -11,3 +11,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # The LAN preview's nginx image (compose.yaml): version tag and digest.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

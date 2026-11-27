@@ -21,12 +21,6 @@ site/resources/
 *.pem
 *.key
 
-# Project: legacy docker static site output
-docker/nginx/webgl/Build
-docker/nginx/webgl/StreamingAssets
-docker/nginx/webgl/TemplateData
-docker/nginx/webgl/index.html
-
 # JetBrains (Rider, GoLand, IntelliJ, ...): ignore all project metadata
 .idea/
 *.iml

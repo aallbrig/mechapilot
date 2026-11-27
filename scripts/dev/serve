@@ -1,16 +1,19 @@
 #!/bin/sh
 # Serve whatever part of local dev exists, waiting for parts that don't yet.
 #
-# Usage: scripts/dev/serve game|site
+# Usage: scripts/dev/serve game|site|lan
 #   game  `task serve` once it is defined (#17); before that, build/web/ over
 #         python3's static server on MECHAFIGHTER_GAME_PORT (default 8060)
 #   site  `hugo server` on site/ (#30) on MECHAFIGHTER_SITE_PORT (default 1313)
+#   lan   the HTTPS LAN preview (`scripts/dev/lan up --foreground`, #77) once
+#         Docker is usable; until then it says why and waits
 #
 # SERVE_ONCE=1 reports what it would run (or what is missing) and exits 0
 # instead of serving or waiting, and DEV_REPO_ROOT overrides the repo root
 # (tests use these).
 set -eu
 
+dev_dir="$(cd "$(dirname "$0")" && pwd -P)"
 repo_root="${DEV_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd -P)}"
 cd "${repo_root}"
 game_port="${MECHAFIGHTER_GAME_PORT:-8060}"
@@ -34,6 +37,18 @@ probe_game() {
   fi
 }
 
+probe_lan() {
+  ready=""
+  missing=""
+  rc=0
+  why="$("${dev_dir}/lan" doctor 2>&1 >/dev/null)" || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    ready=lan
+  else
+    missing="${why#lan: }"
+  fi
+}
+
 probe_site() {
   ready=""
   missing=""
@@ -48,9 +63,9 @@ probe_site() {
 
 part="${1:-}"
 case "${part}" in
-  game | site) ;;
+  game | site | lan) ;;
   *)
-    printf 'usage: %s game|site\n' "$0" >&2
+    printf 'usage: %s game|site|lan\n' "$0" >&2
     exit 64
     ;;
 esac
@@ -65,6 +80,7 @@ while :; do
       task) exec task serve ;;
       python) exec python3 -m http.server --bind 127.0.0.1 --directory build/web "${game_port}" ;;
       hugo) exec hugo server --source site --bind 127.0.0.1 --port "${site_port}" ;;
+      lan) exec "${dev_dir}/lan" up --foreground ;;
       *) exit 1 ;;
     esac
   fi

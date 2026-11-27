@@ -176,3 +176,14 @@ test_recorded_evidence_with_any_failure_fails() {
   f="$(write_body "## Acceptance criteria" "- [ ] x ${bt}check:forbidden-paths${bt}")"
   ! ACCEPTANCE_EVIDENCE="${e}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0
 }
+
+# A prover that reads stdin (docker compose run does) must not swallow the
+# criteria after it: the failing second criterion must still be judged.
+test_prover_reading_stdin_cannot_hide_later_criteria() {
+  d="$(mktemp -d)"
+  printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' >"${d}/task"
+  chmod +x "${d}/task"
+  f="$(write_body "## Acceptance criteria" "- [ ] a ${bt}task:lint${bt}" "- [ ] b ${bt}test:does_not_exist${bt}")"
+  out="$(PATH="${d}:${PATH}" VERIFY_ACCEPTANCE_BODY_FILE="${f}" scripts/verify-acceptance 0 "$(mktemp -d)")" && return 1
+  printf "%s\n" "${out}" | grep -q "1/2 criteria proven"
+}

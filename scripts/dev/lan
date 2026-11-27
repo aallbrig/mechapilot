@@ -1,0 +1,242 @@
+#!/bin/sh
+# The LAN preview (#77): nginx in Docker Compose (compose.yaml) serves, over
+# HTTPS on localhost and this machine's LAN IP:
+#   /           docker/lan/index.html
+#   /current/   the legacy Unity WebGL site, as GitHub Pages serves it today
+#   /new/       the Marketing Site, built with baseURL /new/
+#   /new/game/  the Godot web export (task godot:export:web), or a placeholder
+#
+# Usage: scripts/dev/lan build            assemble <out>/www (atomically replaced)
+#        scripts/dev/lan up [--foreground] build, make or reuse the cert, start nginx
+#        scripts/dev/lan down             stop and remove the container
+#        scripts/dev/lan url              print the preview URLs
+#        scripts/dev/lan doctor           exit 0 if Docker is usable, else 69 and why
+#        scripts/dev/lan compose <args>   docker compose with this script's settings
+#
+# Environment:
+#   MECHAFIGHTER_LAN_PORT  host port (default 8471)
+#   MECHAFIGHTER_LAN_IP    LAN address (default: detected by scripts/dev/lan-cert ip)
+#   MECHAFIGHTER_LAN_OUT   assembled tree (default build/lan; served from <out>/www)
+#   MECHAFIGHTER_LAN_TLS   certificate directory (default build/lan-tls)
+#   MECHAFIGHTER_LAN_GAME  auto (default): the Godot export when the task exists,
+#                          else the placeholder; "placeholder"; or a directory
+#                          holding an existing web export (index.html at its top)
+#   COMPOSE_PROJECT_NAME   compose project (default mechafighter-lan, from compose.yaml)
+set -eu
+LC_ALL=C
+export LC_ALL
+# A hook or another tool may export these; every git call here means this repo.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
+port="${MECHAFIGHTER_LAN_PORT:-8471}"
+out="${MECHAFIGHTER_LAN_OUT:-${repo_root}/build/lan}"
+tls="${MECHAFIGHTER_LAN_TLS:-${repo_root}/build/lan-tls}"
+game="${MECHAFIGHTER_LAN_GAME:-auto}"
+
+# The legacy site: GitHub Pages serves branch github-pages, folder /docs, and
+# the playable page is docs/WebGL/. Pinned to the branch's last deploy (2022-12-02),
+# so /current/ never changes unless this line does.
+legacy_commit=b2f5e2a8c9e87e9fb121368d627f4adddec41b6a
+legacy_path=docs/WebGL
+
+die() {
+  printf 'lan: %s\n' "$*" >&2
+  exit 1
+}
+
+absolute() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)
+      here="$(pwd -P)"
+      printf "%s/%s\n" "${here}" "$1"
+      ;;
+  esac
+}
+out="$(absolute "${out}")"
+tls="$(absolute "${tls}")"
+
+case "${port}" in
+  "" | *[!0-9]*) die "MECHAFIGHTER_LAN_PORT must be a port number, got: ${port}" ;;
+  *) ;;
+esac
+[ "${port}" -ge 1024 ] && [ "${port}" -le 65535 ] || die "MECHAFIGHTER_LAN_PORT must be 1024-65535, got: ${port}"
+
+# Sets docker_problem to why Docker can't run the preview, or to "".
+probe_docker() {
+  docker_problem=""
+  if ! command -v docker >/dev/null 2>&1; then
+    docker_problem="docker is not installed; the LAN preview needs Docker (Docker Desktop on macOS, Docker Engine with the compose plugin on Linux)"
+  elif ! docker info >/dev/null 2>&1; then
+    docker_problem="docker is installed but its daemon is not reachable (start Docker Desktop, or the docker service)"
+  elif ! docker compose version >/dev/null 2>&1; then
+    docker_problem="docker compose is not available (install the Docker Compose v2 plugin)"
+  fi
+}
+
+require_docker() {
+  probe_docker
+  [ -z "${docker_problem}" ] || die "${docker_problem}"
+}
+
+# Sets ip to the LAN address (scripts/dev/lan-cert ip), or dies.
+lan_ip() {
+  ip="$("${repo_root}/scripts/dev/lan-cert" ip)" || die "set MECHAFIGHTER_LAN_IP to this machine's LAN address"
+}
+
+compose_env() {
+  COMPOSE_FILE="${repo_root}/compose.yaml" # the project directory is its directory
+  MECHAFIGHTER_LAN_UID="$(id -u)"
+  MECHAFIGHTER_LAN_GID="$(id -g)"
+  MECHAFIGHTER_LAN_PORT="${port}"
+  MECHAFIGHTER_LAN_IP="${ip}"
+  MECHAFIGHTER_LAN_OUT="${out}"
+  MECHAFIGHTER_LAN_TLS="${tls}"
+  export MECHAFIGHTER_LAN_UID MECHAFIGHTER_LAN_GID MECHAFIGHTER_LAN_PORT MECHAFIGHTER_LAN_IP \
+    MECHAFIGHTER_LAN_OUT MECHAFIGHTER_LAN_TLS COMPOSE_FILE
+}
+
+print_urls() {
+  printf 'LAN preview (self-signed certificate: accept the warning once per device):\n'
+  for path in "" current/ new/ new/game/; do
+    printf '  https://%s:%s/%s\n' "${ip}" "${port}" "${path}"
+  done
+  printf '  https://localhost:%s/ (this machine only)\n' "${port}"
+}
+
+# Prints "yes" if Taskfile.yml defines task $1.
+task_defined() {
+  tasks="$(cd "${repo_root}" && task --list-all --json 2>/dev/null)" || tasks="{}"
+  printf '%s\n' "${tasks}" | jq -r --arg name "$1" 'any(.tasks[]?; .name == $name)' 2>/dev/null || echo false
+}
+
+# Copies the game into $1 (an empty directory).
+assemble_game() {
+  dest="$1"
+  src=""
+  case "${game}" in
+    placeholder) ;;
+    auto)
+      defined="$(task_defined godot:export:web)"
+      if [ "${defined}" = true ]; then
+        printf 'lan: /new/game/: exporting with task godot:export:web\n'
+        (cd "${repo_root}" && task godot:export:web) || die "task godot:export:web failed"
+        src="${repo_root}/build/web"
+      fi
+      ;;
+    *) src="$(absolute "${game}")" ;;
+  esac
+  if [ -z "${src}" ]; then
+    printf 'lan: /new/game/: a placeholder (no task godot:export:web yet)\n'
+    cp "${repo_root}/docker/lan/game-placeholder.html" "${dest}/index.html"
+    return 0
+  fi
+  [ -d "${src}" ] && [ ! -L "${src}" ] || die "the game export is not a directory: ${src}"
+  [ -f "${src}/index.html" ] || die "the game export has no index.html: ${src}"
+  printf 'lan: /new/game/: the web export in %s\n' "${src}"
+  cp -R "${src}/." "${dest}/"
+}
+
+build() {
+  [ ! -L "${out}" ] || die "refusing a symlinked output directory: ${out}"
+  mkdir -p "${out}"
+  stage="$(mktemp -d "${out}/.stage.XXXXXX")"
+  trap 'rm -rf "${stage}"' EXIT
+  www="${stage}/www"
+  mkdir -p "${www}/current" "${www}/new"
+
+  # /current/: straight from git objects, so nothing is checked out or committed.
+  if ! git -C "${repo_root}" cat-file -e "${legacy_commit}^{commit}" 2>/dev/null; then
+    printf 'lan: fetching the legacy site (%s) from origin\n' "${legacy_commit}"
+    git -C "${repo_root}" fetch --quiet --no-tags origin "${legacy_commit}" ||
+      die "could not fetch legacy commit ${legacy_commit} (git fetch origin github-pages)"
+  fi
+  git -C "${repo_root}" archive --format=tar "${legacy_commit}:${legacy_path}" | tar -x -f - -C "${www}/current"
+  printf 'lan: /current/: %s:%s\n' "${legacy_commit}" "${legacy_path}"
+
+  # /new/: the Marketing Site in its QA settings (noindex), rooted at /new/.
+  year="$(git -C "${repo_root}" log -1 --format=%cd --date=format:%Y)"
+  HUGO_PARAMS_COPYRIGHTYEAR="${year}" hugo build --quiet --source "${repo_root}/site" --environment qa \
+    --baseURL /new/ --destination "${www}/new" --panicOnWarning --printPathWarnings ||
+    die "hugo could not build the Marketing Site"
+  printf 'lan: /new/: the Marketing Site (hugo, baseURL /new/)\n'
+
+  [ ! -e "${www}/new/game" ] || die "the Marketing Site build already has a game/ directory"
+  mkdir "${www}/new/game"
+  assemble_game "${www}/new/game"
+  cp "${repo_root}/docker/lan/index.html" "${www}/index.html"
+
+  for page in index.html current/index.html new/index.html new/game/index.html; do
+    [ -f "${www}/${page}" ] || die "the assembled tree has no ${page}"
+  done
+  links="$(find "${www}" -type l | head -n 5)"
+  [ -z "${links}" ] || die "the assembled tree contains symlinks: ${links}"
+
+  rm -rf "${out}/www"
+  mv "${www}" "${out}/www"
+  rm -rf "${stage}"
+  trap - EXIT
+  printf 'lan: assembled %s/www\n' "${out}"
+}
+
+cmd="${1:-}"
+[ "$#" -eq 0 ] || shift
+case "${cmd}" in
+  build) build ;;
+  up)
+    foreground=""
+    case "${1:-}" in
+      --foreground) foreground=1 ;;
+      "") ;;
+      *) die "usage: lan up [--foreground]" ;;
+    esac
+    require_docker
+    lan_ip
+    case "${ip}" in
+      127.*) die "MECHAFIGHTER_LAN_IP must be a LAN address, not loopback (localhost is always published)" ;;
+      *) ;;
+    esac
+    build
+    "${repo_root}/scripts/dev/lan-cert" "${tls}"
+    compose_env
+    if [ -n "${foreground}" ]; then
+      print_urls
+      exec docker compose up --force-recreate --remove-orphans --abort-on-container-exit
+    fi
+    if ! docker compose up --detach --wait --force-recreate --remove-orphans; then
+      docker compose logs --no-color --tail 20 >&2 || true
+      die "nginx did not start; is port ${port} free on 127.0.0.1 and ${ip}? (MECHAFIGHTER_LAN_PORT picks another)"
+    fi
+    print_urls
+    ;;
+  down)
+    require_docker
+    ip="${MECHAFIGHTER_LAN_IP:-127.0.0.1}" # only interpolated; down publishes nothing
+    compose_env
+    docker compose down --remove-orphans
+    ;;
+  url)
+    lan_ip
+    print_urls
+    ;;
+  doctor)
+    probe_docker
+    if [ -n "${docker_problem}" ]; then
+      printf 'lan: %s\n' "${docker_problem}" >&2
+      exit 69
+    fi
+    printf 'lan: docker is ready\n'
+    ;;
+  compose)
+    require_docker
+    ip="${MECHAFIGHTER_LAN_IP:-127.0.0.1}"
+    compose_env
+    docker compose "$@"
+    ;;
+  *)
+    printf 'usage: %s build|up [--foreground]|down|url|doctor|compose <args>\n' "$0" >&2
+    exit 64
+    ;;
+esac

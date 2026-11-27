@@ -167,6 +167,8 @@ tasks:
       - check-jsonschema --schemafile schemas/web-manifest.schema.json site/static/site.webmanifest
       - check-jsonschema --check-metaschema schemas/level.schema.json
       - check-jsonschema --schemafile schemas/level.schema.json godot/levels/*.json
+      # Vendored: https://raw.githubusercontent.com/compose-spec/compose-spec/6b3a2a93e77c30ded1aa8264307e74d1208a6eae/schema/compose-spec.json
+      - check-jsonschema --schemafile schemas/compose-spec.schema.json compose.yaml
 
   lint:gd:
     desc: gdlint and gdformat --check on all GDScript
@@ -188,6 +190,7 @@ tasks:
       - scripts/checks/no-symlinks
       - scripts/checks/agent-loop-skill
       - scripts/checks/agent-loop-skill-commands
+      - scripts/checks/nginx-config
       - scripts/checks/threat-models
       - scripts/checks/workflow-permissions
       - scripts/checks/production-dispatch-only
@@ -329,6 +332,7 @@ tasks:
       - task: site:build
       - scripts/site-no-overrides
       - npx --no-install html-validate --max-warnings 0 "build/site/**/*.html"
+      - npx --no-install html-validate --max-warnings 0 docker/lan/index.html docker/lan/game-placeholder.html
 
   site:validate:
     desc: Validate every built page with html-validate, then load each one in the pinned Chrome (no script, no third-party requests, no console output)
@@ -372,6 +376,30 @@ tasks:
     desc: Preview the Marketing Site locally with live reload
     cmds:
       - hugo server --source site
+
+  # ---- LAN preview (#77): nginx in Docker Compose (compose.yaml) over HTTPS ----
+  # /current/ (legacy site), /new/ (Marketing Site) and /new/game/ (Godot web
+  # export or a placeholder). MECHAFIGHTER_LAN_PORT picks the port (default 8471).
+
+  lan:build:
+    desc: Assemble the LAN preview tree in build/lan/www (legacy site, Marketing Site at /new/, game at /new/game/)
+    cmds:
+      - scripts/dev/lan build
+
+  lan:up:
+    desc: Build the LAN preview, make or reuse its self-signed cert, start nginx and print the HTTPS LAN URLs (needs Docker)
+    cmds:
+      - scripts/dev/lan up
+
+  lan:down:
+    desc: Stop the LAN preview (needs Docker)
+    cmds:
+      - scripts/dev/lan down
+
+  lan:url:
+    desc: Print the LAN preview's HTTPS URLs
+    cmds:
+      - scripts/dev/lan url
 
   website:eval:
     desc: "Measure one page and score it (usage: task website:eval -- <site-dir | url>); remote URLs are for humans and the website-evaluation skill, never CI"
