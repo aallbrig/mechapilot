@@ -64,6 +64,12 @@ func setup(
 
 
 func _physics_process(delta: float) -> void:
+	advance(delta)
+
+
+## Advance `delta` seconds if the Game State lets the field run (in play, not
+## paused). Whoever drives the field instead of the engine calls this.
+func advance(delta: float) -> void:
 	if GameState.is_play(_phase):
 		step(delta)
 

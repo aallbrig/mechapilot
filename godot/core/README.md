@@ -33,6 +33,8 @@ Payload value types live in `types/`: `GameState.Phase`, `DestroyCause.Cause`, `
 
 `main.gd` constructs the rules on `Events`, restores the stores (`Settings`, `Scoreboard`, `IntelCodex`, `TutorialProgress`), calls `GameStateMachine.boot()`, and on every physics step (60 Hz) ticks `RunLedger`, then `LevelProgression`, then `SpawnDirector`, then `TutorialCoach`. Nothing ticks while Paused.
 
+The fight is `game/run/RunDirector` (in `main.tscn`): `main.gd` hands it the stage's mech, shot pool and camera. Each physics step it advances the `EnemyField`, then the `BossArena`, then runs every live player shot past the boss and the enemies (`ShotReferee`); it also owns the off-screen indicators. Enemies and bosses hit the mech through `PlayerTarget`, so `CombatTarget.strike()` is the one place `player_hit` is announced.
+
 ## Events
 
 Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<channel>.announce_<event>(...)`. `scripts/checks/godot-architecture` rejects any other use of a Game Event outside `autoload/events.gd`.
@@ -73,8 +75,8 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 
 | Event | Payload | Announced by | Heard by |
 |---|---|---|---|
-| `player_fired` | `origin, direction: Vector3` | player mech (*reported*) | muzzle juice, SFX; `RunLedger` (accuracy) |
-| `player_hit` | `source: DamageSource.Source, position: Vector3, attack_damage: int` (boss attacks only) | player mech (*reported*) | `RunLedger` |
+| `player_fired` | `origin, direction: Vector3` | player mech (*reported*, `PlayerBusLink`) | muzzle juice, SFX; `RunLedger` (accuracy) |
+| `player_hit` | `source: DamageSource.Source, position: Vector3, attack_damage: int` (boss attacks only) | `CombatTarget.strike()` only (*reported*, through `PlayerTarget`: once per hit, refused while the mech's window is open) | `RunLedger` |
 | `armor_changed` | `armor, max_armor, delta: int` | `RunLedger` | HUD armor bar, hit flash, vignette, shake, rumble |
 | `invulnerability_started` | `duration: float` | `RunLedger` | player mech (blink) |
 | `invulnerability_ended` | | `RunLedger` | player mech |
@@ -84,7 +86,7 @@ Connect with `Events.<channel>.<event>.connect(...)`; emit only with `Events.<ch
 | `bonus_life_awarded` | `lives: int` | `RunLedger` | "1UP" juice, SFX |
 | `player_respawned` | | `LevelProgression` (after `RunRules.RESPAWN_DELAY`) | player mech (reset); `SpawnDirector` (resumes) |
 | `repair_kit_dropped` | `position: Vector3` | `SpawnDirector` | Repair Kit spawner, tutorial |
-| `repair_collected` | `position: Vector3` | Repair Kit (*reported*) | `RunLedger` (+30 Armor), juice; `TutorialCoach` |
+| `repair_collected` | `position: Vector3` | Repair Kit (*reported*, `PlayerBusLink`) | `RunLedger` (+30 Armor), juice; `TutorialCoach` |
 | `player_moved` | | player mech (*reported*: the pilot steered; once per Skirmish is enough) | `TutorialCoach` |
 | `shot_missed` | `position: Vector3` | player shot (*reported*: it expired without a hit) | `TutorialCoach` |
 

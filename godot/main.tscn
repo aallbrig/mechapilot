@@ -7,12 +7,16 @@
 [ext_resource type="Script" path="res://game/stage/flight_stage.gd" id="5_stage"]
 [ext_resource type="Script" path="res://feedback/mech_feedback.gd" id="6_mechfx"]
 [ext_resource type="Script" path="res://game/input/touch_controls.gd" id="7_touch"]
+[ext_resource type="Script" path="res://game/run/run_director.gd" id="8_run"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_main")
 
 [node name="FlightStage" type="Node3D" parent="."]
 script = ExtResource("5_stage")
+
+[node name="Run" type="Node3D" parent="."]
+script = ExtResource("8_run")
 
 [node name="MechFeedback" type="Node3D" parent="."]
 script = ExtResource("6_mechfx")

@@ -2,10 +2,11 @@ extends Node
 ## The composition root: the only script that knows the concrete classes. It
 ## builds the core/ rules on the Events bus, binds the juice and audio
 ## (FeedbackRig) to the bus before the stores restore, so the restored Settings
-## reach it, connects the camera juice to the camera rig, hands the player
-## mech's mounts and motion to its feedback, attaches the touch controls (shown
-## only on a touch screen) to the player's input, boots the Game State machine
-## and ticks the rules on the fixed physics step.
+## reach it, connects the camera juice to the camera rig, hands the stage's
+## mech, shots and camera to the fight (game/run), hands the player mech's
+## mounts and motion to its feedback, attaches the touch controls (shown only on
+## a touch screen) to the player's input, boots the Game State machine and ticks
+## the rules on the fixed physics step.
 ## The screens (ui/) and the Title's attract mode (game/attract) are composed in
 ## main.tscn and hear only the Events bus; every UI sound plays through the
 ## FeedbackRig (flow.ui_cue_requested).
@@ -25,6 +26,7 @@ var _coach: TutorialCoach
 
 @onready var _ui: UiRoot = $Ui/UiRoot
 @onready var _stage: FlightStage = $FlightStage
+@onready var _run: RunDirector = $Run
 @onready var _mech_feedback: MechFeedback = $MechFeedback
 @onready var _touch: TouchControls = $TouchControls
 @onready var _feedback: FeedbackRig = $Feedback
@@ -58,6 +60,7 @@ func _ready() -> void:
 	_scoreboard.restore()
 	_intel.restore()
 	_tutorial.restore()
+	_run.setup(Events, rng, levels, _stage.player(), _stage.shots(), _stage.camera_rig().camera())
 	_wire_mech_feedback()
 	_machine.boot()
 	if _ui.visible_screens() == [&"Boot"]:

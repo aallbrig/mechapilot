@@ -30,7 +30,7 @@ func _target_alive() -> bool:
 	return alive
 
 
-func _absorb(damage: int, _direction: Vector3) -> bool:
+func _absorb(_source: DamageSource.Source, damage: int, _direction: Vector3) -> bool:
 	if invulnerable:
 		return false
 	damage_taken.append(damage)
