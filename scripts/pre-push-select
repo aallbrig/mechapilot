@@ -88,6 +88,9 @@ while IFS= read -r path; do
     *.sh) add lint:sh test:shell ;;
     # Only a new test file gets here (the guard flags changed or deleted
     # tests): run just that file, unless the whole suite is selected anyway.
+    # A name scripts/test-shell would not accept as a file argument runs the
+    # whole shell suite instead.
+    tests/shell/test_*/* | tests/shell/*[!A-Za-z0-9_/]*) add test:shell ;;
     tests/shell/test_*) printf '%s\n' "${path}" >>"${work}/new-tests" ;;
     tests/fixtures/*) add lint:schema test:shell ;;
     docs/*.md | README.md | CREDITS.md | media/* | unity/*) ;;

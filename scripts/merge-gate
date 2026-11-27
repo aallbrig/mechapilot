@@ -34,7 +34,7 @@ repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 git show origin/main:scripts/merge-gate >"${gate}/self" 2>/dev/null || fail "main has no scripts/merge-gate"
 cmp -s "${gate}/self" "$0" || fail "run main's copy of scripts/merge-gate (this file differs from origin/main)"
 
-gh pr view "${pr}" --json headRefOid,state,isDraft,closingIssuesReferences,author,comments,isCrossRepository >"${gate}/pr.json"
+gh pr view "${pr}" --json headRefOid,baseRefName,state,isDraft,closingIssuesReferences,author,comments,isCrossRepository >"${gate}/pr.json"
 head_sha="$(jq -r .headRefOid "${gate}/pr.json")"
 fetched_sha="$(git rev-parse "${ref}")"
 [ "${head_sha}" = "${fetched_sha}" ] || fail "fetched ${fetched_sha} but PR head is ${head_sha}"
@@ -45,6 +45,8 @@ draft="$(jq -r .isDraft "${gate}/pr.json")"
 author="$(jq -r .author.login "${gate}/pr.json")"
 cross="$(jq -r .isCrossRepository "${gate}/pr.json")"
 [ "${cross}" = false ] || fail "PRs from forks are never auto-merged"
+base_ref="$(jq -r .baseRefName "${gate}/pr.json")"
+[ "${base_ref}" = main ] || fail "PR targets ${base_ref}, not main"
 
 # 1. The newest ci check from GitHub Actions on exactly this head commit is
 #    green, and no older one failed (see scripts/ci-verdict). All pages and
@@ -54,7 +56,35 @@ gh api --paginate --slurp \
 ci="$("${gate}/main/scripts/ci-verdict" "${gate}/check-runs.json")"
 [ "${ci}" = success ] || fail "ci on ${head_sha} is ${ci}"
 
-# 2. Acceptance: judged by main's verifier from the ci run's recorded evidence.
+# Evidence comes from the newest ci.yml run on this commit, which must have succeeded.
+run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --limit 1 --json databaseId,conclusion \
+  --jq '.[0] | select(.conclusion == "success") | .databaseId')"
+[ -n "${run_id}" ] || fail "the newest ci.yml run for ${head_sha} did not succeed"
+gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
+rerun="re-run CI so it evaluates the current state: gh run rerun ${run_id}, or push an empty commit"
+tab="$(printf '\t')"
+
+# 2. The base CI tested. A retarget no longer re-runs CI (#66), so evidence
+#    from a run against any other base (say, a branch that carries the
+#    implementation) must not count for main: the recorded base is main, and
+#    its commit is on origin/main.
+base_rec="${gate}/evidence/acceptance-base.tsv"
+[ -f "${base_rec}" ] && [ ! -L "${base_rec}" ] || fail "the ci run recorded no base (older ci.yml?); ${rerun}"
+lines="$(wc -l <"${base_rec}" | tr -d ' ')"
+[ "${lines}" -eq 1 ] || fail "malformed base record in the ci evidence"
+ci_base_ref="$(cut -f 1 "${base_rec}")"
+rc=0
+grep -Ev "^main${tab}[0-9a-f]{40}\$" "${base_rec}" >/dev/null || rc=$?
+case "${rc}" in
+  1) ;;
+  0) fail "the ci run tested against base '${ci_base_ref}', not main; ${rerun}" ;;
+  *) fail "cannot read the base record in the ci evidence" ;;
+esac
+ci_base_sha="$(cut -f 2 "${base_rec}")"
+git merge-base --is-ancestor "${ci_base_sha}" refs/remotes/origin/main 2>/dev/null ||
+  fail "the ci run's base ${ci_base_sha} is not on origin/main; ${rerun}"
+
+# 3. Acceptance: judged by main's verifier from the ci run's recorded evidence.
 # Linked issues must live in this repository (no cross-repo references).
 foreign="$(jq -r --arg url "https://github.com/${repo}/issues/" \
   '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${gate}/pr.json")"
@@ -75,21 +105,15 @@ else
       *) fail "linked issue #${n} is not labelled ready-for-agent" ;;
     esac
   done
-  # Evidence comes from the newest ci.yml run on this commit, which must have succeeded.
-  run_id="$(gh run list --commit "${head_sha}" --workflow ci.yml --limit 1 --json databaseId,conclusion \
-    --jq '.[0] | select(.conclusion == "success") | .databaseId')"
-  [ -n "${run_id}" ] || fail "the newest ci.yml run for ${head_sha} did not succeed"
-  gh run download "${run_id}" --name test-results --dir "${gate}/evidence"
   # CI no longer re-runs on PR-body edits (#66), so the evidence is bound to
   # what CI evaluated: the linked issues and the sha256 of each one's
   # acceptance criteria as CI's verifier parsed them.
-  rerun="re-run CI so it evaluates the current text: gh run rerun ${run_id}, or push an empty commit"
   binding="${gate}/evidence/acceptance-binding.tsv"
   [ -f "${binding}" ] && [ ! -L "${binding}" ] || fail "the ci run recorded no acceptance binding (older ci.yml?); ${rerun}"
-  tab="$(printf '\t')"
-  if grep -Ev "^[1-9][0-9]*${tab}[0-9a-f]{64}\$" "${binding}" >/dev/null; then
-    fail "malformed acceptance binding in the ci evidence"
-  fi
+  rc=0
+  grep -Ev "^[1-9][0-9]*${tab}[0-9a-f]{64}\$" "${binding}" >/dev/null || rc=$?
+  # 1 = every line well-formed; 0 = a malformed line; anything else = grep failed.
+  [ "${rc}" -eq 1 ] || fail "malformed acceptance binding in the ci evidence"
   ci_saw="$(cut -f 1 "${binding}" | sort -u | tr '\n' ' ')"
   links_now="$(printf '%s\n' "${issues}" | sort -u | tr '\n' ' ')"
   [ "${ci_saw}" = "${links_now}" ] ||
@@ -107,7 +131,7 @@ else
   done
 fi
 
-# 3. Verification guard: main's script on the PR diff (git diff only, no checkout).
+# 4. Verification guard: main's script on the PR diff (git diff only, no checkout).
 rc=0
 VERIFICATION_GUARD_BASE=origin/main VERIFICATION_GUARD_HEAD="${ref}" \
   "${gate}/main/scripts/checks/verification-guard" || rc=$?
@@ -117,7 +141,7 @@ case "${rc}" in
   *) fail "verification guard errored (${rc})" ;;
 esac
 
-# 4. Adversarial reviews: owner-authored, bound to the head SHA, distinct reviewers.
+# 5. Adversarial reviews: owner-authored, bound to the head SHA, distinct reviewers.
 counts="$("${gate}/main/scripts/review-verdicts" "${gate}/pr.json" "${head_sha}" "${owner}")"
 passes="${counts% *}"
 blocks="${counts#* }"

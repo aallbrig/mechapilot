@@ -1,10 +1,11 @@
 name: ci
 
 on:
-  # No `edited`: a PR-body edit no longer re-runs CI (it cancelled a third of
-  # all runs). The evidence records the linked issues and a sha256 of each
-  # one's acceptance criteria as evaluated, and scripts/merge-gate refuses if
-  # either changed since; re-run CI to re-evaluate (#66).
+  # No `edited`: a PR-body edit (or a retarget) no longer re-runs CI (it
+  # cancelled a third of all runs). The evidence records the base it tested,
+  # the linked issues and a sha256 of each one's acceptance criteria as
+  # evaluated, and scripts/merge-gate refuses if the base is not main or
+  # anything changed since; re-run CI to re-evaluate (#66).
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -55,7 +56,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # The base this run tested (checkout merges the head into it). A
+          # retarget no longer re-runs CI, so merge-gate refuses evidence
+          # from any base but main (#66). Written first, for every PR.
+          rm -f build/test-results/acceptance-base.tsv
+          printf '%s\t%s\n' "${BASE_REF}" "${BASE_SHA}" >build/test-results/acceptance-base.tsv
           repo_url="https://github.com/${GITHUB_REPOSITORY}/issues/"
           gh pr view "${PR_NUMBER}" --json closingIssuesReferences >"${RUNNER_TEMP}/links.json"
           foreign="$(jq -r --arg url "${repo_url}" '[.closingIssuesReferences[] | select(.url | startswith($url) | not)] | length' "${RUNNER_TEMP}/links.json")"

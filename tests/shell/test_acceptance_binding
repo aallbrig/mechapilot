@@ -159,6 +159,14 @@ test_ci_workflow_does_not_rerun_on_pr_body_edits() {
   step="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .run' "${wf}")"
   printf '%s\n' "${step}" | grep -qF "ACCEPTANCE_BINDING=\"\${binding}\" scripts/verify-acceptance" || return 1
   printf '%s\n' "${step}" | grep -qF "cp \"\${binding}\" build/test-results/acceptance-binding.tsv" || return 1
+  # And the base it tested, from the event, before any early exit.
+  base_ref="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .env.BASE_REF' "${wf}")"
+  [ "${base_ref}" = "\${{ github.event.pull_request.base.ref }}" ] || return 1
+  base_sha="$(yq -r '.jobs.ci.steps[] | select(.name == "Acceptance evidence") | .env.BASE_SHA' "${wf}")"
+  [ "${base_sha}" = "\${{ github.event.pull_request.base.sha }}" ] || return 1
+  record_line="$(printf '%s\n' "${step}" | grep -n 'acceptance-base.tsv$' | tail -n 1 | cut -d: -f1)"
+  first_exit="$(printf '%s\n' "${step}" | grep -n 'exit' | head -n 1 | cut -d: -f1)"
+  [ -n "${record_line}" ] && [ "${record_line}" -lt "${first_exit}" ]
 }
 
 # ---- scripts/merge-gate, end to end with a local origin and a fake gh ----
@@ -184,6 +192,7 @@ gate_fixture() {
   git -C "${w}" commit -q -m main
   git -C "${w}" remote add origin "${d}/origin.git"
   git -C "${w}" push -q origin main
+  main_sha="$(git -C "${w}" rev-parse HEAD)"
   git -C "${w}" checkout -q -b feature
   printf 'feature\n' >"${w}/feature.txt"
   git -C "${w}" add feature.txt
@@ -197,6 +206,9 @@ gate_fixture() {
   printf '## Acceptance criteria\n%s\n' "${crit}" >"${s}/issue-7.md"
   printf '## Acceptance criteria\n%s\n' "${crit}" >"${s}/issue-8.md"
   printf 'check\tforbidden-paths\tpass\n' >"${s}/evidence/acceptance.tsv"
+  # The base CI tested: main, at a commit on origin/main.
+  printf 'main\t%s\n' "${main_sha}" >"${s}/evidence/acceptance-base.tsv"
+  live_base=main
   # CI's binding, recorded by the real verifier from issue 7's body.
   ACCEPTANCE_EVIDENCE="${s}/evidence/acceptance.tsv" ACCEPTANCE_BINDING="${s}/evidence/acceptance-binding.tsv" \
     VERIFY_ACCEPTANCE_BODY_FILE="${s}/issue-7.md" scripts/verify-acceptance 7 "${s}/evidence" >/dev/null
@@ -230,6 +242,7 @@ case "$1" in
         done
         mkdir -p "${dir}"
         cp -R "${s}/evidence/." "${dir}/"
+        if [ -f "${s}/unreadable" ]; then chmod 000 "${dir}/acceptance-binding.tsv"; fi
         ;;
       *) exit 9 ;;
     esac
@@ -246,8 +259,8 @@ links() {
   for n in "$@"; do
     refs="${refs}${refs:+,}{\"number\":${n},\"url\":\"https://github.com/owner/repo/issues/${n}\"}"
   done
-  printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"isCrossRepository":false,"author":{"login":"someone"},"closingIssuesReferences":[%s],"comments":[{"author":{"login":"owner"},"body":"ok\\nreview-verdict: pass sha=%s reviewer=correctness"}]}\n' \
-    "${head}" "${refs}" "${head}" >"${d}/gh/pr.json"
+  printf '{"headRefOid":"%s","baseRefName":"%s","state":"OPEN","isDraft":false,"isCrossRepository":false,"author":{"login":"someone"},"closingIssuesReferences":[%s],"comments":[{"author":{"login":"owner"},"body":"ok\\nreview-verdict: pass sha=%s reviewer=correctness"}]}\n' \
+    "${head}" "${live_base}" "${refs}" "${head}" >"${d}/gh/pr.json"
 }
 
 run_gate() {
@@ -292,6 +305,49 @@ test_merge_gate_refuses_pr_links_changed_after_ci() {
   grep -q 'BLOCKED: no linked issue' "${d}/out"
 }
 
+test_merge_gate_refuses_ci_evidence_from_a_non_main_base() {
+  gate_fixture
+  base="${d}/gh/evidence/acceptance-base.tsv"
+  # A side branch that carries what main lacks (the implementation, say).
+  git -C "${w}" checkout -q -b side main
+  printf 'impl\n' >"${w}/impl.txt"
+  git -C "${w}" add impl.txt
+  git -C "${w}" commit -q -m impl
+  git -C "${w}" push -q origin side
+  side_sha="$(git -C "${w}" rev-parse HEAD)"
+  git -C "${w}" checkout -q main
+  # CI ran with the PR based on the side branch; it was then retarget to main.
+  printf 'side\t%s\n' "${side_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q "BLOCKED: the ci run tested against base 'side', not main" "${d}/out" || return 1
+  # Recorded as main, but at a commit that is not on origin/main.
+  printf 'main\t%s\n' "${side_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q "BLOCKED: the ci run's base ${side_sha} is not on origin/main" "${d}/out" || return 1
+  grep -q 'gh run rerun 99' "${d}/out" || return 1
+  # A SHA that does not exist here at all.
+  printf 'main\t%040d\n' 0 >"${base}"
+  ! run_gate || return 1
+  grep -q 'is not on origin/main' "${d}/out" || return 1
+  # No base record (a run from an older ci.yml), or a malformed one.
+  rm "${base}"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: the ci run recorded no base' "${d}/out" || return 1
+  printf 'main\t%s\nmain\t%s\n' "${main_sha}" "${main_sha}" >"${base}"
+  ! run_gate || return 1
+  grep -q 'BLOCKED: malformed base record' "${d}/out" || return 1
+  # The evidence is fine but the PR itself now targets another branch.
+  printf 'main\t%s\n' "${main_sha}" >"${base}"
+  live_base=side
+  links 7
+  ! run_gate || return 1
+  grep -q 'BLOCKED: PR targets side, not main' "${d}/out" || return 1
+  # Back to main on both sides: passes.
+  live_base=main
+  links 7
+  run_gate
+}
+
 test_merge_gate_refuses_evidence_without_binding() {
   gate_fixture
   rm "${d}/gh/evidence/acceptance-binding.tsv"
@@ -300,6 +356,12 @@ test_merge_gate_refuses_evidence_without_binding() {
   # A malformed binding is refused too.
   printf '7\tnot-a-hash\n' >"${d}/gh/evidence/acceptance-binding.tsv"
   ! run_gate || return 1
+  grep -q 'BLOCKED: malformed acceptance binding' "${d}/out" || return 1
+  # So is one grep cannot read (exit 2), never taken as well-formed.
+  printf '7\t%064d\n' 0 >"${d}/gh/evidence/acceptance-binding.tsv"
+  : >"${d}/gh/unreadable"
+  ! run_gate || return 1
+  rm "${d}/gh/unreadable"
   grep -q 'BLOCKED: malformed acceptance binding' "${d}/out" || return 1
   # So is a binding that is a symlink.
   printf '7\t%064d\n' 0 >"${d}/real.tsv"

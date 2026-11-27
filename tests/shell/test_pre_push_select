@@ -230,6 +230,28 @@ test_pre_merge_commit_and_ci_run_full_gate() {
   grep -qx 'full=ci:fast' scripts/pre-push-select
 }
 
+test_pre_push_new_test_file_name_not_runnable_falls_back() {
+  select_fixture
+  # test-shell only takes file arguments named tests/shell/test_[A-Za-z0-9_]*;
+  # anything else runs the whole shell suite, never a file run that errors out.
+  commit_file tests/shell/test_with-dash 'test_d() { true; }'
+  selects "checks test:shell" || return 1
+  fresh
+  commit_file tests/shell/test_dir/test_inner 'test_e() { true; }'
+  selects "checks test:shell" || return 1
+  # Next to a runnable new file, the whole suite wins (it covers both).
+  fresh
+  commit_file tests/shell/test_fine 'test_f() { true; }'
+  commit_file tests/shell/test_not.ok 'test_g() { true; }'
+  selects "checks test:shell" || return 1
+  # And every name the selector would pass on, test-shell accepts.
+  fresh
+  commit_file tests/shell/test_Fine_2 'test_h() { true; }'
+  selects "checks shell-test:tests/shell/test_Fine_2" || return 1
+  (cd "${w}" && "${root}/scripts/test-shell" "${d}/one" tests/shell/test_Fine_2) >/dev/null 2>&1 || return 1
+  ! (cd "${w}" && "${root}/scripts/test-shell" "${d}/two" tests/shell/test_with-dash) >/dev/null 2>&1
+}
+
 test_pre_push_runs_only_new_shell_test_files() {
   root="$(pwd)"
   d="$(mktemp -d)"
