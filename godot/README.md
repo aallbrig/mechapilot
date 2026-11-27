@@ -45,8 +45,8 @@ Other editors (VS Code's godot-tools, Neovim) have the same host and port settin
 Architecture (decided in #9; checked by `scripts/checks/godot-architecture`):
 
 - `types/`: shared value types (pure enums and value classes, `RefCounted`), such as `GameState.Phase`. Every layer may use them, so typed bus payloads never fall back to untyped `Dictionary` values.
-- `autoload/events.gd`: the `Events` bus. It holds only typed signals, plus typed `announce_*` methods, which are the only way to emit them.
-- `core/`: pure, deterministic rules (`RefCounted`). They never touch the scene tree, the engine or the host (`Engine`, `OS`, `Input`, `Time`, `ClassDB`, runtime `load()`), and they never use global randomness. They receive `Events` and a `RandomNumberGenerator` by injection, so runs can be replayed.
+- `autoload/events.gd`: the `Events` bus. It holds only typed signals, grouped into channels (`Events.flow`, `.run`, `.player`, `.enemy`, `.boss`, `.profile`), plus typed `announce_*` methods, which are the only way to emit them. Outside the bus a Game Event may only be connected to. [`core/README.md`](core/README.md) lists every event and the public API of the rules.
+- `core/`: pure, deterministic rules (`RefCounted`, directly or through another `core/` class). They never touch the scene tree, the engine or the host (`Engine`, `OS`, `Input`, `Time`, `ClassDB`, runtime `load()`), and they never use global randomness. They receive `Events` and a `RandomNumberGenerator` by injection, so runs can be replayed.
 - `game/` uses `core/`. `ui/` and `feedback/` see only `Events` and `types/`.
 - `main.gd` is the composition root, the only place that constructs core classes.
 - `levels/*.json`: Level data, validated by `/schemas/level.schema.json`.
