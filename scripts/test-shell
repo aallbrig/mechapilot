@@ -59,6 +59,8 @@ if [ -n "${exclude}" ]; then
   esac
 fi
 excluded=" "
+# Tests never see it: one that runs test-shell itself must judge its own probes.
+unset TEST_SHELL_EXCLUDE
 
 total=0
 failed=0

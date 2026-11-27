@@ -89,7 +89,9 @@ test_test_shell_excluded_tests_are_unreported_and_refused_in_ci() {
   # Names built at runtime so this runner doesn't discover them here.
   keep="test_""keep"
   drop="test_""drop"
-  printf '%s() {\n  true\n}\n%s() {\n  true\n}\n' "${keep}" "${drop}" >"${d}/tests/shell/test_probe"
+  # The kept probe fails if the variable leaks into the tests it runs.
+  dollar='$'
+  printf '%s() {\n  [ -z "%s{TEST_SHELL_EXCLUDE:-}" ]\n}\n%s() {\n  true\n}\n' "${keep}" "${dollar}" "${drop}" >"${d}/tests/shell/test_probe"
   out="$(cd "${d}" && env -u CI -u GITHUB_ACTIONS TEST_SHELL_EXCLUDE="${drop}" "${root}/scripts/test-shell" "${d}/out")" || return 1
   printf '%s\n' "${out}" | grep -qx "EXCLUDED  ${drop} (TEST_SHELL_EXCLUDE: not run, not reported)" || return 1
   grep -q 'tests="1" failures="0"' "${d}/out/shell.xml" || return 1
