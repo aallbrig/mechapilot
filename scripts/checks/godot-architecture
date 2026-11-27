@@ -137,7 +137,11 @@ while IFS= read -r f; do
       if grep -Ewn "${impure_words}" "${work}/code" >"${work}/hits"; then
         fail "${f}" "${layer}/ must stay pure and deterministic (no scene tree, engine, host, global RNG or load)" hit
       fi
-      if grep -En "(^|[^.A-Za-z0-9_[:space:]])[[:space:]]*${global_rng_words}([^A-Za-z0-9_]|\$)" "${work}/code" >"${work}/hits"; then
+      # Strip member uses of the injected RNG (`_rng.randf(`, `_rng . seed =`) first,
+      # then any whole-word RNG name left is the global one (`return randf()` too).
+      sed -E "s/\\.[[:space:]]*${global_rng_words}([^A-Za-z0-9_]|\$)/.rng_member\\2/g" "${work}/code" |
+        grep -Ewn "${global_rng_words}" >"${work}/hits" || true
+      if [ -s "${work}/hits" ]; then
         fail "${f}" "${layer}/ must use the injected RandomNumberGenerator, not the global RNG" hit
       fi
       if grep -En 'RandomNumberGenerator[[:space:]]*\.[[:space:]]*new' "${work}/code" >"${work}/hits"; then

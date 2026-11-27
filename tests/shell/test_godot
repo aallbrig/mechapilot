@@ -264,13 +264,14 @@ test_architecture_accepts_bus_connect_and_local_signals() {
 
 test_architecture_accepts_core_injected_rng_methods() {
   arch_project
-  printf 'class_name Dice\nextends RefCounted\n\nvar _rng: RandomNumberGenerator\n\n\nfunc roll() -> float:\n\treturn _rng.randf() + _rng.randf_range(0.0, 1.0) + _rng . randi_range(1, 6)\n' >"${d}/core/dice.gd"
+  printf 'class_name Dice\nextends RefCounted\n\nvar _rng: RandomNumberGenerator\n\n\nfunc roll() -> float:\n\t_rng.seed = 4\n\treturn _rng.randf() + _rng.randf_range(0.0, 1.0) + _rng . randi_range(1, 6)\n' >"${d}/core/dice.gd"
   scripts/checks/godot-architecture "${d}"
 }
 
 test_architecture_rejects_core_global_rng_forms() {
   for line in 'print(randf())' 'var _f: float = randf_range(0.0, 1.0)' '  seed(4)' '_rng.randomize()' \
-    'print([1, 2].pick_random())' 'var a: Array = [1, 2]; a.shuffle()'; do
+    'print([1, 2].pick_random())' 'var a: Array = [1, 2]; a.shuffle()' 'return randf()' \
+    'if randi() > 0: pass' 'var _b: bool = not randf() > 0.5' 'var _r: float = _rng.randf() + randf()'; do
     arch_project
     printf 'class_name Rules\nextends RefCounted\n\nvar _rng: RandomNumberGenerator\n\n\nfunc f() -> void:\n\t%s\n' "${line}" >"${d}/core/rules.gd"
     arch_rejects || return 1
