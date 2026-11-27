@@ -231,7 +231,7 @@ test_pre_merge_commit_and_ci_run_full_gate() {
   [ "${run}" = "task ci" ] || return 1
   # The full gate is a superset of the pre-push fallback.
   ci="$(yq -r '.tasks.ci.cmds[].task' Taskfile.yml | tr '\n' ' ')"
-  [ "${ci}" = "ci:guard:begin ci:fast site e2e:web secrets ci:guard:end " ] || return 1
+  [ "${ci}" = "ci:guard:begin ci:fast site e2e:web pages:assemble secrets ci:guard:end " ] || return 1
   # The pre-push fallback is the gate the hook ran before #66.
   grep -qx 'full=ci:fast' scripts/pre-push-select
 }

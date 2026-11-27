@@ -1,0 +1,123 @@
+#!/bin/sh
+# QA Environment smoke check (#18): the deployed GitHub Pages site serves the
+# Marketing Site at /, the game at /game/, and the game's main pack.
+#
+# Usage: scripts/checks/qa-smoke
+#
+# Checks, over https only:
+#   <qa>/           HTTP 200
+#   <qa>/game/      HTTP 200, with exactly one GODOT_CONFIG naming a plain
+#                   executable and main pack (scripts/pages/lib-pages)
+#   <qa>/game/<pck> HTTP 200 (the configured pack, index.pck by default), and
+#                   exactly as many bytes as the page's fileSizes says, so the
+#                   pack and the page come from the same deploy
+#
+# Environment:
+#   MECHAFIGHTER_QA_URL  the QA Marketing Site URL, ending in /
+#                        (default: this repo's Pages URL)
+#   QA_SMOKE_ATTEMPTS    rounds to try before failing (default 1; the deploy
+#                        workflow allows a few while the Pages CDN catches up)
+#   QA_SMOKE_DELAY       seconds between rounds (default 10)
+# Network access is needed, so `task checks` and CI do not run it; the
+# deploy-qa workflow runs it after every deploy.
+set -eu
+LC_ALL=C
+export LC_ALL
+# shellcheck source=../pages/lib-pages
+. "$(dirname "$0")/../pages/lib-pages"
+
+[ "$#" -eq 0 ] || {
+  printf 'usage: qa-smoke\n' >&2
+  exit 64
+}
+qa="${MECHAFIGHTER_QA_URL:-https://aallbrig.github.io/mechapilot/}"
+attempts="${QA_SMOKE_ATTEMPTS:-1}"
+delay="${QA_SMOKE_DELAY:-10}"
+for v in "${attempts}" "${delay}"; do
+  case "${v}" in
+    "" | *[!0-9]*)
+      printf 'qa-smoke: QA_SMOKE_ATTEMPTS and QA_SMOKE_DELAY must be whole numbers\n' >&2
+      exit 64
+      ;;
+    *) ;;
+  esac
+done
+if [ "${#attempts}" -gt 3 ] || [ "${attempts}" -lt 1 ]; then
+  printf 'qa-smoke: QA_SMOKE_ATTEMPTS must be 1 to 999\n' >&2
+  exit 64
+fi
+case "${qa}" in
+  https://*/) ;;
+  *)
+    printf 'qa-smoke: MECHAFIGHTER_QA_URL must be an https URL ending in /\n' >&2
+    exit 64
+    ;;
+esac
+
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+
+# fetch <url> <out-file>: sets code and size (the HTTP status and body bytes).
+fetch() {
+  out="$(curl --silent --proto '=https' --proto-redir '=https' --location --max-time 30 \
+    --output "$2" --write-out '%{http_code} %{size_download}' "$1" || true)"
+  code="${out%% *}"
+  size="${out#* }"
+  case "${code}" in
+    "" | *[!0-9]*) code="no response" ;;
+    *) ;;
+  esac
+}
+
+# round: one pass over the three URLs; prints PASS/FAIL lines into report.
+round() {
+  ok=yes
+  : >"${work}/report"
+  for path in "" game/; do
+    fetch "${qa}${path}" "${work}/page"
+    if [ "${code}" = 200 ]; then
+      printf 'PASS  %s: HTTP 200\n' "${qa}${path}" >>"${work}/report"
+    else
+      printf 'FAIL  %s: HTTP %s\n' "${qa}${path}" "${code}" >>"${work}/report"
+      ok=no
+    fi
+  done
+  # The last fetch was game/: read its config for the pack's name and size.
+  pck=""
+  if [ "${code}" = 200 ]; then
+    config="$(godot_config "${work}/page")"
+    if [ -n "${config}" ]; then pck="$(godot_files "${config}" | sed -n 4p)"; fi
+  fi
+  if [ -z "${pck}" ]; then
+    printf 'FAIL  %sgame/: no usable GODOT_CONFIG (executable and main pack)\n' "${qa}" >>"${work}/report"
+    ok=no
+    return 0
+  fi
+  want="$(printf '%s\n' "${config}" | jq -r --arg p "${pck}" '.fileSizes[$p] // "unknown"')"
+  fetch "${qa}game/${pck}" "${work}/pck"
+  if [ "${code}" != 200 ]; then
+    printf 'FAIL  %sgame/%s: HTTP %s\n' "${qa}" "${pck}" "${code}" >>"${work}/report"
+    ok=no
+  elif [ "${size}" != "${want}" ]; then
+    printf 'FAIL  %sgame/%s: %s bytes, but the page expects %s\n' "${qa}" "${pck}" "${size}" "${want}" >>"${work}/report"
+    ok=no
+  else
+    printf 'PASS  %sgame/%s: HTTP 200, %s bytes\n' "${qa}" "${pck}" "${size}" >>"${work}/report"
+  fi
+}
+
+i=1
+while :; do
+  round
+  if [ "${ok}" = yes ] || [ "${i}" -ge "${attempts}" ]; then break; fi
+  printf 'qa-smoke: round %s of %s failed; retrying in %ss\n' "${i}" "${attempts}" "${delay}"
+  i=$((i + 1))
+  sleep "${delay}"
+done
+
+cat "${work}/report"
+if [ "${ok}" != yes ]; then
+  printf 'qa-smoke: FAILED\n'
+  exit 1
+fi
+printf 'qa-smoke: ok\n'
