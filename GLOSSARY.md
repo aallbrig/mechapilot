@@ -56,18 +56,6 @@ _Avoid_: bestiary, encyclopedia
 The bounded region of space where play happens; things leaving it are out of play.
 _Avoid_: arena, play area, bounds
 
-**Move Stick**:
-The touch control on the left half of the screen: a virtual stick anchored where the finger touched down. It only moves the mech and never fires.
-_Avoid_: joystick, left stick (that is the gamepad's)
-
-**Aim Stick**:
-The touch control on the right half of the screen. A quick tap fires a Tap Shot; touch-and-hold opens a virtual stick anchored where the finger touched down, which fires along the drag direction, never at the finger.
-_Avoid_: fire button, right stick (that is the gamepad's)
-
-**Tap Shot**:
-One shot fired at the tapped point by a right-half touch shorter than 180 ms that moved less than 12 px.
-_Avoid_: click shot
-
 **Scoreboard**:
 The top 10 past Runs, each recorded with the player's three initials, score, Level reached and time. Local to the player's browser for now.
 _Avoid_: leaderboard (reserved for a future internet-accessible version), high scores
