@@ -81,7 +81,7 @@ func test_shot_kills_drop_repair_kits_and_crashes_do_not() -> void:
 	_h.enter_level(1)
 	_h.target.at = Vector3(0.0, -1000.0, 0.0)
 	var kills: int = 0
-	while kills < 400:
+	while kills < 2000:
 		var enemy: Enemy = _h.order(EnemyKind.Kind.FIGHTER, 0.0, 20.0)
 		if _h.field.resolve_shot(enemy.position, 0.3, Vector3.LEFT):
 			kills += 1
@@ -93,7 +93,8 @@ func test_shot_kills_drop_repair_kits_and_crashes_do_not() -> void:
 		var _crasher: Enemy = _h.order(EnemyKind.Kind.FIGHTER, 0.0, 1.0)
 		_h.field.step(STEP)
 		crashes += 1
-	# About 6% of 400: 24, well inside 8 to 48.
-	var _about_six_percent: GdUnitAssert = assert_int(shot_drops).is_between(8, 48)
+	# 6% of 2000 is 120 (119 with the fixed seed). The band is narrow enough
+	# that a 5% rate (105 drops) or a 7% rate (141) fails.
+	var _about_six_percent: GdUnitAssert = assert_int(shot_drops).is_between(110, 130)
 	var _crashes_drop_none: GdUnitAssert = assert_int(_h.repair_drops).is_equal(shot_drops)
-	var _every_kill_reported: GdUnitAssert = assert_int(_h.destroyed.size()).is_equal(600)
+	var _every_kill_reported: GdUnitAssert = assert_int(_h.destroyed.size()).is_equal(2200)

@@ -5,6 +5,8 @@ extends GdUnitTestSuite
 ## whatever flies out of it.
 
 const STEP: float = FieldHarness.STEP
+## How closely (radians) a lobbed shell must follow the solved arc.
+const ARC_TOLERANCE: float = 0.01
 
 var _h: FieldHarness
 
@@ -17,26 +19,6 @@ func before_test() -> void:
 
 func after_test() -> void:
 	_h.dispose()
-
-
-## Counts each enemy's telegraph and shot signals.
-class FireLog:
-	extends RefCounted
-
-	var telegraphs: Array[float] = []
-	var shots: Array[float] = []
-	var clock: float = 0.0
-	var charged_for: Array[float] = []
-	var _charge_start: float = -1.0
-
-	func on_telegraphed(_enemy: Enemy) -> void:
-		telegraphs.append(clock)
-		_charge_start = clock
-
-	func on_fired(_enemy: Enemy) -> void:
-		shots.append(clock)
-		charged_for.append(clock - _charge_start if _charge_start >= 0.0 else -1.0)
-		_charge_start = -1.0
 
 
 func _watch(enemy: Enemy, record: FireLog) -> void:
@@ -94,12 +76,21 @@ func test_fighter_chases_the_player() -> void:
 	var enemy: Enemy = _h.order(EnemyKind.Kind.FIGHTER, 0.0, 25.0)
 	var start: float = enemy.position.length()
 	_h.advance(1.0)
-	var later_gap: float = enemy.position.length()
-	# The player moves; the Fighter turns after it.
-	_h.target.at = Vector3(0.0, 30.0, 0.0)
+	var closed_to: float = enemy.position.length()
+	# The player jumps 30 units up; the Fighter must turn after it.
+	var moved_to: Vector3 = Vector3(0.0, 30.0, 0.0)
+	_h.target.at = moved_to
+	var gap_at_move: float = enemy.position.distance_to(moved_to)
 	_h.advance(2.0)
-	var _closes_in: GdUnitAssert = assert_float(later_gap).is_less(start - 4.0)
-	var _turns_after: GdUnitAssert = assert_float(enemy.velocity.y).is_greater(0.0)
+	var toward: Vector3 = FiringSolution.aimed(enemy.position, moved_to)
+	var heading: Vector3 = enemy.velocity.normalized()
+	var _closes_in: GdUnitAssert = assert_float(closed_to).is_less(start - 4.0)
+	# Heading within 45 degrees of the new position (a lazy turn stays heading -X).
+	var _turned: GdUnitAssert = assert_float(heading.dot(toward)).is_greater(cos(PI / 4.0))
+	# And it actually closes on the new position.
+	var _closes_again: GdUnitAssert = assert_float(enemy.position.distance_to(moved_to)).is_less(
+		gap_at_move - 5.0
+	)
 
 
 func test_heavy_takes_four_shots() -> void:
@@ -120,26 +111,67 @@ func test_interceptor_keeps_its_distance_and_fires_arcing_shots() -> void:
 	var enemy: Enemy = _h.order(EnemyKind.Kind.INTERCEPTOR, 0.0, 25.0, 1.0)
 	var record: FireLog = FireLog.new()
 	_watch(enemy, record)
-	_advance_logged(6.0, record)
+	var spec: ShotSpec = EnemyProfile.of(EnemyKind.Kind.INTERCEPTOR).shot
+	var launches: int = 0
+	var on_arc: int = 0
+	var lifted: int = 0
+	for _i: int in roundi(20.0 / STEP):
+		_advance_logged(STEP, record)
+		for shell: EnemyShot in _h.field.shots().live_shots():
+			# A shell launched this tick: its flight began on the solved arc.
+			if shell.life_left < spec.life - STEP * 1.5:
+				continue
+			launches += 1
+			var solved: Vector3 = FiringSolution.arc(
+				shell.position, _h.target.at, spec.speed, spec.gravity
+			)
+			var straight: Vector3 = FiringSolution.aimed(shell.position, _h.target.at)
+			var launch: Vector3 = shell.velocity.normalized()
+			# On the solved arc to within a hundredth of a radian...
+			if launch.angle_to(solved) < ARC_TOLERANCE:
+				on_arc += 1
+			# ...which, but for close shots, is clearly above the straight aim.
+			if launch.y > straight.y + ARC_TOLERANCE * 2.0:
+				lifted += 1
 	var gap: float = enemy.position.distance_to(_h.target.at)
-	var shells: Array[EnemyShot] = _h.field.shots().live_shots()
 	var standoff: float = EnemyProfile.of(EnemyKind.Kind.INTERCEPTOR).standoff
 	var _holds_off: GdUnitAssert = assert_float(gap).is_between(standoff * 0.6, standoff * 1.5)
-	var _fired: GdUnitAssert = assert_int(record.shots.size()).is_greater_equal(2)
+	var _fired: GdUnitAssert = assert_int(launches).is_greater_equal(5)
+	var _every_shell_on_arc: GdUnitAssert = assert_int(on_arc).is_equal(launches)
+	var _lobbed_high: GdUnitAssert = assert_int(lifted).is_greater_equal(floori(launches * 0.5))
 	var _not_rammed: GdUnitAssert = assert_bool(_h.destroyed.is_empty()).is_true()
-	for shell: EnemyShot in shells:
-		var _shell_style: GdUnitAssert = assert_int(shell.spec.style).is_equal(ShotSpec.Style.SHELL)
+	# Lobbed on the arc, the shells land on a player who holds still.
+	var _shells_land: GdUnitAssert = assert_int(_h.player_hits.size()).is_greater_equal(
+		floori(launches * 0.5)
+	)
 
 
 func test_drone_homes_and_explodes_on_contact() -> void:
+	var profile: EnemyProfile = EnemyProfile.of(EnemyKind.Kind.DRONE)
 	var enemy: Enemy = _h.order(EnemyKind.Kind.DRONE, 0.0, 20.0)
 	var id: int = enemy.enemy_id
+	var launch_speed: float = enemy.velocity.length()
+	_h.advance(0.25)
+	var early_speed: float = enemy.velocity.length()
+	_h.advance(0.75)
+	var later_speed: float = enemy.velocity.length()
 	# The player dodges up; the drone follows it in.
 	_h.target.at = Vector3(0.0, 8.0, 0.0)
 	var guard: int = 0
 	while enemy.is_active() and guard < 600:
 		_h.field.step(STEP)
 		guard += 1
+	# It launches slow and accelerates toward its top speed (a missile, not a chaser).
+	var _launches_slow: GdUnitAssert = assert_float(launch_speed).is_equal_approx(
+		profile.speed_min, 1e-4
+	)
+	var _accelerates: GdUnitAssert = assert_float(early_speed).is_less_equal(
+		profile.speed_min + profile.acceleration * 0.25 + 1e-3
+	)
+	var _speeds_up: GdUnitAssert = assert_float(later_speed).is_greater(
+		profile.speed_min + profile.acceleration * 0.5
+	)
+	var _capped: GdUnitAssert = assert_float(later_speed).is_less_equal(profile.speed_max + 1e-3)
 	var _exploded: GdUnitAssert = assert_bool(_h.destroyed.has(id)).is_true()
 	var _as_a_crash: GdUnitAssert = assert_int(_h.destroyed[id]).is_equal(
 		DestroyCause.Cause.COLLISION

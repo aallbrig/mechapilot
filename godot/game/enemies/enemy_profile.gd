@@ -17,9 +17,10 @@ enum Behaviour { CHASE, STANDOFF, HOMING, CROSS, STRAFE }
 ## How a kind attacks (besides contact).
 enum Attack { NONE, AIMED, ARC, BOMB, SPREAD }
 
-## Shots and bombs fall like the player's shots (#22: 20 units/s^2 at full pace).
+## Every enemy projectile, bombs included, falls like the player's shots (#73;
+## #22: 20 units/s^2 at full pace).
 const SHOT_GRAVITY: float = 20.0 * Pace.GAME_SPEED * Pace.GAME_SPEED
-const BOMB_GRAVITY: float = 26.0 * Pace.GAME_SPEED * Pace.GAME_SPEED
+const BOMB_GRAVITY: float = SHOT_GRAVITY
 ## Seconds an enemy projectile flies before it fizzles.
 const SHOT_LIFE: float = 4.0
 ## Aggression 1 fires this much faster and flies this much faster than 0.

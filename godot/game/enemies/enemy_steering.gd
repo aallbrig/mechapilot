@@ -30,8 +30,18 @@ static func steer(
 		EnemyProfile.Behaviour.CHASE:
 			want = FiringSolution.aimed(at, target) * speed
 		EnemyProfile.Behaviour.HOMING:
-			var top: float = minf(current.length() + profile.acceleration * delta, speed)
-			want = FiringSolution.aimed(at, target) * maxf(top, profile.speed_min)
+			# A missile: it turns on its turn rate but its speed only builds,
+			# by its acceleration, up to its top speed.
+			var pace: float = clampf(
+				current.length() + profile.acceleration * delta, profile.speed_min, speed
+			)
+			var turned: Vector3 = current.lerp(
+				FiringSolution.aimed(at, target) * maxf(current.length(), profile.speed_min),
+				1.0 - exp(-profile.turn * delta)
+			)
+			if turned.length() < FiringSolution.MIN_DISTANCE:
+				turned = FiringSolution.aimed(at, target)
+			return turned.normalized() * pace
 		EnemyProfile.Behaviour.STANDOFF:
 			var away: Vector3 = -FiringSolution.aimed(at, target)
 			var spot: Vector3 = target + away * profile.standoff

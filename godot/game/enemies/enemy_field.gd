@@ -72,7 +72,6 @@ func _physics_process(delta: float) -> void:
 func step(delta: float) -> void:
 	if _target == null or _level == null or delta <= 0.0:
 		return
-	var target_alive: bool = _target.is_alive()
 	_sphere.follow(_target.position())
 	var bullet_scale: float = _level.enemy_bullet_speed_scale
 	for enemy: Enemy in active_enemies():
@@ -80,7 +79,8 @@ func step(delta: float) -> void:
 		if _sphere.is_outside(enemy.position):
 			enemy.park()
 			_events.enemy.announce_enemy_left_play_sphere(enemy.enemy_id)
-		elif target_alive and _touches(enemy.position, enemy.radius()):
+		# Checked per enemy: a crash earlier in this tick may have destroyed the player.
+		elif _target.is_alive() and _touches(enemy.position, enemy.radius()):
 			var into: Vector3 = FiringSolution.aimed(enemy.position, _target.position())
 			var _landed: bool = _target.strike(enemy.profile.contact, 0, into)
 			_destroy(enemy, DestroyCause.Cause.COLLISION)

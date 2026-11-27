@@ -8,6 +8,8 @@ var moving: Vector3 = Vector3.ZERO
 var contact: float = 0.4
 var alive: bool = true
 var invulnerable: bool = false
+## The first hit absorbed destroys it (Armor 0).
+var fatal: bool = false
 ## Armor damage of every hit absorbed, in order.
 var damage_taken: Array[int] = []
 
@@ -32,4 +34,6 @@ func _absorb(damage: int, _direction: Vector3) -> bool:
 	if invulnerable:
 		return false
 	damage_taken.append(damage)
+	if fatal:
+		alive = false
 	return true

@@ -109,6 +109,12 @@ func test_enemy_projectiles_obey_gravity() -> void:
 		drops.append(shot.position.y)
 		fall_speeds.append(shot.velocity.y)
 	pool.free()
+	# #73: every enemy projectile, bombs included, falls like the player's shots.
+	var player_gravity: float = 20.0 * Pace.GAME_SPEED * Pace.GAME_SPEED
+	for spec: ShotSpec in specs:
+		var _like_the_player: GdUnitAssert = assert_float(spec.gravity).is_equal_approx(
+			player_gravity, 1e-6
+		)
 	for i: int in specs.size():
 		var gravity: float = specs[i].gravity
 		var _has_gravity: GdUnitAssert = assert_float(gravity).is_greater(0.0)
