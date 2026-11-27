@@ -60,6 +60,10 @@ var _guard: InvulnerabilityWindow = InvulnerabilityWindow.new()
 var _cooldown: float = 0.0
 var _since_shot: float = INF
 var _was_firing: bool = false
+## A Tap Shot waiting for the cooldown (the latest tap wins), so tapping never
+## beats the hold rate and never banks a burst.
+var _tap_queued: bool = false
+var _tap_point: Vector2 = Vector2.ZERO
 var _flash_left: float = 0.0
 var _alive: bool = true
 var _last_hit_direction: Vector3 = Vector3.ZERO
@@ -111,14 +115,19 @@ func tick(delta: float, intent: PilotIntent) -> void:
 	if absf(velocity.x) > tuning.facing_speed and _since_shot > tuning.facing_fire_hold:
 		facing = signf(velocity.x)
 	_update_aim(intent)
+	if intent.has_tap:
+		_tap_queued = true
+		_tap_point = intent.tap_point
 	if intent.firing:
+		_tap_queued = false
 		_face_aim()
 		if _cooldown <= FIRE_EPSILON:
 			_fire()
-	elif intent.has_tap and _aim_at_point(intent.tap_point):
-		_face_aim()
-		_cooldown = maxf(_cooldown, 0.0)
-		_fire()
+	elif _tap_queued and _cooldown <= FIRE_EPSILON:
+		_tap_queued = false
+		if _aim_at_point(_tap_point):
+			_face_aim()
+			_fire()
 
 	_animator.step(_model, delta, velocity, facing, thrust)
 	var want: Basis = Basis.looking_at(aim_direction, Vector3.BACK)
@@ -199,6 +208,7 @@ func respawn(at: Vector3) -> void:
 	aim_direction = Vector3.RIGHT
 	_cooldown = 0.0
 	_was_firing = false
+	_tap_queued = false
 	_since_shot = INF
 	_flash_left = 0.0
 	_model.set_flash(false)

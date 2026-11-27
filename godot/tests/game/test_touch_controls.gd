@@ -84,6 +84,25 @@ func test_right_tap_fires_one_shot_at_the_point() -> void:
 	)
 
 
+func test_tap_shots_respect_the_fire_cooldown() -> void:
+	_h.start()
+	var interval: float = _h.mech.tuning.fire_interval
+	var tap: Vector2 = Vector2(800.0, 150.0)
+	# Tap on every tick (60 per second) for five fire intervals.
+	var taps: int = roundi(interval * 5.0 / TouchHarness.TICK)
+	for _i: int in taps:
+		_h.press(FINGER, tap)
+		_h.release(FINGER, tap)
+		_h.fly(TouchHarness.TICK)
+	var while_tapping: int = _h.shots.size()
+	_h.fly(1.0)
+	# At the hold rate: a shot at once, then one per interval, and the last
+	# queued tap at most, never a burst of the banked taps.
+	var hold_rate_cap: int = 6
+	var _at_hold_rate: GdUnitAssert = assert_int(while_tapping).is_between(5, hold_rate_cap)
+	var _no_burst: GdUnitAssert = assert_int(_h.shots.size()).is_less_equal(hold_rate_cap + 1)
+
+
 func test_slow_or_moved_tap_is_not_a_shot() -> void:
 	_h.start()
 	_h.press(FINGER, RIGHT_POINT)
