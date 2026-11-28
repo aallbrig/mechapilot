@@ -13,6 +13,10 @@ const WIDE_BAR_SIZE: Vector2 = Vector2(360.0, 22.0)
 ## same size), so the score never sits under it. ui/ can't name game/, so the
 ## size is repeated here.
 const PAUSE_CLEARANCE: Vector2 = Vector2(72.0, 72.0)
+## The Boss Gauge's bar (#127), smaller than WIDE_BAR_SIZE: with its label the
+## row stays narrower than the gap between the touch controls' bottom-corner
+## thumb zones (TouchControls.THUMB_ZONE, 189 px each) on a 640 px wide phone.
+const GAUGE_BAR_SIZE: Vector2 = Vector2(200.0, 12.0)
 const BAR_TWEEN_TIME: float = 0.25
 const HIT_SHAKE: float = 10.0
 const HIT_SHAKE_TIME: float = 0.3
@@ -25,6 +29,7 @@ const ONE_UP_HOLD: float = 0.8
 const ONE_UP_FADE: float = 0.4
 const GAUGE_FULL_PUNCH: float = 0.2
 
+var _top_row: HBoxContainer
 var _armor_bar: ProgressBar
 var _lives: LifeIcons
 var _score: Label
@@ -44,18 +49,15 @@ func _ready() -> void:
 	var layout: VBoxContainer = UiBuild.column(8)
 	layout.alignment = BoxContainer.ALIGNMENT_BEGIN
 	margin.add_child(layout)
-	var top: HBoxContainer = UiBuild.row(16)
-	top.alignment = BoxContainer.ALIGNMENT_BEGIN
-	layout.add_child(top)
-	top.add_child(_build_status())
-	top.add_child(_build_score())
+	_top_row = UiBuild.row(16)
+	_top_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	layout.add_child(_top_row)
+	_top_row.add_child(_build_status())
+	_top_row.add_child(_build_score())
 	var clearance: Control = Control.new()
 	clearance.custom_minimum_size = PAUSE_CLEARANCE
 	clearance.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top.add_child(clearance)
-	_gauge_row = _bar_row("BOSS GAUGE", &"GaugeBar")
-	_gauge_bar = _gauge_row.get_child(1) as ProgressBar
-	layout.add_child(_gauge_row)
+	_top_row.add_child(clearance)
 	_boss_row = _bar_row("BOSS", &"BossBar")
 	_boss_name = _boss_row.get_child(0) as Label
 	_boss_bar = _boss_row.get_child(1) as ProgressBar
@@ -74,6 +76,12 @@ func _ready() -> void:
 	_tutorial = TutorialBanner.new()
 	_tutorial.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	bottom_box.add_child(_tutorial)
+	# The Boss Gauge (#127) sits last, at the bottom centre between the thumb
+	# zones, so the top of the screen stays on the sky.
+	_gauge_row = _bar_row("BOSS GAUGE", &"GaugeBar", GAUGE_BAR_SIZE)
+	(_gauge_row.get_child(0) as Label).horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_gauge_bar = _gauge_row.get_child(1) as ProgressBar
+	bottom_box.add_child(_gauge_row)
 	_reset()
 
 
@@ -100,6 +108,17 @@ func lives_shown() -> int:
 ## True while the Boss Gauge is shown (not behind the Level Intro card).
 func gauge_shown() -> bool:
 	return _gauge_row.visible
+
+
+## The Boss Gauge row (label and bar), in canvas coordinates.
+func gauge_rect() -> Rect2:
+	return _gauge_row.get_global_rect()
+
+
+## The top row (armor, lives, score and the pause button's room), in canvas
+## coordinates.
+func armor_row_rect() -> Rect2:
+	return _top_row.get_global_rect()
 
 
 ## Boss Gauge fill, 0 to 1.
@@ -299,12 +318,12 @@ func _build_score() -> Control:
 	return center
 
 
-func _bar_row(title: String, variation: StringName) -> Control:
+func _bar_row(title: String, variation: StringName, bar_size: Vector2 = WIDE_BAR_SIZE) -> Control:
 	var bar_row: VBoxContainer = UiBuild.column(2)
 	bar_row.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	bar_row.add_child(UiBuild.label(title, &"HintLabel"))
 	var bar: ProgressBar = _bar(variation)
-	bar.custom_minimum_size = WIDE_BAR_SIZE
+	bar.custom_minimum_size = bar_size
 	bar_row.add_child(bar)
 	return bar_row
 
