@@ -5,17 +5,28 @@ extends MeshInstance3D
 ## mesh when the owning VisualRig is ready, so the piece costs one draw call.
 ## Pivots and markers are siblings or children that are not primitive parts, and
 ## are kept. Baked meshes are cached per scene and piece path, so every instance
-## of a scene shares one mesh.
+## of a scene shares one mesh. A piece wears its rig's shared material: the
+## hull's (player mech, bosses) or the hostile one every regular enemy shares
+## (#135), so the material never adds a draw call.
 
 const HULL_MATERIAL: ShaderMaterial = preload("res://game/visuals/kit/hull_material.tres")
+const HOSTILE_MATERIAL: ShaderMaterial = preload("res://game/visuals/kit/hostile_material.tres")
 const FLASH_MATERIAL: ShaderMaterial = preload("res://game/visuals/kit/flash_material.tres")
 
 static var _cache: Dictionary[StringName, ArrayMesh] = {}
 
+## The material shown when not flashing (set by bake()).
+var look_material: ShaderMaterial = HULL_MATERIAL
 
-## Bake the primitive part children into this piece's mesh and free them.
-## An empty cache_key disables caching (for pieces built outside a saved scene).
-func bake(palette: Dictionary[StringName, Color], cache_key: StringName) -> void:
+
+## Bake the primitive part children into this piece's mesh, free them, and
+## wear `material`. An empty cache_key disables caching (for pieces built
+## outside a saved scene).
+func bake(
+	palette: Dictionary[StringName, Color],
+	cache_key: StringName,
+	material: ShaderMaterial = HULL_MATERIAL
+) -> void:
 	var parts: Array[MeshInstance3D] = primitive_parts()
 	var baked: ArrayMesh = null
 	if cache_key != &"" and _cache.has(cache_key):
@@ -28,7 +39,8 @@ func bake(palette: Dictionary[StringName, Color], cache_key: StringName) -> void
 		remove_child(part)
 		part.free()
 	mesh = baked
-	material_override = HULL_MATERIAL
+	look_material = material
+	material_override = look_material
 	cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
@@ -46,4 +58,4 @@ func primitive_parts() -> Array[MeshInstance3D]:
 
 ## Show the hit flash (true) or the normal hull (false).
 func show_flash(on: bool) -> void:
-	material_override = FLASH_MATERIAL if on else HULL_MATERIAL
+	material_override = FLASH_MATERIAL if on else look_material

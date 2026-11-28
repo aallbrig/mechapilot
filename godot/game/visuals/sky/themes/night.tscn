@@ -54,6 +54,7 @@ shader_parameter/softness = null
 [node name="NightSky" type="Node3D"]
 script = ExtResource("1_sky_environm")
 sky_id = &"night"
+hostile_accent = Color(1, 0.75, 0.1, 1)
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_3")

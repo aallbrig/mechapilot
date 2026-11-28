@@ -53,6 +53,8 @@ shader_parameter/softness = null
 [node name="StratosphereSky" type="Node3D"]
 script = ExtResource("1_sky_environm")
 sky_id = &"stratosphere"
+hostile_accent = Color(1, 0.95, 0.2, 1)
+hostile_dark_above = 0.1
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_3")

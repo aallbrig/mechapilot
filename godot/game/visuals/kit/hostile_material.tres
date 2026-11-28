@@ -1,0 +1,24 @@
+[gd_resource type="ShaderMaterial" format=3]
+
+[ext_resource type="Shader" path="res://game/visuals/kit/hostile.gdshader" id="1_hostile"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_hostile")
+shader_parameter/zenith_color = null
+shader_parameter/upper_color = null
+shader_parameter/horizon_color = null
+shader_parameter/low_color = null
+shader_parameter/horizon_height = null
+shader_parameter/gradient_span = null
+shader_parameter/parallax = null
+shader_parameter/world_offset = null
+shader_parameter/hostile_accent = null
+shader_parameter/accent_amount = null
+shader_parameter/contrast_goal = null
+shader_parameter/light_floor = null
+shader_parameter/light_ceiling = null
+shader_parameter/dark_above = null
+shader_parameter/facet_amount = null
+shader_parameter/rim_amount = null
+shader_parameter/glow_energy = null

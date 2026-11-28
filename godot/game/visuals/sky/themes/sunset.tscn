@@ -51,6 +51,7 @@ shader_parameter/softness = null
 [node name="SunsetSky" type="Node3D"]
 script = ExtResource("1_sky_environm")
 sky_id = &"sunset"
+hostile_accent = Color(0.55, 0.05, 0.6, 1)
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_3")

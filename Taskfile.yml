@@ -257,6 +257,11 @@ tasks:
     cmds:
       - scripts/godot-export-web build/web
 
+  godot:capture:readability:
+    desc: "Render the enemy readability captures with a real renderer (needs a display; not CI) into godot/tests/visuals/readability/captures.json"
+    cmds:
+      - scripts/godot-capture-readability
+
   godot:editor:
     desc: "Open the pinned Godot editor on this repo's own ports (see vars; `-- --dry-run` prints the command)"
     cmds:
