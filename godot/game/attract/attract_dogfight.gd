@@ -288,7 +288,8 @@ func _build_world() -> void:
 	# The camera looks through the sky's own Environment, so the Title shows the
 	# dawn sky whichever WorldEnvironment the world uses, and the sky's sun
 	# lights only the attract scene.
-	_camera.environment = _sky.environment()
+	# Its WorldEnvironment node is released: the world's one is the stage's sky.
+	_camera.environment = _sky.release_world_environment()
 	_sky.sun().light_cull_mask = layer_mask()
 
 

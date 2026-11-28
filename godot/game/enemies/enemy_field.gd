@@ -35,11 +35,14 @@ var _shots: EnemyShotPool = EnemyShotPool.new()
 var _sphere: PlaySphere = PlaySphere.new(0.0)
 var _enemies: Array[Enemy] = []
 var _next_id: int = 1
+var _glows: TelegraphGlows = TelegraphGlows.new()
 
 
 func _init() -> void:
 	_shots.name = "EnemyShots"
 	add_child(_shots)
+	_glows.name = "TelegraphGlows"
+	add_child(_glows)
 
 
 ## Wire the field: the bus, its randomness, the Levels (for each Level's Play
@@ -64,6 +67,12 @@ func setup(
 
 
 func _physics_process(delta: float) -> void:
+	advance(delta)
+
+
+## Advance `delta` seconds if the Game State lets the field run (in play, not
+## paused). Whoever drives the field instead of the engine calls this.
+func advance(delta: float) -> void:
 	if GameState.is_play(_phase):
 		step(delta)
 
@@ -86,6 +95,19 @@ func step(delta: float) -> void:
 			_destroy(enemy, DestroyCause.Cause.COLLISION)
 	_shots.step(delta, _target)
 	_shots.cull_outside(_sphere.centre, _sphere.radius)
+	show_telegraphs()
+
+
+## Draw the telegraph glow of every active enemy that is charging (one draw).
+func show_telegraphs() -> void:
+	var looks: Array[EnemyLook] = []
+	for enemy: Enemy in active_enemies():
+		looks.append(enemy.look())
+	_glows.show_glows(looks)
+
+
+func telegraph_glows() -> TelegraphGlows:
+	return _glows
 
 
 ## A player shot of contact `shot_radius` at `at`, travelling along
@@ -153,6 +175,7 @@ func clear() -> void:
 	for enemy: Enemy in _enemies:
 		enemy.park()
 	_shots.clear()
+	show_telegraphs()
 
 
 func _place(

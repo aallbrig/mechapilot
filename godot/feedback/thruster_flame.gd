@@ -5,7 +5,9 @@ extends Node3D
 ## outer plume (longer, translucent: blue-white at the nozzle, then orange, red,
 ## gone, soft at the edges). Both scroll noise along their length. Thrust drives
 ## a spring, never a snap, and idle keeps a small pilot flame. Sparse sparks,
-## optional smoke puffs and an optional flickering light complete it.
+## and optional smoke puffs complete it. No light: a positional light costs a
+## pass per lit object in the Compatibility renderer, which the Gameplay
+## draw-call budget cannot afford (#84); the flame's HDR colours bloom instead.
 
 ## Spring that eases the flame toward the thrust target (1/s^2 and 1/s).
 const POWER_STIFFNESS: float = 140.0
@@ -30,9 +32,6 @@ const FLICKER_B: Vector2 = Vector2(6.7, 0.07)
 const SPARKS_FROM: float = 0.35
 const SMOKE_FROM: float = 0.3
 const SPARK_SPEED: Vector2 = Vector2(0.7, 1.4)
-const LIGHT_ENERGY: Vector2 = Vector2(0.2, 1.6)
-const LIGHT_COLOR: Color = Color(1.0, 0.65, 0.3)
-const LIGHT_RANGE: float = 2.5
 const CONE_SEGMENTS: int = 12
 const CONE_RINGS: int = 4
 const SEED_RANGE: float = 50.0
@@ -95,12 +94,11 @@ var _core_mat: ShaderMaterial
 var _plume_mat: ShaderMaterial
 var _sparks: CPUParticles3D
 var _smoke: CPUParticles3D
-var _light: OmniLight3D
 var _clock: float = 0.0
 var _phase: float = 0.0
 
 
-## `flame_size` scales everything; main engines get smoke and a light.
+## `flame_size` scales everything; main engines also get smoke.
 func setup(flame_size: float, main_engine: bool, rng: RandomNumberGenerator) -> void:
 	_size = flame_size
 	_phase = rng.randf() * PHASE_RANGE
@@ -117,11 +115,6 @@ func setup(flame_size: float, main_engine: bool, rng: RandomNumberGenerator) -> 
 	if main_engine:
 		_smoke = FlameParticles.smoke(_size)
 		add_child(_smoke)
-		_light = OmniLight3D.new()
-		_light.light_color = LIGHT_COLOR
-		_light.omni_range = LIGHT_RANGE * _size
-		_light.position = Vector3(0.0, 0.3 * _size, 0.0)
-		add_child(_light)
 	drive(0.0, 0.0)
 
 
@@ -153,8 +146,6 @@ func drive(target: float, delta: float) -> void:
 	_sparks.speed_scale = lerpf(SPARK_SPEED.x, SPARK_SPEED.y, power)
 	if _smoke != null:
 		_smoke.emitting = power > SMOKE_FROM
-	if _light != null:
-		_light.light_energy = lerpf(LIGHT_ENERGY.x, LIGHT_ENERGY.y, power) * flicker
 
 
 ## The plume's current length (units), for tests.
@@ -211,6 +202,7 @@ func _cone(root: Node3D, radius: float, mat: ShaderMaterial) -> void:
 	cm.cap_top = false
 	cm.cap_bottom = false
 	var mi: MeshInstance3D = MeshInstance3D.new()
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.mesh = cm
 	mi.material_override = mat
 	mi.position = Vector3(0.0, 0.5, 0.0)

@@ -31,6 +31,8 @@ enum Cue {
 	UI_POP,
 	UI_WARNING,
 	UI_START,
+	## An enemy's attack charging (its 0.4 s telegraph): a short rising whine.
+	CHARGE,
 }
 
 ## The cue of each screen sound, indexed by UiCue.Cue. These cues play on the UI
@@ -123,6 +125,11 @@ static func voices_for(cue: Cue) -> Array[SynthVoice]:
 			voices = [
 				SynthVoice.tone(0.5, 200.0, 600.0, 0.25).with_noise(0.4, 0.0, 1.0),
 				SynthVoice.tone(0.35, 160.0, 60.0, 0.35).with_noise(0.2, 1.0, 0.3),
+			]
+		Cue.CHARGE:
+			voices = [
+				SynthVoice.tone(0.4, 260.0, 1100.0, 0.1).with_noise(0.3, 0.0, 1.0),
+				SynthVoice.tone(0.4, 390.0, 1650.0, 0.05).with_noise(0.3, 0.0, 1.0),
 			]
 		Cue.LEVEL_START:
 			voices = [

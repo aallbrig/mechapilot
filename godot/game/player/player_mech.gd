@@ -181,9 +181,11 @@ func react_to_hit() -> void:
 	_model.set_flash(true)
 
 
-## Ignore hits (and blink) for `duration` seconds.
+## Ignore hits (and blink) for `duration` seconds. Linked (not
+## `self_guarding`), the window stays open until end_guard(): the RunLedger
+## announces when it ends, so the two windows can never disagree.
 func guard_for(duration: float) -> void:
-	_guard.start(duration)
+	_guard.start(duration, not self_guarding)
 
 
 ## The invulnerability window closed early.

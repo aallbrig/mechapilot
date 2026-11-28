@@ -270,7 +270,7 @@ material_override = SubResource("StandardMaterial3D_7")
 
 [node name="Turret1Muzzle" type="Marker3D" parent="Turret1"]
 unique_name_in_owner = true
-transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.62, 0.12, 0)
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 1.5, 0.12, 0)
 
 [node name="BombBay1" type="Marker3D" parent="."]
 unique_name_in_owner = true

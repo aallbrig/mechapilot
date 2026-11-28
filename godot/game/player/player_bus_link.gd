@@ -6,7 +6,6 @@ extends Node
 ##   reported   PlayerMech.steered       -> player.player_moved
 ##              PlayerMech.fired         -> player.player_fired
 ##              ShotPool.missed          -> player.shot_missed (when the mech has a pool)
-##              PlayerMech.hit_taken     -> player.player_hit
 ##              PlayerMech.repaired      -> player.repair_collected
 ##              PlayerInput.device_changed -> flow.input_device_changed
 ##   decided    player.armor_changed (a loss)  -> PlayerMech.react_to_hit()
@@ -18,6 +17,9 @@ extends Node
 ##              flow.game_state_changed        -> PlayerMech.drop_queued_tap()
 ##
 ## Once linked, the mech stops guarding itself: the RunLedger owns the window.
+## Hits are not forwarded from here: CombatTarget.strike() (through
+## PlayerTarget) is the one place that announces `player_hit` (#84), so a hit
+## the mech takes is counted exactly once.
 
 ## Where a new Run starts the mech.
 const RUN_START: Vector3 = Vector3.ZERO
@@ -34,7 +36,6 @@ func link(bus: EventBus, player: PlayerMech, input: PlayerInput) -> void:
 	_check(player.fired.connect(bus.player.announce_player_fired) as Error)
 	if player.shots != null:
 		_check(player.shots.missed.connect(bus.player.announce_shot_missed) as Error)
-	_check(player.hit_taken.connect(bus.player.announce_player_hit) as Error)
 	_check(player.repaired.connect(bus.player.announce_repair_collected) as Error)
 	_check(input.device_changed.connect(bus.flow.announce_input_device_changed) as Error)
 	_check(bus.player.armor_changed.connect(_on_armor_changed) as Error)

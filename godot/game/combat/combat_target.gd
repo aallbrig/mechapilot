@@ -46,7 +46,7 @@ func is_alive() -> bool:
 func strike(source: DamageSource.Source, attack_damage: int, direction: Vector3) -> bool:
 	if not is_alive():
 		return false
-	if not _absorb(RunRules.damage_for(source, attack_damage), direction):
+	if not _absorb(source, RunRules.damage_for(source, attack_damage), direction):
 		return false
 	_events.player.announce_player_hit(source, position(), attack_damage)
 	return true
@@ -68,6 +68,7 @@ func _target_alive() -> bool:
 	return false
 
 
-## Take `damage` along `direction`; false when the target refuses the hit.
-func _absorb(_damage: int, _direction: Vector3) -> bool:
+## Take `damage` from `source` along `direction`; false when the target
+## refuses the hit.
+func _absorb(_source: DamageSource.Source, _damage: int, _direction: Vector3) -> bool:
 	return false

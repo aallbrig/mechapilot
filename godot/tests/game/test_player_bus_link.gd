@@ -8,6 +8,8 @@ var _bus: EventBus
 var _mech: PlayerMech
 var _input: PlayerInput
 var _link: PlayerBusLink
+## How enemies hit the mech: CombatTarget.strike() announces player_hit.
+var _target: PlayerTarget
 var _fired: Array[Vector3] = []
 var _hits: Array[DamageSource.Source] = []
 var _repairs: Array[Vector3] = []
@@ -28,6 +30,7 @@ func before_test() -> void:
 	_link = PlayerBusLink.new()
 	add_child(_link)
 	_link.link(_bus, _mech, _input)
+	_target = PlayerTarget.new(_bus, _mech)
 
 
 func after_test() -> void:
@@ -60,7 +63,8 @@ func _firing() -> PilotIntent:
 	return intent
 
 
-func test_bus_link_announces_shots_hits_and_repairs() -> void:
+func test_bus_link_announces_shots_and_repairs_but_not_hits() -> void:
+	# player_hit comes only from CombatTarget.strike() (#84), never from the link.
 	var subscribed: Array[int] = [
 		_bus.player.player_fired.connect(_on_fired),
 		_bus.player.player_hit.connect(_on_hit),
@@ -73,7 +77,7 @@ func test_bus_link_announces_shots_hits_and_repairs() -> void:
 	var _linked: GdUnitAssert = assert_int(_link.error_count()).is_equal(0)
 	var _connected: GdUnitAssert = assert_int(subscribed.count(OK)).is_equal(3)
 	var _shot: GdUnitAssert = assert_array(_fired).is_equal([Vector3.RIGHT])
-	var _reported_hit: GdUnitAssert = assert_array(_hits).is_equal([DamageSource.Source.BOMB])
+	var _no_hit: GdUnitAssert = assert_array(_hits).is_empty()
 	var _repair: GdUnitAssert = assert_array(_repairs).is_equal([Vector3(1.0, 2.0, 0.0)])
 
 
@@ -135,11 +139,11 @@ func test_mech_hit_costs_ledger_armor_and_starts_its_window() -> void:
 	ledger.start_run()
 	_bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.SKIRMISH)
 	var full: int = ledger.armor()
-	var _hit: bool = _mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	var _hit: bool = _target.strike(DamageSource.Source.ENEMY_BULLET, 0, Vector3.LEFT)
 	var after_hit: int = ledger.armor()
 	var guarded: bool = _mech.is_invulnerable() and ledger.is_invulnerable()
 	var flashed: bool = _mech.model().is_flashing()
-	var blocked: bool = not _mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	var blocked: bool = not _target.strike(DamageSource.Source.ENEMY_BULLET, 0, Vector3.LEFT)
 	var _cost: GdUnitAssert = assert_int(full - after_hit).is_equal(
 		RunRules.damage_for(DamageSource.Source.ENEMY_BULLET, 0)
 	)
@@ -152,7 +156,7 @@ func test_collected_repair_kit_restores_ledger_armor() -> void:
 	var ledger: RunLedger = RunLedger.new(_bus)
 	ledger.start_run()
 	_bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.SKIRMISH)
-	var _hit: bool = _mech.take_hit(DamageSource.Source.ENEMY_COLLISION, Vector3.LEFT)
+	var _hit: bool = _target.strike(DamageSource.Source.ENEMY_COLLISION, 0, Vector3.LEFT)
 	var hurt: int = ledger.armor()
 	var kit: RepairKit = RepairKit.new()
 	add_child(kit)
@@ -210,7 +214,7 @@ func test_new_run_clears_a_leftover_invulnerability_window() -> void:
 	var ledger: RunLedger = RunLedger.new(_bus)
 	ledger.start_run()
 	_bus.flow.announce_game_state_changed(GameState.Phase.SKIRMISH, GameState.Phase.SKIRMISH)
-	var _hit: bool = _mech.take_hit(DamageSource.Source.ENEMY_BULLET, Vector3.LEFT)
+	var _hit: bool = _target.strike(DamageSource.Source.ENEMY_BULLET, 0, Vector3.LEFT)
 	var guarded_in_old_run: bool = _mech.is_invulnerable()
 	ledger.start_run()
 	_bus.run.announce_run_started(1)

@@ -16,6 +16,8 @@ const SPEC_PHASES: Dictionary[StringName, int] = {
 }
 ## Seconds the scripted fight may take per boss before the test gives up.
 const FIGHT_LIMIT: float = 120.0
+## Where a hull probe sits, as a share of the hull's top edge (clear of the bays).
+const HULL_PROBE: float = 0.75
 ## Ticks between scripted player shots (10 a second at 60 Hz).
 const SHOT_EVERY: int = 6
 
@@ -90,9 +92,7 @@ class HitLog:
 	func on_player_hit(source: DamageSource.Source, at: Vector3, attack_damage: int) -> void:
 		sources.append(source)
 		damages.append(attack_damage)
-		var touching: bool = (
-			Vector2(at.x - boss.position.x, at.y - boss.position.y).length() <= reach
-		)
+		var touching: bool = boss.touches(at, reach)
 		charging.append(boss.is_dashing() and touching)
 
 	## Hits with `damage` as BOSS_ATTACK that landed mid-charge on the body.
@@ -175,9 +175,8 @@ func test_every_level_defines_a_valid_boss() -> void:
 			SPEC_PHASES[boss.id]
 		)
 		var _has_health: GdUnitAssert = assert_int(boss.health).is_greater(0)
-		var _turrets: GdUnitAssert = assert_int(BossProfile.of(boss.id).turrets.size()).is_greater(
-			0
-		)
+		var look: BossLook = auto_free(BossLook.new(BossProfile.of(boss.id)))
+		var _turrets: GdUnitAssert = assert_int(look.turret_points().size()).is_greater(0)
 		for phase: BossDefinition.Phase in boss.phases:
 			for attack: BossDefinition.Attack in phase.attacks:
 				var _has_pattern: GdUnitAssert = (
@@ -260,8 +259,10 @@ func test_leviathan_core_is_shielded_until_its_bays_are_destroyed() -> void:
 	_enter(boss)
 	var definition: BossDefinition = _h.levels[3].boss
 	var full: int = _health.health()
-	# The hull deflects a shot at the core: it is spent, but deals nothing.
-	var deflected: bool = _arena.resolve_shot(boss.position, 0.3)
+	# The hull deflects a shot on it away from the bays: spent, but deals nothing.
+	var hull: Rect2 = boss.look().hull_rect()
+	var on_hull: Vector3 = boss.position + Vector3(0.0, hull.end.y * HULL_PROBE, 0.0)
+	var deflected: bool = _arena.resolve_shot(on_hull, 0.3)
 	var after_core_shot: int = _health.health()
 	var shielded: bool = boss.is_shielded()
 	var bays_up: bool = not boss.look().bays_destroyed()
@@ -413,7 +414,7 @@ func test_boss_dash_strikes_with_its_attack_damage() -> void:
 			lance = attack
 	var record: HitLog = HitLog.new()
 	record.boss = boss
-	record.reach = boss.profile.hit_radius + _h.target.radius()
+	record.reach = _h.target.radius()
 	var err: int = _h.bus.player.player_hit.connect(record.on_player_hit)
 	for _i: int in roundi(15.0 / STEP):
 		_advance(STEP)

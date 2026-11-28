@@ -166,10 +166,10 @@ func begin_defeat() -> void:
 func resolve_shot(at: Vector3, shot_radius: float) -> bool:
 	if _state == State.DEFEATED or _state == State.GONE:
 		return false
-	var on_body: bool = _plane_distance(at, position) <= profile.hit_radius + shot_radius
+	var on_body: bool = touches(at, shot_radius)
 	var on_bay: bool = false
 	if is_shielded():
-		for bay: Vector3 in _muzzles():
+		for bay: Vector3 in _bays():
 			on_bay = on_bay or _plane_distance(at, bay) <= profile.bay_radius + shot_radius
 	if not on_body and not on_bay:
 		return false
@@ -181,9 +181,16 @@ func resolve_shot(at: Vector3, shot_radius: float) -> bool:
 	return true
 
 
+## Whether a circle of `radius` at `at` touches the drawn hull (its model's
+## silhouette box in the play plane): where shots land and contact hurts.
+func touches(at: Vector3, radius: float) -> bool:
+	var local: Vector2 = Vector2(at.x - position.x, at.y - position.y)
+	return _look.hull_rect().grow(radius).has_point(local)
+
+
 ## Where a shot does damage now: a launch bay while shielded, else the centre.
 func weak_point() -> Vector3:
-	return _muzzles()[0] if is_shielded() else position
+	return _bays()[0] if is_shielded() else position
 
 
 ## True while only the launch bays take hits (the Leviathan's first phase).
@@ -236,10 +243,7 @@ func _step_fight(
 		position = position.lerp(want, 1.0 - exp(-profile.follow * delta))
 	position.z = 0.0
 	var alive: bool = target.is_alive()
-	if (
-		alive
-		and _plane_distance(position, target.position()) <= profile.hit_radius + target.radius()
-	):
+	if alive and touches(target.position(), target.radius()):
 		var into: Vector3 = FiringSolution.aimed(position, target.position())
 		if is_dashing():
 			var _lanced: bool = target.strike(DamageSource.Source.BOSS_ATTACK, _dash_damage, into)
@@ -317,7 +321,7 @@ func _fire(
 			_dash_left = pattern.duration
 			_dash_damage = _attacks[index].damage
 		BossPattern.Kind.LAUNCH:
-			var bays: Array[Vector3] = _muzzles()
+			var bays: Array[Vector3] = _bays()
 			var centre: Vector3 = FiringSolution.aimed(position, player)
 			var dirs: Array[Vector3] = FiringSolution.fan(centre, pattern.count, LAUNCH_FAN)
 			for i: int in dirs.size():
@@ -327,14 +331,23 @@ func _fire(
 				)
 
 
-## Where the turrets are now, in the play plane.
+## Where the turrets are now, in the play plane (the model's muzzles).
 func _muzzles() -> Array[Vector3]:
 	var out: Array[Vector3] = []
-	for turret: Vector3 in profile.turrets:
+	for turret: Vector3 in _look.turret_points():
 		out.append(position + turret)
 	if out.is_empty():
 		out.append(position)
 	return out
+
+
+## Where the launch bays are now (the model's bays), or the muzzles for a boss
+## without bays.
+func _bays() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for bay: Vector3 in _look.bay_points():
+		out.append(position + bay)
+	return out if not out.is_empty() else _muzzles()
 
 
 func _station(player_at: Vector3) -> Vector3:

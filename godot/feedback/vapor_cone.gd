@@ -70,6 +70,7 @@ var _armed: bool = true
 
 
 func _init() -> void:
+	_cone.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var cm: CylinderMesh = CylinderMesh.new()
 	cm.top_radius = CONE_TOP
 	cm.bottom_radius = CONE_BOTTOM
@@ -93,6 +94,7 @@ func _init() -> void:
 	for _i: int in RIBBONS:
 		var ribbon: Ribbon = Ribbon.new()
 		var mi: MeshInstance3D = MeshInstance3D.new()
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.mesh = ribbon.mesh
 		mi.material_override = rm
 		add_child(mi)

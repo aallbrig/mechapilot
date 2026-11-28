@@ -48,6 +48,13 @@ func setup(events: EventBus, levels: Array[LevelDefinition], field: EnemyField) 
 
 
 func _physics_process(delta: float) -> void:
+	advance(delta)
+
+
+## Advance `delta` seconds if the Game State lets the arena run (in play, the
+## Level Clear and Victory). Whoever drives the arena instead of the engine
+## calls this.
+func advance(delta: float) -> void:
 	if (
 		GameState.is_play(_phase)
 		or _phase == GameState.Phase.LEVEL_CLEAR

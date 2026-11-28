@@ -98,6 +98,7 @@ func _add_box(size: Vector3, turn: Basis, mat: Material) -> void:
 	var box: BoxMesh = BoxMesh.new()
 	box.size = size
 	var mi: MeshInstance3D = MeshInstance3D.new()
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.mesh = box
 	mi.material_override = mat
 	mi.basis = turn

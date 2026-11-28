@@ -1,27 +1,19 @@
 class_name FlightStage
 extends Node3D
-## The 3D world the player flies in, seen side-on: sky, light, clouds, the
-## camera rig, the player mech, its input, shot pool and death ragdoll. It wires
-## these game nodes to each other (each reaches only what it is given). The
-## camera's juice is decided by feedback/ (CameraJuice, which honours the shake
-## and reduced-motion settings) and main.gd connects it to camera_rig(). It
-## links the mech to the
+## The 3D world the player flies in, seen side-on: the Level's sky (its
+## SkyLibrary scene: the world's one WorldEnvironment, its sun and its cloud
+## layers), the camera rig, the player mech, its input, shot pool and death
+## ragdoll. It wires these game nodes to each other (each reaches only what it
+## is given). The camera's juice is decided by feedback/ (CameraJuice, which
+## honours the shake and reduced-motion settings) and main.gd connects it to
+## camera_rig(). It links the mech to the
 ## Events bus (PlayerBusLink) and spawns the Repair Kits the rules drop. It runs
 ## in play, Level Clear, Game Over and Victory; it holds still while Paused and
 ## behind the Title and Scoreboard.
 
-const SKY_COLOR: Color = Color(0.0, 0.1, 0.3)
-const AMBIENT_COLOR: Color = Color(0.45, 0.5, 0.7)
-const AMBIENT_ENERGY: float = 0.6
-const FOG_COLOR: Color = Color(0.35, 0.55, 0.85)
-const FOG_DENSITY: float = 0.01
-const GLOW_INTENSITY: float = 0.9
-const GLOW_BLOOM: float = 0.05
-const GLOW_THRESHOLD: float = 0.9
-const SUN_ANGLES: Vector3 = Vector3(-35.0, 25.0, 0.0)
-const SUN_COLOR: Color = Color(1.0, 0.957, 0.839)
-const SUN_ENERGY: float = 1.1
-## The seed for the sky and every random effect in a stage.
+## The sky shown before a Level names its own (the first Level's).
+const DEFAULT_SKY: StringName = &"dawn"
+## The seed for every random effect in a stage.
 const DEFAULT_SEED: int = 22
 
 var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -31,16 +23,15 @@ var _input: PlayerInput = PlayerInput.new()
 var _shots: ShotPool = ShotPool.new()
 var _debris: MechDebris = MechDebris.new()
 var _rig: CameraRig = CameraRig.new()
-var _clouds: CloudField = CloudField.new()
+var _sky: SkyEnvironment
+var _levels: Array[LevelDefinition] = []
 var _link: PlayerBusLink = PlayerBusLink.new()
 var _pickups: Node3D = Node3D.new()
 
 
 func _init() -> void:
 	rng.seed = DEFAULT_SEED
-	_build_world()
-	add_child(_clouds)
-	_clouds.scatter(rng)
+	show_sky(DEFAULT_SKY)
 	# Device detection runs in every Game State, so menus show the right glyphs.
 	_input.process_mode = Node.PROCESS_MODE_ALWAYS
 	add_child(_input)
@@ -66,11 +57,39 @@ func _ready() -> void:
 	_link.link(Events, _player, _input)
 	_connect(Events.flow.game_state_changed.connect(_on_game_state_changed) as Error)
 	_connect(Events.player.repair_kit_dropped.connect(spawn_repair_kit) as Error)
+	_connect(Events.run.level_intro_started.connect(_on_level_intro_started) as Error)
 	_set_running(false)
 
 
 func _process(_delta: float) -> void:
-	_clouds.wrap_around(_rig.camera().global_position)
+	_sky.follow(_rig.camera().global_position)
+
+
+## The Levels whose skies the stage shows, by number (from the Level data).
+func use_levels(levels: Array[LevelDefinition]) -> void:
+	_levels = levels
+
+
+## Show the sky of theme `sky_id` (a SkyLibrary id) in place of the current one.
+func show_sky(sky_id: StringName) -> void:
+	if _sky != null and _sky.sky_id == sky_id:
+		return
+	var next: SkyEnvironment = SkyLibrary.instantiate(sky_id)
+	if next == null:
+		return
+	if _sky != null:
+		remove_child(_sky)
+		_sky.queue_free()
+	_sky = next
+	# The attract scene behind the Title lights itself; this sun leaves its layer.
+	_sky.sun().light_cull_mask = _sky.sun().light_cull_mask & ~AttractDogfight.layer_mask()
+	add_child(_sky)
+	move_child(_sky, 0)
+
+
+## The sky shown now.
+func sky() -> SkyEnvironment:
+	return _sky
 
 
 func player() -> PlayerMech:
@@ -134,30 +153,11 @@ func _on_respawned(position_now: Vector3) -> void:
 	_rig.snap_to(position_now)
 
 
-func _build_world() -> void:
-	var env: Environment = Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = SKY_COLOR
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = AMBIENT_COLOR
-	env.ambient_light_energy = AMBIENT_ENERGY
-	env.fog_enabled = true
-	env.fog_light_color = FOG_COLOR
-	env.fog_density = FOG_DENSITY
-	env.glow_enabled = true
-	env.glow_intensity = GLOW_INTENSITY
-	env.glow_bloom = GLOW_BLOOM
-	env.glow_hdr_threshold = GLOW_THRESHOLD
-	var world_env: WorldEnvironment = WorldEnvironment.new()
-	world_env.environment = env
-	add_child(world_env)
-	var sun: DirectionalLight3D = DirectionalLight3D.new()
-	sun.rotation_degrees = SUN_ANGLES
-	sun.light_color = SUN_COLOR
-	sun.light_energy = SUN_ENERGY
-	# The attract scene behind the Title lights itself; this sun leaves its layer.
-	sun.light_cull_mask = sun.light_cull_mask & ~AttractDogfight.layer_mask()
-	add_child(sun)
+func _on_level_intro_started(
+	level_number: int, _level_name: String, _objective: String, _duration: float
+) -> void:
+	if level_number >= 1 and level_number <= _levels.size():
+		show_sky(_levels[level_number - 1].sky_theme)
 
 
 func _connect(err: Error) -> void:

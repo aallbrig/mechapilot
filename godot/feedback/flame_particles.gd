@@ -43,6 +43,7 @@ static func sparks(size: float) -> CPUParticles3D:
 	if _spark_mesh == null:
 		_spark_mesh = _soft_quad(Color.WHITE, SPARK_QUAD, true)
 	var p: CPUParticles3D = CPUParticles3D.new()
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	p.amount = SPARK_AMOUNT
 	p.lifetime = SPARK_LIFE
 	p.local_coords = false
@@ -63,6 +64,7 @@ static func smoke(size: float) -> CPUParticles3D:
 	if _smoke_mesh == null:
 		_smoke_mesh = _soft_quad(Color.WHITE, SMOKE_QUAD, false)
 	var p: CPUParticles3D = CPUParticles3D.new()
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	p.amount = SMOKE_AMOUNT
 	p.lifetime = SMOKE_LIFE
 	p.local_coords = false
@@ -88,6 +90,7 @@ static func eye_trail() -> CPUParticles3D:
 	if _eye_mesh == null:
 		_eye_mesh = _soft_quad(EYE_COLOR, EYE_QUAD, true)
 	var p: CPUParticles3D = CPUParticles3D.new()
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	p.amount = EYE_AMOUNT
 	p.lifetime = EYE_LIFE
 	p.local_coords = false
