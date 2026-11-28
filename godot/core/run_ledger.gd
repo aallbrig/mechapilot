@@ -16,6 +16,11 @@ extends RefCounted
 ## Rules: only shot kills score (a crash scores 0), and only in timed phases
 ## (GameState.is_timed) while the player is not down. Hits are ignored while
 ## invulnerable, while down, and outside timed phases. Damage resets the combo.
+##
+## Developer commands (#116, through DevCommands): developer invulnerability
+## (hits are ignored while it is on, and a Run started with it on is
+## dev-assisted), award_points(), restore_armor() and award_life(). Any of them
+## marks the Run dev-assisted; its summary carries the mark.
 
 var _events: EventBus
 var _phase: GameState.Phase = GameState.Phase.BOOT
@@ -34,6 +39,8 @@ var _level_kills: int = 0
 var _level_shots: int = 0
 var _level_hits: int = 0
 var _level_life_lost: bool = false
+var _dev_invulnerable: bool = false
+var _dev_assisted: bool = false
 
 
 func _init(events: EventBus) -> void:
@@ -62,6 +69,7 @@ func start_run() -> void:
 	_combo_left = 0.0
 	_run_time = 0.0
 	_run_kills = 0
+	_dev_assisted = _dev_invulnerable
 	start_level(1)
 	_events.run.announce_score_changed(_score, 0)
 	_events.run.announce_combo_changed(_multiplier)
@@ -109,7 +117,58 @@ func close_level() -> LevelTally:
 
 ## The Run's summary so far.
 func summary(victory: bool) -> RunSummary:
-	return RunSummary.new(_score, _level_number, _run_time, _run_kills, victory)
+	var made: RunSummary = RunSummary.new(_score, _level_number, _run_time, _run_kills, victory)
+	made.dev_assisted = _dev_assisted
+	return made
+
+
+## Turns developer invulnerability on or off and returns the new state. While
+## it is on a hit does no damage (it still opens the hit window). Turning it
+## on marks the Run dev-assisted (and every Run started while it stays on).
+func toggle_dev_invulnerability() -> bool:
+	_dev_invulnerable = not _dev_invulnerable
+	if _dev_invulnerable:
+		mark_dev_assisted()
+	return _dev_invulnerable
+
+
+## Marks the Run dev-assisted until the next start_run().
+func mark_dev_assisted() -> void:
+	_dev_assisted = true
+
+
+## True when a developer command changed this Run.
+func is_dev_assisted() -> bool:
+	return _dev_assisted
+
+
+## Adds `points` to the score as any award does (the bonus life included),
+## without touching the combo or the Boss Gauge. Marks the Run dev-assisted.
+func award_points(points: int) -> void:
+	if points <= 0:
+		return
+	mark_dev_assisted()
+	_add_points(points)
+
+
+## Repairs the mech to full Armor, as a Repair Kit does, at any Armor. Returns
+## false (and changes nothing) while the player is down or already at full Armor.
+## Marks the Run dev-assisted when it repairs.
+func restore_armor() -> bool:
+	if _down or _armor >= RunRules.MAX_ARMOR:
+		return false
+	mark_dev_assisted()
+	var before: int = _armor
+	_armor = RunRules.MAX_ARMOR
+	_events.player.announce_armor_changed(_armor, RunRules.MAX_ARMOR, _armor - before)
+	return true
+
+
+## Gives one extra life (not the one-time bonus life). Marks the Run dev-assisted.
+func award_life() -> void:
+	mark_dev_assisted()
+	_lives += 1
+	_events.player.announce_lives_changed(_lives)
 
 
 ## Advances the combo window, invulnerability and Run time by `delta` seconds.
@@ -199,6 +258,11 @@ func _on_enemy_destroyed(
 
 func _on_player_hit(source: DamageSource.Source, position: Vector3, attack_damage: int) -> void:
 	if not GameState.is_timed(_phase) or _down or _invulnerable_left > 0.0:
+		return
+	if _dev_invulnerable:
+		# No damage, but the hit window still opens, so contact that repeats
+		# every frame lands once per window, as for any hit.
+		_start_invulnerability(RunRules.HIT_INVULNERABILITY)
 		return
 	var damage: int = RunRules.damage_for(source, attack_damage)
 	var before: int = _armor

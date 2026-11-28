@@ -65,6 +65,7 @@ static func _serialize(settings: GameSettings) -> Dictionary:
 		"tutorial_hints": settings.tutorial_hints,
 		"rumble": settings.rumble,
 		"touch_stick_opacity": settings.touch_stick_opacity,
+		"developer_mode": settings.developer_mode,
 	}
 
 
@@ -81,6 +82,7 @@ static func _parse(document: Dictionary) -> GameSettings:
 	parsed.touch_stick_opacity = _number(
 		document, "touch_stick_opacity", defaults.touch_stick_opacity
 	)
+	parsed.developer_mode = _flag(document, "developer_mode", defaults.developer_mode)
 	return parsed.clamped()
 
 

@@ -13,8 +13,10 @@ extends Node3D
 ## at Level Clear and whenever the Run ends, and holds fire while the player is
 ## destroyed (the director stops spawning meanwhile).
 ##
-## Listens: flow.game_state_changed, run.level_intro_started and
-## enemy.spawn_requested. Announces: enemy.enemy_spawned, enemy.enemy_hit,
+## Listens: flow.game_state_changed, run.level_intro_started,
+## enemy.spawn_requested and dev.enemies_purge_ordered (#116: every enemy in
+## play is destroyed as by a shot, through the same path).
+## Announces: enemy.enemy_spawned, enemy.enemy_hit,
 ## enemy.enemy_destroyed and enemy.enemy_left_play_sphere.
 
 ## An enemy was destroyed at `position` (explosion juice and SFX hook).
@@ -61,6 +63,7 @@ func setup(
 		_events.flow.game_state_changed.connect(_on_game_state_changed),
 		_events.run.level_intro_started.connect(_on_level_intro_started),
 		_events.enemy.spawn_requested.connect(_on_spawn_requested),
+		_events.dev.enemies_purge_ordered.connect(_on_enemies_purge_ordered),
 	]
 	if subscribed.count(OK) != subscribed.size():
 		push_error("EnemyField: could not subscribe to the bus")
@@ -250,6 +253,11 @@ func _on_level_intro_started(
 		return
 	_level = _levels[level_number - 1]
 	_sphere.radius = _level.play_sphere_radius
+
+
+func _on_enemies_purge_ordered() -> void:
+	for enemy: Enemy in active_enemies():
+		_destroy(enemy, DestroyCause.Cause.SHOT)
 
 
 func _on_enemy_telegraphed(enemy: Enemy) -> void:

@@ -9,6 +9,7 @@ extends Node
 ##   Events.enemy    spawn decisions and enemy facts
 ##   Events.boss     the boss: warning, summon, hits, phases, defeat
 ##   Events.profile  persisted player data: Scoreboard, Settings, Intel
+##   Events.dev      the Developer console's commands and status (#116)
 ##
 ## Emit only through each channel's typed `announce_*` methods: they type-check
 ## every payload at compile time, which `Signal.emit()` does not.
@@ -28,6 +29,8 @@ var enemy: EnemyChannel = EnemyChannel.new()
 var boss: BossChannel = BossChannel.new()
 ## Persisted player data.
 var profile: ProfileChannel = ProfileChannel.new()
+## The Developer console (#116).
+var dev: DevChannel = DevChannel.new()
 
 
 ## Intents from the screens, and the Game State itself.
@@ -363,3 +366,27 @@ class ProfileChannel:
 
 	func announce_intel_catalog_changed(entries: Array[IntelEntry]) -> void:
 		intel_catalog_changed.emit(entries)
+
+
+## The Developer console (#116): its commands, and what they decided.
+class DevChannel:
+	extends RefCounted
+
+	## The Developer console asks for `command` (core/ ignores it unless
+	## Developer mode is on).
+	signal dev_command_requested(command: DevCommand.Command)
+	## Developer invulnerability is `invulnerable`; the current Run is
+	## `dev_assisted` (it will never be saved to the Scoreboard).
+	signal dev_status_changed(invulnerable: bool, dev_assisted: bool)
+	## Every enemy in play is to be destroyed now, as by a shot (game/ does it
+	## and reports each one as enemy_destroyed).
+	signal enemies_purge_ordered
+
+	func announce_dev_command_requested(command: DevCommand.Command) -> void:
+		dev_command_requested.emit(command)
+
+	func announce_dev_status_changed(invulnerable: bool, dev_assisted: bool) -> void:
+		dev_status_changed.emit(invulnerable, dev_assisted)
+
+	func announce_enemies_purge_ordered() -> void:
+		enemies_purge_ordered.emit()

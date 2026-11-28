@@ -15,6 +15,9 @@ extends RefCounted
 ## Announces: run.run_started, run.level_intro_started, run.level_intro_completed,
 ## run.boss_gauge_changed, run.level_cleared, run.run_ended,
 ## boss.boss_warning_started, boss.boss_summoned and player.player_respawned.
+##
+## Developer commands (#116, through DevCommands): fill_boss_gauge() and
+## skip_level(), which take only the Game State's legal transitions.
 
 ## The phases from which Play starts a new Run.
 const RUN_START_PHASES: Array[GameState.Phase] = [
@@ -112,6 +115,37 @@ func is_game_over_pending() -> bool:
 	return _game_over_pending
 
 
+## Fills the Boss Gauge to the Level's threshold, which starts the Boss
+## Warning as a full gauge always does. Only in the Skirmish; returns true
+## when it filled the gauge.
+func fill_boss_gauge() -> bool:
+	if not _run_active or _game_over_pending or _machine.state() != GameState.Phase.SKIRMISH:
+		return false
+	_raise_gauge(_level.boss.threshold)
+	return true
+
+
+## Closes the current Level at once, without the boss's score: from the Level
+## Intro, Skirmish, Boss Warning or Boss Fight it walks the legal transitions
+## to the Boss Fight (no boss is summoned) and clears the Level, to Level Clear
+## or, on the last Level, Victory. Returns true when the Level was closed.
+func skip_level() -> bool:
+	if not _run_active or _game_over_pending:
+		return false
+	if _machine.state() == GameState.Phase.LEVEL_INTRO:
+		if not _machine.request(GameState.Phase.SKIRMISH):
+			return false
+		_events.run.announce_level_intro_completed(_level.number)
+	if _machine.state() == GameState.Phase.SKIRMISH:
+		var _warned: bool = _machine.request(GameState.Phase.BOSS_WARNING)
+	if _machine.state() == GameState.Phase.BOSS_WARNING:
+		var _fought: bool = _machine.request(GameState.Phase.BOSS_FIGHT)
+	if _machine.state() != GameState.Phase.BOSS_FIGHT:
+		return false
+	_clear_level(false)
+	return true
+
+
 func _on_play_requested() -> void:
 	if _levels.is_empty() or not RUN_START_PHASES.has(_machine.state()):
 		return
@@ -135,6 +169,10 @@ func _on_game_state_changed(from: GameState.Phase, to: GameState.Phase) -> void:
 func _on_kill_scored(points: int, _multiplier: int, _position: Vector3) -> void:
 	if not _run_active or _machine.state() != GameState.Phase.SKIRMISH:
 		return
+	_raise_gauge(points)
+
+
+func _raise_gauge(points: int) -> void:
 	var threshold: int = _level.boss.threshold
 	_gauge = mini(_gauge + points, threshold)
 	_events.run.announce_boss_gauge_changed(_gauge, threshold)
@@ -161,8 +199,15 @@ func _on_life_lost(lives_left: int) -> void:
 func _on_boss_defeated(_boss_id: StringName, _position: Vector3) -> void:
 	if not _run_active or _game_over_pending or _machine.state() != GameState.Phase.BOSS_FIGHT:
 		return
+	_clear_level(true)
+
+
+## Closes the Level from the Boss Fight: the boss's score (when `award_boss`),
+## the tally, then Level Clear, or Victory after the last Level.
+func _clear_level(award_boss: bool) -> void:
 	_boss_health.disarm()
-	_ledger.award_boss()
+	if award_boss:
+		_ledger.award_boss()
 	_events.run.announce_level_cleared(_ledger.close_level())
 	if _level.number >= _levels.size():
 		_end_run(true)

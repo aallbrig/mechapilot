@@ -15,6 +15,9 @@ var time_seconds: float = 0.0
 var kills: int = 0
 ## True when the Run ended in Victory (the Level 6 boss was defeated).
 var victory: bool = false
+## True when a Developer console command changed the Run (#116). A
+## dev-assisted Run is never saved to the Scoreboard.
+var dev_assisted: bool = false
 
 
 func _init(

@@ -218,6 +218,12 @@ func test_boss_gauge_clear_of_touch_controls() -> void:
 		var h: UiHarness = UiHarness.new(screen_size)
 		add_child(h.host)
 		var hud: Hud = await _hud_in_skirmish(h)
+		# The Developer console's DEV button (#116) shows in Developer mode.
+		var developer: GameSettings = h.settings.current()
+		developer.developer_mode = true
+		h.bus.profile.announce_settings_change_requested(developer)
+		await await_idle_frame()
+		var dev_button: Button = h.ui.dev_console().dev_button()
 		var touch: TouchControls = TouchControls.new()
 		touch.size = screen_size
 		var rect: Rect2 = hud.gauge_rect()
@@ -226,7 +232,10 @@ func test_boss_gauge_clear_of_touch_controls() -> void:
 			"aim zone": touch.aim_zone_rect(),
 			"pause button": touch.pause_button_rect(),
 			"armor row": hud.armor_row_rect(),
+			"DEV button": dev_button.get_global_rect(),
 		}
+		if not dev_button.is_visible_in_tree():
+			overlaps.append("%s DEV button hidden in Developer mode" % screen_size)
 		touch.free()
 		for other: String in others:
 			if rect.intersects(others[other]):

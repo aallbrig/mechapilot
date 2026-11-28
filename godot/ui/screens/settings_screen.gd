@@ -1,7 +1,8 @@
 class_name SettingsScreen
 extends UiScreen
 ## Settings (#73): master, music and SFX volume, screen shake, reduced motion,
-## tutorial hints, rumble and touch stick opacity, plus reset to defaults.
+## tutorial hints, rumble, touch stick opacity and Developer mode (#116), plus
+## reset to defaults.
 ## Every change is an intent (profile.settings_change_requested); the shown
 ## values always come from profile.settings_changed, so the screen shows what
 ## was really stored. Opened from the Title and from Pause. Everything,
@@ -25,6 +26,7 @@ var _shake: CheckButton
 var _reduced_motion: CheckButton
 var _hints: CheckButton
 var _rumble: CheckButton
+var _developer: CheckButton
 var _opacity: HSlider
 var _back: Button
 var _columns: GridContainer
@@ -57,6 +59,7 @@ func _ready() -> void:
 	_reduced_motion = _toggle(toggles, "Reduced motion")
 	_hints = _toggle(toggles, "Tutorial hints")
 	_rumble = _toggle(toggles, "Rumble")
+	_developer = _toggle(toggles, "Developer mode")
 	var actions: HBoxContainer = UiBuild.row()
 	content.add_child(actions)
 	var reset: Button = UiBuild.button("RESET")
@@ -69,7 +72,7 @@ func _ready() -> void:
 	actions.add_child(_back)
 	juice(_back, UiCue.Cue.BACK)
 	_fit()
-	for check: CheckButton in [_shake, _reduced_motion, _hints, _rumble]:
+	for check: CheckButton in [_shake, _reduced_motion, _hints, _rumble, _developer]:
 		_wire(check.toggled.connect(_on_changed.unbind(1)))
 	for slider: HSlider in [_master, _music, _sfx, _opacity]:
 		_wire(slider.value_changed.connect(_on_changed.unbind(1)))
@@ -106,7 +109,7 @@ func shown() -> GameSettings:
 
 
 ## The controls, by setting, for tests: master, music, sfx, shake,
-## reduced_motion, hints, rumble, opacity.
+## reduced_motion, hints, rumble, opacity, developer_mode.
 func controls() -> Dictionary[StringName, Control]:
 	return {
 		&"master": _master,
@@ -117,6 +120,7 @@ func controls() -> Dictionary[StringName, Control]:
 		&"hints": _hints,
 		&"rumble": _rumble,
 		&"opacity": _opacity,
+		&"developer_mode": _developer,
 	}
 
 
@@ -134,6 +138,7 @@ func _show(settings: GameSettings) -> void:
 	_reduced_motion.set_pressed_no_signal(settings.reduced_motion)
 	_hints.set_pressed_no_signal(settings.tutorial_hints)
 	_rumble.set_pressed_no_signal(settings.rumble)
+	_developer.set_pressed_no_signal(settings.developer_mode)
 
 
 func _on_changed() -> void:
@@ -146,6 +151,7 @@ func _on_changed() -> void:
 	wanted.reduced_motion = _reduced_motion.button_pressed
 	wanted.tutorial_hints = _hints.button_pressed
 	wanted.rumble = _rumble.button_pressed
+	wanted.developer_mode = _developer.button_pressed
 	if _bus != null and not wanted.equals(_shown):
 		_bus.profile.announce_settings_change_requested(wanted)
 
