@@ -2,8 +2,8 @@ class_name InitialsPicker
 extends VBoxContainer
 ## Three-letter initials entry for the Scoreboard (#24, #73), for every device:
 ##
-## - Keyboard and gamepad (while focused): Up is the next letter (A to B, and
-##   Z wraps to A), Down the previous one; Left and Right choose the slot;
+## - Keyboard and gamepad (while focused): Up is the previous letter (A wraps
+##   to Z), Down the next one (A to B, Z wraps to A); Left and Right choose the slot;
 ##   typing a letter sets the slot and moves on; Backspace moves back; Confirm
 ##   submits.
 ## - Mouse and touch: the arrows above and below each letter, a tap on a letter
@@ -39,12 +39,12 @@ func _init() -> void:
 		var slot_column: VBoxContainer = UiBuild.column(4)
 		slot_column.custom_minimum_size = Vector2(SLOT_WIDTH, 0.0)
 		var up: ArrowButton = ArrowButton.new(true)
-		_wire(up.pressed.connect(bump.bind(i, 1)))
+		_wire(up.pressed.connect(bump.bind(i, -1)))
 		var letter: Label = UiBuild.label("A", &"LetterLabel")
 		letter.mouse_filter = Control.MOUSE_FILTER_STOP
 		_wire(letter.gui_input.connect(_on_letter_input.bind(i)))
 		var down: ArrowButton = ArrowButton.new(false)
-		_wire(down.pressed.connect(bump.bind(i, -1)))
+		_wire(down.pressed.connect(bump.bind(i, 1)))
 		slot_column.add_child(up)
 		slot_column.add_child(letter)
 		slot_column.add_child(down)
@@ -95,14 +95,14 @@ func bump(at_slot: int, step: int) -> void:
 	_changed()
 
 
-## Up: the next letter in the current slot.
+## Up: the previous letter in the current slot (A wraps to Z) (#134).
 func letter_up() -> void:
-	bump(_slot, 1)
-
-
-## Down: the previous letter in the current slot.
-func letter_down() -> void:
 	bump(_slot, -1)
+
+
+## Down: the next letter in the current slot (A to B, Z wraps to A) (#134).
+func letter_down() -> void:
+	bump(_slot, 1)
 
 
 ## Moves to the slot `step` away, staying within the three slots.

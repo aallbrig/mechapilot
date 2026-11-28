@@ -15,7 +15,7 @@ func _init(points_up: bool) -> void:
 	_up = points_up
 	focus_mode = Control.FOCUS_NONE
 	custom_minimum_size = SIZE
-	tooltip_text = "Next letter" if points_up else "Previous letter"
+	tooltip_text = "Previous letter" if points_up else "Next letter"
 
 
 func _draw() -> void:
