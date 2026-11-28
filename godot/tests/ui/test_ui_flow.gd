@@ -97,30 +97,50 @@ func test_ui_follows_the_real_rules_through_a_level() -> void:
 	)
 
 
-func test_initials_up_advances_letter() -> void:
+func test_initials_up_goes_to_previous_letter() -> void:
 	var picker: InitialsPicker = auto_free(InitialsPicker.new())
 	add_child(picker)
-	var up: InputEventKey = InputEventKey.new()
-	up.keycode = KEY_UP
-	up.physical_keycode = KEY_UP
-	up.pressed = true
-	picker._gui_input(up)
+	picker._gui_input(_key_event(KEY_UP))
 	var after_up: String = picker.initials()
 	picker.move_slot(1)
-	picker.letter_down()
+	picker._gui_input(_key_event(KEY_DOWN))
 	var after_down: String = picker.initials()
-	var _up: GdUnitAssert = assert_str(after_up).is_equal("BAA")
-	var _down_wraps: GdUnitAssert = assert_str(after_down).is_equal("BZA")
+	var _up: GdUnitAssert = assert_str(after_up).is_equal("ZAA")
+	var _down: GdUnitAssert = assert_str(after_down).is_equal("ZBA")
 
 
-func test_initials_z_wraps_to_a() -> void:
+func test_initials_down_from_z_wraps_to_a() -> void:
 	var picker: InitialsPicker = auto_free(InitialsPicker.new())
 	add_child(picker)
-	picker.letter_down()
-	var at_z: String = picker.initials()
 	picker.letter_up()
-	var _down_from_a: GdUnitAssert = assert_str(at_z).is_equal("ZAA")
-	var _up_from_z: GdUnitAssert = assert_str(picker.initials()).is_equal("AAA")
+	var at_z: String = picker.initials()
+	picker.letter_down()
+	var _up_from_a: GdUnitAssert = assert_str(at_z).is_equal("ZAA")
+	var _down_from_z: GdUnitAssert = assert_str(picker.initials()).is_equal("AAA")
+
+
+func test_initials_arrow_buttons_match_keys() -> void:
+	var picker: InitialsPicker = auto_free(InitialsPicker.new())
+	add_child(picker)
+	var buttons: Array[BaseButton] = picker.buttons()
+	var up: ArrowButton = buttons[0] as ArrowButton
+	var down: ArrowButton = buttons[InitialsPicker.LENGTH] as ArrowButton
+	up.pressed.emit()
+	var after_up: String = picker.initials()
+	down.pressed.emit()
+	down.pressed.emit()
+	var _up: GdUnitAssert = assert_str(after_up).is_equal("ZAA")
+	var _down: GdUnitAssert = assert_str(picker.initials()).is_equal("BAA")
+	var _up_tip: GdUnitAssert = assert_str(up.tooltip_text).is_equal("Previous letter")
+	var _down_tip: GdUnitAssert = assert_str(down.tooltip_text).is_equal("Next letter")
+
+
+func _key_event(key: Key) -> InputEventKey:
+	var event: InputEventKey = InputEventKey.new()
+	event.keycode = key
+	event.physical_keycode = key
+	event.pressed = true
+	return event
 
 
 func test_initials_typing_and_slots() -> void:
