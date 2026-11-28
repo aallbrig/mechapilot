@@ -64,33 +64,65 @@ test_compile_check_counts_uppercase_gd() {
 
 # The sandbox builds its root instead of binding /, so no host Unix socket
 # (Docker, D-Bus, an SSH agent) is reachable from project code.
+#
+# The probe tries to connect to the planted host socket and to every socket the
+# host has bound (on Linux, each path and abstract name in the host's
+# /proc/net/unix, which lists them wherever they live, /usr included), checks the
+# usual Docker sockets, and lists every socket file it can see in the sandbox
+# root except under /proc and the read-only /usr (both covered above: /proc is
+# private, and a host socket in /usr is in the host's list). The project is an
+# empty directory: the probe needs none, and godot-run copies it into the box.
 test_godot_run_hides_host_unix_sockets() {
   d="$(mktemp -d)"
   probe_dir="${HOME}/.cache/mechapilot-sockprobe-$$"
   trap 'kill "${listener:-0}" 2>/dev/null; rm -rf "${d}" "${probe_dir}"' EXIT
-  mkdir -p "${d}/box" "${probe_dir}"
+  mkdir -p "${d}/box" "${d}/project" "${probe_dir}"
   sock="${probe_dir}/host.sock"
   python3 -c 'import socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(60)' "${sock}" &
   listener=$!
   sleep 1
   [ -S "${sock}" ] || return 1
-  # The probe tries the host socket, the usual Docker sockets and, on Linux,
-  # lists every socket it can see.
+  os="$(uname -s)"
+  printf '%s\n' "${sock}" >"${d}/host-sockets"
+  if [ "${os}" = Linux ]; then
+    # Every named host socket: a path, or an abstract name (@...).
+    awk 'NR > 1 && NF >= 8 { print $8 }' /proc/net/unix | sort -u >>"${d}/host-sockets"
+    # The host listing really holds the planted socket (and so is not empty).
+    [ "$(grep -c -x -F "${sock}" "${d}/host-sockets")" -ge 2 ] || return 1
+  fi
+  cat >"${d}/probe.py" <<'EOF'
+import os, socket, sys
+for line in open(sys.argv[1], encoding="utf-8", errors="surrogateescape"):
+    name = line.rstrip("\n")
+    if not name:
+        continue
+    if not name.startswith("@") and os.path.lexists(name):
+        print("VISIBLE", name)
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(2)
+    try:
+        s.connect("\0" + name[1:] if name.startswith("@") else name)
+        print("CONNECTED", name)
+    except OSError:
+        pass
+    finally:
+        s.close()
+EOF
   cat >"${d}/probe.sh" <<'EOF'
-python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$1" 2>/dev/null && echo CONNECTED
+python3 "$1" "$2"
 for s in /var/run/docker.sock /run/docker.sock; do if [ -e "${s}" ]; then echo "VISIBLE ${s}"; fi; done
-if [ "$(uname -s)" = Linux ]; then find / -path /proc -prune -o -type s -print 2>/dev/null; fi
+if [ "$(uname -s)" = Linux ]; then find / \( -path /proc -o -path /usr \) -prune -o -type s -print 2>/dev/null; fi
 true
 EOF
-  out="$(scripts/godot-run "${d}/box" godot --readable "${d}/probe.sh" --exec -- sh "${d}/probe.sh" "${sock}" 2>&1)" || return 1
-  os="$(uname -s)"
+  out="$(scripts/godot-run "${d}/box" "${d}/project" --readable "${d}/probe.sh" --readable "${d}/probe.py" \
+    --readable "${d}/host-sockets" --exec -- sh "${d}/probe.sh" "${d}/probe.py" "${d}/host-sockets" 2>&1)" || return 1
   if [ "${os}" = Linux ]; then
     case "${out}" in *"godot-run: sandbox: bwrap"*) ;; *) return 1 ;; esac
     ! printf '%s\n' "${out}" | grep -v '^godot-run: ' | grep -q .
     return
   fi
   # macOS: no sandbox (documented); the probe really does reach the host socket.
-  case "${out}" in *"godot-run: sandbox: none"*CONNECTED*) ;; *) return 1 ;; esac
+  case "${out}" in *"godot-run: sandbox: none"*"CONNECTED ${sock}"*) ;; *) return 1 ;; esac
 }
 
 # Loading a script runs its static initialisers, so the compile check runs project

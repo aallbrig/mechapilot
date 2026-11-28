@@ -1,17 +1,26 @@
 #!/bin/sh
 # Tests for scripts/godot-test (run by scripts/test-shell): one Godot process
 # per suite, and a failed or crashed suite never reports a pass.
+#
+# The tests of godot-test's own behaviour run against the minimal fixture
+# project in tests/fixtures/godot-min (#125), so their cost does not grow with
+# the game's own suites. Exactly one test runs against the real project.
 
-# A copy of the real project (with GdUnit4) in a temp dir; sets d, p and out,
+# copy_gdunit <project-dir>: the vendored GdUnit4 addon, copied from godot/addons/
+# (never duplicated in git).
+copy_gdunit() {
+  mkdir -p "$1/addons"
+  cp -R godot/addons/gdUnit4 "$1/addons/gdUnit4"
+}
+
+# A copy of the fixture project (with GdUnit4) in a temp dir; sets d, p and out,
 # and removes them on exit.
-copy_project() {
+fixture_project() {
   d="$(mktemp -d)"
   trap 'rm -rf "${d}"' EXIT
   mkdir -p "${d}/godot" "${d}/out"
-  (cd godot && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
-    mkdir -p "${d}/godot/$(dirname "${f}")"
-    cp "godot/${f}" "${d}/godot/${f}"
-  done
+  cp -R tests/fixtures/godot-min/. "${d}/godot/"
+  copy_gdunit "${d}/godot"
   p="${d}/godot"
   out="${d}/out"
 }
@@ -23,23 +32,35 @@ verdict_of() {
   ' "${out}/godot.xml"
 }
 
+# The fixture keeps the real project's strictness and renderer settings, so a
+# harness test there sees the same engine configuration as the game's suites.
+test_godot_min_fixture_keeps_real_project_settings() {
+  for section in debug rendering; do
+    real="$(awk -v s="[${section}]" '/^\[/ { in_s = ($0 == s) } in_s' godot/project.godot)"
+    fix="$(awk -v s="[${section}]" '/^\[/ { in_s = ($0 == s) } in_s' tests/fixtures/godot-min/project.godot)"
+    [ -n "${real}" ] && [ "${real}" = "${fix}" ] || return 1
+  done
+  # No addon is committed in the fixture: it is copied from godot/addons/.
+  [ ! -e tests/fixtures/godot-min/addons ]
+}
+
 test_godot_test_isolates_a_failing_suite() {
-  copy_project
+  fixture_project
   printf 'extends GdUnitTestSuite\n\n\nfunc test_really_fails() -> void:\n\tvar _ok: GdUnitAssert = assert_bool(false).is_true()\n' \
     >"${p}/tests/test_fails.gd"
   rc=0
   scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || rc=$?
   failing="$(verdict_of test_really_fails)"
-  other="$(verdict_of test_events_bus_delivers_typed_signal)"
+  other="$(verdict_of test_fixture_passes)"
   [ "${rc}" -ne 0 ] && [ "${failing}" = fail ] && [ "${other}" = pass ]
 }
 
 test_godot_test_fails_every_case_of_a_hung_suite() {
-  copy_project
+  fixture_project
   printf 'extends GdUnitTestSuite\n\n\nfunc test_a_passes() -> void:\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n\n\nfunc test_b_hangs() -> void:\n\tvar n: int = 0\n\twhile n >= 0:\n\t\tn = (n + 1) %% 7\n\tvar _ok: GdUnitAssert = assert_int(n).is_equal(0)\n' \
     >"${p}/tests/test_hang.gd"
   rc=0
-  GODOT_TEST_TIMEOUT=40 scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || rc=$?
+  GODOT_TEST_TIMEOUT=15 scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || rc=$?
   a="$(verdict_of test_a_passes)"
   b="$(verdict_of test_b_hangs)"
   [ "${rc}" -ne 0 ] && [ "${a}" = fail ] && [ "${b}" = fail ] &&
@@ -47,15 +68,34 @@ test_godot_test_fails_every_case_of_a_hung_suite() {
     ! grep -q 'failures="0"' "${out}/godot.xml"
 }
 
+# The one test against the real project: a copy of godot/ that keeps a top-level
+# and a nested suite (the game's suites themselves run in the ci godot part).
+# Both are reported under their paths, and only their cases are reported.
 test_godot_test_reports_real_project_as_repo_paths() {
-  copy_project
-  scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 &&
-    grep -q "classname=\"${p}/tests/test_events.gd\" name=\"test_events_bus_delivers_typed_signal\"/>" "${out}/godot.xml"
+  d="$(mktemp -d)"
+  trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/godot" "${d}/out"
+  (cd godot && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
+    case "${f}" in
+      ./tests/test_events.gd* | ./tests/game/test_enemy_roster.gd*) ;;
+      ./tests/*test_*.gd | ./tests/*test_*.gd.uid) continue ;;
+      *) ;;
+    esac
+    mkdir -p "${d}/godot/$(dirname "${f}")"
+    cp "godot/${f}" "${d}/godot/${f}"
+  done
+  p="${d}/godot"
+  out="${d}/out"
+  [ "$(find "${p}/tests" -name 'test_*.gd' | wc -l | tr -d ' ')" -eq 2 ] || return 1
+  scripts/godot-test "${out}" "${p}" >/dev/null 2>&1 || return 1
+  grep -q "classname=\"${p}/tests/test_events.gd\" name=\"test_events_bus_delivers_typed_signal\"/>" "${out}/godot.xml" &&
+    grep -q "classname=\"${p}/tests/game/test_enemy_roster.gd\" name=\"test_every_enemy_hit_point_is_pinned_and_shared_with_intel\"/>" "${out}/godot.xml" &&
+    ! grep 'classname=' "${out}/godot.xml" | grep -v -e "classname=\"${p}/tests/test_events.gd\"" -e "classname=\"${p}/tests/game/test_enemy_roster.gd\"" | grep -q .
 }
 
 # ---- Correctness re-review PoC: a suite rewrites the harness through user:// ----
 
-# A throwaway git repo holding the harness and a copy of the project; sets t.
+# A throwaway git repo holding the harness and a copy of the fixture project; sets t.
 mini_repo() {
   t="$(mktemp -d)"
   trap 'rm -rf "${t}"' EXIT
@@ -63,10 +103,8 @@ mini_repo() {
   mkdir -p "${t}/scripts" "${t}/godot"
   for f in godot godot-test godot-run lib-tests lib-godot run-with-timeout tree-guard; do cp "scripts/${f}" "${t}/scripts/${f}"; done
   cp .godot-version .godot-sha512sums "${t}/"
-  (cd godot && find . -path ./.godot -prune -o -type f -print) | while IFS= read -r f; do
-    mkdir -p "${t}/godot/$(dirname "${f}")"
-    cp "godot/${f}" "${t}/godot/${f}"
-  done
+  cp -R tests/fixtures/godot-min/. "${t}/godot/"
+  copy_gdunit "${t}/godot"
   printf 'build/\n.godot/\n' >"${t}/.gitignore"
   printf '#!/bin/sh\necho forged\n' >"${t}/payload.sh"
   printf 'extends GdUnitTestSuite\n\nconst TARGET: String = "%s/scripts/godot"\nconst PAYLOAD: String = "%s/payload.sh"\n\n\nfunc _escape(abs_path: String) -> String:\n\tvar up: String = ""\n\tfor _i: int in OS.get_user_data_dir().count("/"):\n\t\tup += "../"\n\treturn "user://" + up + abs_path.trim_prefix("/")\n\n\nfunc test_probe() -> void:\n\tvar seed_file: FileAccess = FileAccess.open("user://seed.txt", FileAccess.WRITE)\n\tseed_file.close()\n\tprint("probe user dir: ", OS.get_user_data_dir(), " target: ", _escape(TARGET))\n\tvar src: FileAccess = FileAccess.open(PAYLOAD, FileAccess.READ)\n\tvar text: String = "" if src == null else src.get_as_text()\n\tvar dst: FileAccess = FileAccess.open(_escape(TARGET), FileAccess.WRITE)\n\tif dst == null:\n\t\tdst = FileAccess.open(TARGET, FileAccess.WRITE)\n\tif dst != null:\n\t\tvar _w: bool = dst.store_string(text)\n\t\tdst.close()\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n' \
@@ -99,7 +137,7 @@ test_godot_test_harness_rewrite_never_passes_unnoticed() {
 
 # A GDScript test overwriting the shell runner's evidence (written earlier).
 test_godot_test_detects_shell_xml_overwrite() {
-  copy_project
+  fixture_project
   printf '<testsuite name="shell"/>\n' >"${out}/shell.xml"
   cp "${out}/shell.xml" "${d}/shell.xml.orig"
   printf 'extends GdUnitTestSuite\n\n\nfunc test_overwrite() -> void:\n\tvar f: FileAccess = FileAccess.open("%s/shell.xml", FileAccess.WRITE)\n\tif f != null:\n\t\tvar _w: bool = f.store_string("forged")\n\t\tf.close()\n\tvar _ok: GdUnitAssert = assert_bool(true).is_true()\n' \
