@@ -1,0 +1,102 @@
+#!/bin/sh
+# Render the enemy readability captures (#135) with the pinned Godot's real
+# renderer and save them where the readability tests read them.
+#
+# The headless test run has no GPU (Godot's dummy renderer), so the frames the
+# tests measure are rendered here, on a machine with a display: every enemy
+# kind and the player mech in front of every Level's sky, through the gameplay
+# camera (godot/tests/visuals/readability/readability_capture.gd). The captures
+# carry a fingerprint of their render inputs; the tests fail once any of those
+# inputs changes, until this is run again and the new captures are committed.
+#
+# Writes:
+#   godot/tests/visuals/readability/captures.json   (committed; the tests read it)
+#   build/readability/contact_sheet.png             (labelled frames, worst first)
+#   build/readability/contrast.tsv                  (level, sky, subject, spot,
+#                                                    normal, deuteranopia, protanopia)
+#
+# Usage: scripts/godot-capture-readability [project-dir]   (default: godot)
+set -eu
+LC_ALL=C
+export LC_ALL
+here="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=lib-godot
+. "${here}/lib-godot"
+
+project="${1:-godot}"
+timeout_secs="${CAPTURE_TIMEOUT:-300}"
+out_dir="build/readability"
+captures="${project}/tests/visuals/readability/captures.json"
+scene="res://tests/visuals/readability/readability_capture.tscn"
+
+if [ ! -x "${godot_bin}" ]; then
+  printf 'godot-capture-readability: pinned Godot %s is not installed (run: task setup)\n' "${godot_tag}" >&2
+  exit 127
+fi
+if [ -n "${CI:-}" ]; then
+  printf 'godot-capture-readability: needs a display and a GPU; run it locally, not in CI\n' >&2
+  exit 1
+fi
+
+work="$(mktemp -d)"
+pid=""
+cleanup() {
+  if [ -n "${pid}" ]; then kill "${pid}" 2>/dev/null || true; fi
+  rm -rf "${work}"
+}
+trap cleanup EXIT
+
+"${here}/godot-import" "${project}" >"${work}/import.log" 2>&1 || {
+  cat "${work}/import.log" >&2
+  exit 1
+}
+
+# user:// is under the self-contained install's editor_data (or the private
+# HOME when the install is not self-contained). Clear earlier results there.
+find_output() {
+  find "${godot_home}/editor_data" "${work}/home" -type f -name "$1" -path '*Mecha Fighter*' 2>/dev/null | head -n 1
+}
+mkdir -p "${work}/home" "${work}/data" "${work}/config" "${work}/cache"
+for name in readability_done.txt readability_captures.json readability_contact_sheet.png; do
+  old="$(find_output "${name}")"
+  if [ -n "${old}" ]; then rm -f "${old}"; fi
+done
+
+HOME="${work}/home" XDG_DATA_HOME="${work}/data" XDG_CONFIG_HOME="${work}/config" \
+  XDG_CACHE_HOME="${work}/cache" \
+  "${godot_bin}" --path "${project}" --resolution 360x640 "${scene}" >"${work}/run.log" 2>&1 &
+pid=$!
+
+waited=0
+done_file=""
+while [ "${waited}" -lt "${timeout_secs}" ]; do
+  done_file="$(find_output readability_done.txt)"
+  if [ -n "${done_file}" ]; then break; fi
+  if ! kill -0 "${pid}" 2>/dev/null; then break; fi
+  # A script error leaves the scene idle: stop at once.
+  if grep -q 'SCRIPT ERROR:' "${work}/run.log"; then break; fi
+  sleep 1
+  waited=$((waited + 1))
+done
+kill "${pid}" 2>/dev/null || true
+wait "${pid}" 2>/dev/null || true
+pid=""
+
+if [ -z "${done_file}" ]; then
+  tail -n 40 "${work}/run.log" >&2
+  printf 'godot-capture-readability: the capture did not finish\n' >&2
+  exit 1
+fi
+if grep -E '(ERROR|SCRIPT ERROR):' "${work}/run.log" >&2; then
+  printf 'godot-capture-readability: the capture logged errors\n' >&2
+  exit 1
+fi
+
+user_dir="$(dirname "${done_file}")"
+mkdir -p "${out_dir}"
+cp "${user_dir}/readability_captures.json" "${captures}"
+cp "${user_dir}/readability_contact_sheet.png" "${out_dir}/contact_sheet.png"
+sed -n 's/^readability: //p' "${work}/run.log" >"${out_dir}/contrast.tsv"
+summary="$(cat "${done_file}")"
+printf 'godot-capture-readability: %s (%s)\n' "${captures}" "${summary}"
+printf 'godot-capture-readability: %s/contact_sheet.png, %s/contrast.tsv\n' "${out_dir}" "${out_dir}"

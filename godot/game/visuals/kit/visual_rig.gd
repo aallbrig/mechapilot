@@ -40,7 +40,7 @@ func _ready() -> void:
 	_pieces.clear()
 	_collect_pieces(self, _pieces)
 	for piece: VisualPiece in _pieces:
-		piece.bake(palette, bake_key(piece))
+		piece.bake(palette, bake_key(piece), piece_material())
 	for marker_name: StringName in required_markers():
 		if marker(marker_name) == null:
 			push_error("%s: missing required marker %%%s" % [name, marker_name])
@@ -66,6 +66,11 @@ func required_markers() -> Array[StringName]:
 	for phase: int in range(1, phase_count + 1):
 		names.append(phase_name(phase))
 	return names
+
+
+## The shared material every piece of this rig wears: the hull's.
+func piece_material() -> ShaderMaterial:
+	return VisualPiece.HULL_MATERIAL
 
 
 ## The cache key a piece's baked mesh is shared under: the scene, the piece's

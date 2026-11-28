@@ -93,13 +93,17 @@ func test_every_piece_bakes_into_one_surface() -> void:
 	var pieces: int = 0
 	for scene_name: String in _contracts():
 		var rig: VisualRig = _instantiate(scene_name)
+		# Regular enemies share the hostile material (#135); the rest the hull's.
+		var material: ShaderMaterial = (
+			VisualPiece.HOSTILE_MATERIAL if rig is EnemyVisual else VisualPiece.HULL_MATERIAL
+		)
 		for piece: VisualPiece in rig.pieces():
 			pieces += 1
 			var surfaces: int = piece.mesh.get_surface_count() if piece.mesh != null else 0
 			if surfaces != 1 or not piece.primitive_parts().is_empty():
 				bad.append("%s: %s" % [scene_name, piece.name])
-			if piece.material_override != VisualPiece.HULL_MATERIAL:
-				bad.append("%s: %s has no hull material" % [scene_name, piece.name])
+			if piece.material_override != material:
+				bad.append("%s: %s wears the wrong material" % [scene_name, piece.name])
 		rig.free()
 	var _some: GdUnitAssert = assert_int(pieces).is_greater(40)
 	var _baked: GdUnitAssert = assert_array(bad).is_empty()

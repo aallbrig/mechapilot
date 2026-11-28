@@ -22,9 +22,26 @@ const BOLT_PARAM: StringName = &"bolt_x"
 const WORLD_OFFSET_PARAM: StringName = &"world_offset"
 ## Range of the bolt's horizontal position in sky coordinates.
 const BOLT_RANGE: Vector2 = Vector2(-0.9, 0.9)
+## The sky gradient's parameters (sky_common.gdshaderinc) the hostile material
+## shares, so it knows how bright the sky is behind each enemy.
+const GRADIENT_PARAMS: Array[StringName] = [
+	&"zenith_color",
+	&"upper_color",
+	&"horizon_color",
+	&"low_color",
+	&"horizon_height",
+	&"gradient_span",
+	&"parallax",
+	&"world_offset",
+]
+const HOSTILE_ACCENT_PARAM: StringName = &"hostile_accent"
+const HOSTILE_DARK_ABOVE_PARAM: StringName = &"dark_above"
 ## Chance that a strike flickers a second time.
 const DOUBLE_FLASH_CHANCE: float = 0.5
 const DOUBLE_FLASH_DELAY: float = 0.12
+
+## The sky the hostile material matches now (the one followed last).
+static var _hostiles_match: SkyEnvironment = null
 
 ## The Level data id this sky answers to (dawn, storm, sunset, night,
 ## stratosphere, orbit).
@@ -37,6 +54,15 @@ const DOUBLE_FLASH_DELAY: float = 0.12
 @export var lightning_light_boost: float = 2.5
 ## Seed for lightning timing and placement, so a run replays the same.
 @export var lightning_seed: int = 7
+## The hue enemies lean toward in front of this sky (#135): chosen against the
+## sky and away from the player mech's blue and white. The hostile material
+## sets their brightness; this sets their colour.
+@export var hostile_accent: Color = Color(1.0, 0.35, 0.1)
+## The sky luminance, as its gradient estimates it, above which enemies are
+## drawn dark rather than light (hostile.gdshader's dark_above). 0.179 is where
+## both reach the same contrast; a sky whose effects darken its gradient on
+## screen (the storm's churn) sets it higher, so its enemies stay light.
+@export_range(0.0, 1.0) var hostile_dark_above: float = 0.179
 
 var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 var _flash: float = 0.0
@@ -69,8 +95,11 @@ func _process(delta: float) -> void:
 	_apply_flash()
 
 
-## Keep the weather and the cloud wrap centred on the focus.
+## Keep the weather and the cloud wrap centred on the focus. The sky being
+## followed is the one on screen, so the enemies are matched to it.
 func follow(focus: Vector3) -> void:
+	if _hostiles_match != self:
+		match_hostiles()
 	var weather: Node3D = get_node_or_null(WEATHER) as Node3D
 	if weather != null:
 		weather.position = focus
@@ -94,6 +123,27 @@ func shift_origin(offset: Vector3) -> void:
 	var material: ShaderMaterial = sky_material()
 	if material != null:
 		material.set_shader_parameter(WORLD_OFFSET_PARAM, _world_offset)
+	if _hostiles_match == self:
+		VisualPiece.HOSTILE_MATERIAL.set_shader_parameter(WORLD_OFFSET_PARAM, _world_offset)
+
+
+## Match the enemies' shared hostile material to this sky: its gradient (an
+## unset parameter keeps the shared default of sky_common.gdshaderinc) and its
+## hostile accent.
+func match_hostiles() -> void:
+	_hostiles_match = self
+	var hostile: ShaderMaterial = VisualPiece.HOSTILE_MATERIAL
+	var material: ShaderMaterial = sky_material()
+	for param: StringName in GRADIENT_PARAMS:
+		var value: Variant = material.get_shader_parameter(param) if material != null else null
+		hostile.set_shader_parameter(param, value)
+	hostile.set_shader_parameter(HOSTILE_ACCENT_PARAM, hostile_accent)
+	hostile.set_shader_parameter(HOSTILE_DARK_ABOVE_PARAM, hostile_dark_above)
+
+
+## Whether the hostile material is matched to this sky now.
+func hostiles_match() -> bool:
+	return _hostiles_match == self
 
 
 ## The total distance the origin has been moved back by.

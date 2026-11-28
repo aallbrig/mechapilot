@@ -64,6 +64,8 @@ shader_parameter/parallax = null
 script = ExtResource("1_sky_environm")
 sky_id = &"storm"
 lightning_interval = Vector2(3, 8)
+hostile_accent = Color(1, 0.7, 0.1, 1)
+hostile_dark_above = 0.35
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_3")

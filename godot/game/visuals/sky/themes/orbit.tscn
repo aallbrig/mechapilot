@@ -53,6 +53,7 @@ shader_parameter/softness = null
 [node name="OrbitSky" type="Node3D"]
 script = ExtResource("1_sky_environm")
 sky_id = &"orbit"
+hostile_accent = Color(1, 0.8, 0.1, 1)
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_3")
