@@ -47,6 +47,11 @@ const ARC_POINTS: int = 48
 ## Juice: a stick opens with a pop that settles at POP_SETTLE per second.
 const OPEN_POP: float = 0.35
 const POP_SETTLE: float = 10.0
+## The thumb zones (#127): the square in each bottom corner where a resting
+## thumb opens its stick, as wide as a stick drawn at its full open pop. The
+## sticks still open anywhere in their half; these squares are the space other
+## HUD elements (the Boss Gauge) keep clear of.
+const THUMB_ZONE: float = 2.0 * TouchSticks.STICK_RANGE * (1.0 + OPEN_POP)
 
 var _sticks: TouchSticks = TouchSticks.new()
 var _input: PlayerInput
@@ -148,6 +153,17 @@ func update(now: float) -> void:
 func pause_button_rect() -> Rect2:
 	var side: Vector2 = Vector2(PAUSE_SIZE, PAUSE_SIZE)
 	return Rect2(Vector2(size.x - PAUSE_MARGIN - PAUSE_SIZE, PAUSE_MARGIN), side)
+
+
+## The move stick's thumb zone (bottom left), in this node's coordinates.
+func move_zone_rect() -> Rect2:
+	return Rect2(Vector2(0.0, size.y - THUMB_ZONE), Vector2(THUMB_ZONE, THUMB_ZONE))
+
+
+## The aim stick's thumb zone (bottom right), in this node's coordinates.
+func aim_zone_rect() -> Rect2:
+	var corner: Vector2 = Vector2(size.x - THUMB_ZONE, size.y - THUMB_ZONE)
+	return Rect2(corner, Vector2(THUMB_ZONE, THUMB_ZONE))
 
 
 ## Shown in play while the last-used device is touch (on a touch screen) or

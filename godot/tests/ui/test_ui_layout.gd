@@ -18,6 +18,11 @@ const PHONE_WIDTH: float = 360.0
 const MIN_PHONE_PX: float = 14.0
 const MIN_UI_FONT: int = 26
 const TOLERANCE: float = 1.0
+## #127: landscape, and a 390x844 phone in portrait (640 UI pixels wide).
+const GAUGE_SIZES: Array[Vector2] = [UiHarness.LANDSCAPE, Vector2(640.0, 1385.0)]
+## The old top-centre Boss Gauge row's height, as measured: a 26 px label (33 px
+## line) over a 22 px bar.
+const OLD_GAUGE_ROW_HEIGHT: float = 59.0
 
 
 func _controls(root: Node) -> Array[Control]:
@@ -180,3 +185,94 @@ func test_settings_fit_1080p_with_reset_and_back_visible() -> void:
 		h.dispose()
 	var _two_then_one: GdUnitAssert = assert_array(columns).is_equal([2, 1])
 	var _all_visible: GdUnitAssert = assert_array(hidden).is_empty()
+
+
+## The Boss Gauge (#127) sits at the bottom centre, inside the safe margin, and
+## smaller than the old top-centre bar, in landscape and in phone portrait.
+func test_boss_gauge_sits_at_bottom_center() -> void:
+	var misplaced: Array[String] = []
+	for screen_size: Vector2 in GAUGE_SIZES:
+		var h: UiHarness = UiHarness.new(screen_size)
+		add_child(h.host)
+		var hud: Hud = await _hud_in_skirmish(h)
+		var rect: Rect2 = hud.gauge_rect()
+		var safe: Rect2 = Rect2(Vector2.ZERO, screen_size).grow(-UiBuild.SCREEN_MARGIN)
+		if absf(rect.get_center().x - screen_size.x * 0.5) > TOLERANCE:
+			misplaced.append("%s not centred: %s" % [screen_size, rect])
+		if absf(rect.end.y - safe.end.y) > TOLERANCE:
+			misplaced.append("%s not at the bottom: %s" % [screen_size, rect])
+		if not safe.grow(TOLERANCE).encloses(rect):
+			misplaced.append("%s outside the safe margin: %s" % [screen_size, rect])
+		if rect.size.x >= Hud.WIDE_BAR_SIZE.x or rect.size.y >= OLD_GAUGE_ROW_HEIGHT:
+			misplaced.append("%s not smaller than before: %s" % [screen_size, rect])
+		h.dispose()
+	var _bottom_centre: GdUnitAssert = assert_array(misplaced).is_empty()
+
+
+## The Boss Gauge (#127) never overlaps the touch controls' thumb zones (where
+## a resting thumb draws the move and aim sticks), the Pause button or the
+## armor row, in landscape and in phone portrait.
+func test_boss_gauge_clear_of_touch_controls() -> void:
+	var overlaps: Array[String] = []
+	for screen_size: Vector2 in GAUGE_SIZES:
+		var h: UiHarness = UiHarness.new(screen_size)
+		add_child(h.host)
+		var hud: Hud = await _hud_in_skirmish(h)
+		var touch: TouchControls = TouchControls.new()
+		touch.size = screen_size
+		var rect: Rect2 = hud.gauge_rect()
+		var others: Dictionary[String, Rect2] = {
+			"move zone": touch.move_zone_rect(),
+			"aim zone": touch.aim_zone_rect(),
+			"pause button": touch.pause_button_rect(),
+			"armor row": hud.armor_row_rect(),
+		}
+		touch.free()
+		for other: String in others:
+			if rect.intersects(others[other]):
+				overlaps.append("%s %s %s vs %s" % [screen_size, other, others[other], rect])
+		h.dispose()
+	var _clear: GdUnitAssert = assert_array(overlaps).is_empty()
+
+
+## The moved Boss Gauge (#127) behaves as before: hidden behind the Level Intro
+## card, then a fill ratio that follows boss_gauge_changed.
+func test_boss_gauge_still_tracks_points() -> void:
+	var seen: Array[String] = []
+	for screen_size: Vector2 in GAUGE_SIZES:
+		var h: UiHarness = UiHarness.new(screen_size)
+		add_child(h.host)
+		h.reach_title()
+		h.bus.flow.announce_play_requested()
+		var hud: Hud = h.screen(&"Hud") as Hud
+		var during_intro: bool = hud.gauge_shown()
+		h.run.advance(h.run.levels[0].intro_duration + RunHarness.STEP)
+		var after_intro: bool = hud.gauge_shown()
+		h.bus.run.announce_boss_gauge_changed(1000, 4000)
+		var quarter: float = hud.gauge_ratio()
+		h.bus.run.announce_boss_gauge_changed(3000, 4000)
+		var three_quarters: float = hud.gauge_ratio()
+		seen.append(
+			"%s %s %s %.2f %.2f" % [screen_size, during_intro, after_intro, quarter, three_quarters]
+		)
+		h.dispose()
+	var _tracks: GdUnitAssert = (
+		assert_array(seen)
+		. is_equal(
+			[
+				"%s false true 0.25 0.75" % GAUGE_SIZES[0],
+				"%s false true 0.25 0.75" % GAUGE_SIZES[1],
+			]
+		)
+	)
+
+
+## The HUD in the first Skirmish (past the Level Intro, so the gauge shows),
+## laid out.
+func _hud_in_skirmish(h: UiHarness) -> Hud:
+	h.reach_title()
+	h.bus.flow.announce_play_requested()
+	h.run.advance(h.run.levels[0].intro_duration + RunHarness.STEP)
+	await await_idle_frame()
+	await await_idle_frame()
+	return h.screen(&"Hud") as Hud
