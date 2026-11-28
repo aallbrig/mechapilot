@@ -1,0 +1,31 @@
+#!/bin/sh
+# Tests for the Marketing Site's credits (#105), on a real Hugo build of a
+# private copy of site/ (so the build never writes the repository).
+
+# Prints the text of the footer's Credits block in a built page, tags removed.
+footer_credits() {
+  tr '\n' ' ' <"$1" |
+    sed -e 's/.*class="*site-footer__credits"*[^>]*>//' -e 's#</div>.*##' \
+      -e 's/<[^>]*>/ /g' -e 's/[[:space:]][[:space:]]*/ /g'
+}
+
+test_site_credits_name_the_creator() {
+  d="$(mktemp -d)"
+  cp -R site "${d}/site"
+  rc=0
+  HUGO_PARAMS_COPYRIGHTYEAR=2026 hugo build --quiet --source "${d}/site" \
+    --environment production --destination "${d}/out" --cacheDir "${d}/cache" \
+    --panicOnWarning >/dev/null 2>&1 || rc=$?
+  pages=0
+  named=0
+  for page in "${d}/out/index.html" "${d}/out/404.html"; do
+    [ -f "${page}" ] || continue
+    pages=$((pages + 1))
+    case "$(footer_credits "${page}")" in
+    *"Created by Andrew Allbright"*) named=$((named + 1)) ;;
+    *) ;;
+    esac
+  done
+  rm -rf "${d}"
+  [ "${rc}" = 0 ] && [ "${pages}" = 2 ] && [ "${named}" = 2 ]
+}

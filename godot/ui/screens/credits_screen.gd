@@ -6,14 +6,26 @@ extends UiScreen
 ## credit shows the asset's name, its author and its licence (file paths are
 ## for the asset-credits check, not for players). The full SIL Open Font
 ## Licence of each bundled font follows the list: the OFL requires it to ship
-## with the font, and the Web export includes those files too.
+## with the font, and the Web export includes those files too. The list opens
+## with the game's creator (#105), read from the same file's "Created by" line.
 
 const SCROLL_SPEED: float = 40.0
 const SCROLL_START_DELAY: float = 1.5
 const LIST_HEIGHT: float = 360.0
+const CREATOR_PREFIX: String = "Created by "
+const CREATOR_GAP: int = 4
+const CREATOR_POP_FROM: float = 0.85
+const CREATOR_POP_DELAY: float = 0.1
+## The creator's name starts at the TitleLabel size and steps down by this
+## until it fits the column on one line, but never below the floor.
+const CREATOR_FIT_STEP: int = 2
+const CREATOR_MIN_FONT_SIZE: int = 32
 
 var _scroll: ScrollContainer
 var _list: VBoxContainer
+var _opening: VBoxContainer
+var _creator_name: Label
+
 var _back: Button
 var _scroll_tween: Tween
 var _credits: Array[PackedStringArray] = []
@@ -30,6 +42,7 @@ func _ready() -> void:
 	_list = UiBuild.column(18)
 	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_scroll.add_child(_list)
+	_add_opening(read_creator())
 	_credits = read_credits()
 	for credit: PackedStringArray in _credits:
 		var entry: VBoxContainer = UiBuild.column(2)
@@ -65,6 +78,21 @@ func handle_cancel() -> bool:
 	return true
 
 
+## The labels of the entry the list opens with: "Created by", then the
+## creator's name in the title style.
+func opening() -> Array[Label]:
+	var labels: Array[Label] = []
+	if _opening != null:
+		for child: Node in _opening.get_children():
+			labels.append(child as Label)
+	return labels
+
+
+## Where the creator entry sits in the list (0: before every other entry).
+func opening_index() -> int:
+	return _opening.get_index() if _opening != null else -1
+
+
 ## The credits shown: [asset, source, licence] per row of CREDITS.md.
 func credits() -> Array[PackedStringArray]:
 	return _credits.duplicate()
@@ -87,6 +115,32 @@ static func read_font_licences() -> PackedStringArray:
 			continue
 		var _added: bool = texts.append(file.get_as_text().strip_edges())
 	return texts
+
+
+## The creator named on the "Created by <name>." line of res://CREDITS.md,
+## or "" when the file has no such line above its asset table.
+static func read_creator() -> String:
+	var file: FileAccess = FileAccess.open("res://CREDITS.md", FileAccess.READ)
+	if file == null:
+		push_error("CreditsScreen: res://CREDITS.md is missing")
+		return ""
+	var creator: String = creator_in(file.get_as_text())
+	if creator.is_empty():
+		push_error('CreditsScreen: res://CREDITS.md has no "Created by" line above its table')
+	return creator
+
+
+## The name on the first "Created by <name>." line of a CREDITS.md text that
+## comes before the asset table; a table cell or a line below the table never
+## counts. "" when there is none.
+static func creator_in(text: String) -> String:
+	for raw: String in text.split("\n"):
+		var line: String = raw.strip_edges()
+		if line.begins_with("|"):
+			break
+		if line.begins_with(CREATOR_PREFIX) and line.ends_with("."):
+			return line.trim_prefix(CREATOR_PREFIX).trim_suffix(".").strip_edges()
+	return ""
 
 
 ## The rows of the asset table in res://CREDITS.md, as plain text cells.
@@ -129,8 +183,40 @@ static func plain_text(cell: String) -> String:
 	return text.replace(" ,", ",").strip_edges().trim_prefix(",").strip_edges()
 
 
+func _add_opening(creator: String) -> void:
+	if creator.is_empty():
+		return
+	_opening = UiBuild.column(CREATOR_GAP)
+	var by: Label = UiBuild.label(CREATOR_PREFIX.strip_edges(), &"ComboLabel")
+	by.uppercase = true
+	_opening.add_child(by)
+	_creator_name = UiBuild.paragraph(creator, &"TitleLabel")
+	_opening.add_child(_creator_name)
+	_list.add_child(_opening)
+	_fit_on_one_line(_creator_name, UiBuild.COLUMN_WIDTH)
+
+
+## Steps `label`'s font size down from its theme size until its text, with its
+## outline, fits `width` on one line (or the size reaches the floor).
+static func _fit_on_one_line(label: Label, width: float) -> void:
+	var font: Font = label.get_theme_font(&"font")
+	var outline: int = label.get_theme_constant(&"outline_size")
+	var font_size: int = label.get_theme_font_size(&"font_size")
+	while (
+		font_size > CREATOR_MIN_FONT_SIZE
+		and (
+			font.get_string_size(label.text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x + outline
+			> width
+		)
+	):
+		font_size -= CREATOR_FIT_STEP
+	label.add_theme_font_size_override(&"font_size", font_size)
+
+
 func _on_enter() -> void:
 	_scroll.scroll_vertical = 0
+	if _creator_name != null:
+		TweenFx.pop(_creator_name, CREATOR_POP_FROM, TweenFx.POP_TIME, CREATOR_POP_DELAY)
 	if _scroll_tween != null:
 		_scroll_tween.kill()
 	if TweenFx.reduced_motion:
