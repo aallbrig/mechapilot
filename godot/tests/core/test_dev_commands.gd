@@ -78,6 +78,8 @@ func test_dev_commands_act_through_rules_and_mark_run() -> void:
 	_command(DevCommand.Command.TOGGLE_INVULNERABILITY)
 	_run.bus.player.announce_player_hit(DamageSource.Source.ENEMY_COLLISION, Vector3.ZERO, 0)
 	var shielded: int = _run.ledger.armor()
+	var window_opened: bool = _run.ledger.is_invulnerable()
+	_run.advance(RunRules.HIT_INVULNERABILITY + RunHarness.STEP)
 	_command(DevCommand.Command.TOGGLE_INVULNERABILITY)
 	_run.bus.player.announce_player_hit(DamageSource.Source.ENEMY_COLLISION, Vector3.ZERO, 0)
 	var unshielded: int = _run.ledger.armor()
@@ -112,6 +114,7 @@ func test_dev_commands_act_through_rules_and_mark_run() -> void:
 	)
 	var _repaired: GdUnitAssert = assert_int(restored).is_equal(RunRules.MAX_ARMOR)
 	var _shield: GdUnitAssert = assert_int(shielded).is_equal(RunRules.MAX_ARMOR)
+	var _window: GdUnitAssert = assert_bool(window_opened).is_true()
 	var _unshield: GdUnitAssert = assert_int(unshielded).is_equal(
 		RunRules.MAX_ARMOR - RunRules.COLLISION_DAMAGE
 	)
@@ -318,3 +321,29 @@ func test_kill_all_with_no_enemies_leaves_the_run_clean() -> void:
 	field.free()
 	var _clean: GdUnitAssert = assert_bool(clean_when_empty).is_true()
 	var _marked: GdUnitAssert = assert_bool(marked_when_killed).is_true()
+
+
+func test_dev_invulnerability_holds_through_the_strike_path() -> void:
+	var fight: FightHarness = FightHarness.new()
+	add_child(fight.world)
+	var dev: DevCommands = DevCommands.new(
+		fight.bus, fight.run.machine, fight.run.ledger, fight.run.progression
+	)
+	var settings: GameSettings = GameSettings.new()
+	settings.developer_mode = true
+	fight.bus.profile.announce_settings_changed(settings)
+	fight.reach_skirmish()
+	fight.advance(RunRules.RESPAWN_INVULNERABILITY + FightHarness.STEP)
+	var toggled: bool = dev.run_command(DevCommand.Command.TOGGLE_INVULNERABILITY)
+	var _rammer: Enemy = fight.order(EnemyKind.Kind.FIGHTER, 0.0, 0.0)
+	fight.advance(FightHarness.STEP * 3.0)
+	var hits: int = fight.player_hits.size()
+	var armor: int = fight.run.ledger.armor()
+	var windowed: bool = fight.mech.is_invulnerable()
+	var alive: bool = fight.mech.is_alive()
+	fight.dispose()
+	var _on: GdUnitAssert = assert_bool(toggled).is_true()
+	var _struck: GdUnitAssert = assert_int(hits).is_equal(1)
+	var _unharmed: GdUnitAssert = assert_int(armor).is_equal(RunRules.MAX_ARMOR)
+	var _window: GdUnitAssert = assert_bool(windowed).is_true()
+	var _alive: GdUnitAssert = assert_bool(alive).is_true()

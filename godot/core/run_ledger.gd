@@ -123,8 +123,8 @@ func summary(victory: bool) -> RunSummary:
 
 
 ## Turns developer invulnerability on or off and returns the new state. While
-## it is on every hit is ignored. Turning it on marks the Run dev-assisted
-## (and every Run started while it stays on).
+## it is on a hit does no damage (it still opens the hit window). Turning it
+## on marks the Run dev-assisted (and every Run started while it stays on).
 func toggle_dev_invulnerability() -> bool:
 	_dev_invulnerable = not _dev_invulnerable
 	if _dev_invulnerable:
@@ -257,7 +257,12 @@ func _on_enemy_destroyed(
 
 
 func _on_player_hit(source: DamageSource.Source, position: Vector3, attack_damage: int) -> void:
-	if not GameState.is_timed(_phase) or _down or _invulnerable_left > 0.0 or _dev_invulnerable:
+	if not GameState.is_timed(_phase) or _down or _invulnerable_left > 0.0:
+		return
+	if _dev_invulnerable:
+		# No damage, but the hit window still opens, so contact that repeats
+		# every frame lands once per window, as for any hit.
+		_start_invulnerability(RunRules.HIT_INVULNERABILITY)
 		return
 	var damage: int = RunRules.damage_for(source, attack_damage)
 	var before: int = _armor
